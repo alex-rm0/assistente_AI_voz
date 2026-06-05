@@ -63,7 +63,10 @@ def _resolve_workspace_file(raw_filename: str, root: Path) -> Path | None:
 
 @tool_registry.register(
     name="list_workspace_files",
-    description="Lista os ficheiros existentes dentro da pasta workspace.",
+    description=(
+        "Lista os ficheiros existentes dentro da pasta workspace. "
+        "Usa APENAS quando o utilizador pede explicitamente para listar, ver ou mostrar os ficheiros da pasta workspace."
+    ),
     permissions=("read:workspace",),
 )
 def list_workspace_files(workspace_path: Path | None = None) -> str:
@@ -97,7 +100,8 @@ def list_workspace_files(workspace_path: Path | None = None) -> str:
     description=(
         "Le o conteudo de um ficheiro dentro da pasta workspace. "
         "Suporta .txt, .md, .docx e .pdf. "
-        "Usa este tool para qualquer pedido de leitura ou resumo de ficheiro. "
+        "Usa APENAS quando o utilizador menciona ou implica claramente um nome de ficheiro especifico para ler ou resumir. "
+        "NAO usar para perguntas gerais, conversas, ou quando nenhum ficheiro concreto e mencionado. "
         "Argumentos: filename (nome do ficheiro, com ou sem extensao)."
     ),
     permissions=("read:workspace",),

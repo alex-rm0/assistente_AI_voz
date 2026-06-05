@@ -105,6 +105,15 @@ class AssistantEngine:
             return None
 
         arguments = self._prepare_tool_arguments(decision.get("arguments", {}))
+
+        # Safety net: read_workspace_file requires a filename argument.
+        # If the LLM chose this tool without a clear filename, skip the tool
+        # and let the regular LLM chat handle the message instead.
+        if tool_name == "read_workspace_file":
+            filename = arguments.get("filename", "").strip().strip("\"'")
+            if not filename:
+                return None
+
         response = tool.run(arguments)
         if tool.remember_result:
             self.memory.append_pair(user_message, response)

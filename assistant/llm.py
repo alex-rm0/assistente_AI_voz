@@ -35,8 +35,19 @@ class OllamaClient:
     def choose_tool(self, user_message: str, tools_description: str) -> dict[str, Any]:
         system_prompt = (
             "Es um seletor de ferramentas para o AssistenteIA.\n"
-            "Decide se a mensagem do utilizador precisa de uma ferramenta.\n"
+            "A tua unica tarefa e decidir se a mensagem precisa de uma ferramenta de ficheiros.\n"
             "Responde apenas em JSON valido, sem markdown.\n\n"
+            "REGRAS OBRIGATORIAS:\n"
+            "- So usa uma ferramenta se a mensagem pedir CLARAMENTE uma acao sobre ficheiros na workspace.\n"
+            "- Perguntas sobre o assistente, sobre perfis, sobre capacidades, saudacoes, conversas gerais "
+            "ou qualquer topico que nao envolva um ficheiro especifico -> SEMPRE {\"tool\": null}.\n"
+            "- 'list_workspace_files': so usa se o utilizador pede para listar, mostrar ou ver os ficheiros "
+            "da pasta workspace.\n"
+            "- 'read_workspace_file': so usa se o utilizador menciona ou implica claramente um nome de "
+            "ficheiro especifico para ler ou resumir.\n"
+            "- 'create_workspace_file': so usa se o utilizador pede explicitamente para criar ou guardar "
+            "um ficheiro com conteudo.\n"
+            "- Em caso de duvida, responde sempre com {\"tool\": null}.\n\n"
             "Formato quando usar ferramenta:\n"
             '{"tool": "nome_da_ferramenta", "arguments": {"chave": "valor"}}\n\n'
             "Formato quando nao usar ferramenta:\n"
