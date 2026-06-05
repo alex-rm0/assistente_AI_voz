@@ -5,6 +5,7 @@ from html import escape
 
 from PySide6.QtCore import QObject, QThread, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -40,11 +41,14 @@ class MainWindow(QMainWindow):
         model_name: str,
         responder: Callable[[str], str],
         clear_history: Callable[[], None],
+        change_profile: Callable[[str], None],
+        profile_names: list[str],
         initial_messages: list[dict[str, str]] | None = None,
     ) -> None:
         super().__init__()
         self.responder = responder
         self.clear_history = clear_history
+        self.change_profile = change_profile
         self.thread: QThread | None = None
         self.worker: ChatWorker | None = None
 
@@ -69,13 +73,28 @@ class MainWindow(QMainWindow):
         model_label = QLabel(f"Modelo: {model_name}")
         model_label.setObjectName("modelLabel")
 
+        profile_label = QLabel("Perfil:")
+        profile_label.setObjectName("profileLabel")
+
+        self.profile_combo = QComboBox()
+        self.profile_combo.setObjectName("profileCombo")
+        for name in profile_names:
+            self.profile_combo.addItem(name)
+        self.profile_combo.currentTextChanged.connect(self._on_profile_changed)
+
+        top_bar = QHBoxLayout()
+        top_bar.addWidget(model_label)
+        top_bar.addStretch()
+        top_bar.addWidget(profile_label)
+        top_bar.addWidget(self.profile_combo)
+
         input_layout = QHBoxLayout()
         input_layout.addWidget(self.input_box, 1)
         input_layout.addWidget(self.clear_button)
         input_layout.addWidget(self.send_button)
 
         layout = QVBoxLayout()
-        layout.addWidget(model_label)
+        layout.addLayout(top_bar)
         layout.addWidget(self.chat_area, 1)
         layout.addLayout(input_layout)
 
@@ -113,10 +132,27 @@ class MainWindow(QMainWindow):
                 color: #425466;
                 font-size: 12px;
             }
+            QLabel#profileLabel {
+                color: #425466;
+                font-size: 12px;
+            }
+            QComboBox#profileCombo {
+                background: #ffffff;
+                border: 1px solid #c9d2df;
+                border-radius: 6px;
+                padding: 4px 8px;
+                font-size: 12px;
+                min-width: 120px;
+            }
             """
         )
 
         self._load_initial_messages(initial_messages or [])
+
+    def _on_profile_changed(self, profile_name: str) -> None:
+        if self.thread is not None:
+            return
+        self.change_profile(profile_name)
 
     def send_message(self) -> None:
         message = self.input_box.text().strip()

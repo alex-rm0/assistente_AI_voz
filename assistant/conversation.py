@@ -39,6 +39,10 @@ class AssistantEngine:
         self.workspace = WorkspaceGuard(workspace_path)
         self.base_system_prompt = base_system_prompt
 
+    def set_profile(self, system_prompt: str) -> None:
+        """Switch the active profile by replacing the base system prompt."""
+        self.base_system_prompt = system_prompt
+
     def respond(self, user_message: str) -> str:
         # Local memory questions are answered before tool routing so the LLM
         # cannot confuse "lembras-te da pasta?" with "lista a pasta".
