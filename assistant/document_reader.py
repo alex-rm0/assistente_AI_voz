@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from assistant.tool_registry import tool_registry
 from assistant.workspace import WorkspaceFileContent, WorkspaceGuard
 
 DEFAULT_WORKSPACE_PATH = Path(__file__).resolve().parents[1] / "workspace"
@@ -97,41 +96,3 @@ def read_pdf_content(filename: str, workspace_path: Path | None = None) -> Works
         return WorkspaceFileContent(raw_filename, "", f"Nao consegui ler '{raw_filename}': {exc}")
 
     return WorkspaceFileContent(target.relative_to(root).as_posix(), content)
-
-
-@tool_registry.register(
-    name="read_workspace_docx",
-    description="Le o conteudo de um ficheiro .docx dentro da pasta workspace. Argumentos: filename.",
-    permissions=("read:workspace",),
-    remember_result=False,
-)
-def read_workspace_docx(filename: str, workspace_path: Path | None = None) -> str:
-    """Reads a .docx file inside the workspace folder only."""
-
-    result = read_docx_content(filename, workspace_path)
-    if result.error is not None:
-        return result.error
-
-    if not result.content.strip():
-        return f"O ficheiro '{result.filename}' esta vazio ou nao tem texto extraivel."
-
-    return f"Conteudo de {result.filename}:\n\n{result.content}"
-
-
-@tool_registry.register(
-    name="read_workspace_pdf",
-    description="Le o conteudo de um ficheiro .pdf dentro da pasta workspace. Argumentos: filename.",
-    permissions=("read:workspace",),
-    remember_result=False,
-)
-def read_workspace_pdf(filename: str, workspace_path: Path | None = None) -> str:
-    """Reads a .pdf file inside the workspace folder only."""
-
-    result = read_pdf_content(filename, workspace_path)
-    if result.error is not None:
-        return result.error
-
-    if not result.content.strip():
-        return f"O ficheiro '{result.filename}' esta vazio ou nao tem texto extraivel."
-
-    return f"Conteudo de {result.filename}:\n\n{result.content}"

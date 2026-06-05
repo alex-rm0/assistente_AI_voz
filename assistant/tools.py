@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import unicodedata
 from pathlib import Path
 
 from assistant.tool_registry import tool_registry
@@ -10,7 +11,54 @@ DEFAULT_WORKSPACE_PATH = Path(__file__).resolve().parents[1] / "workspace"
 INTERNAL_WORKSPACE_FILES = {"conversation.json", ".gitkeep"}
 READABLE_EXTENSIONS = {".txt", ".md"}
 DOCUMENT_EXTENSIONS = {".docx", ".pdf"}
+ALL_READABLE_EXTENSIONS = READABLE_EXTENSIONS | DOCUMENT_EXTENSIONS
 WRITABLE_EXTENSIONS = {".txt"}
+
+
+def _normalize_name(text: str) -> str:
+    """Lowercase + strip accents for fuzzy matching."""
+    normalized = unicodedata.normalize("NFKD", text.lower())
+    return "".join(ch for ch in normalized if not unicodedata.combining(ch))
+
+
+def _resolve_workspace_file(raw_filename: str, root: Path) -> Path | None:
+    """
+    Try to find a readable file in the workspace by name.
+    Attempts, in order:
+      1. Exact path match.
+      2. Add each known extension when the name has none.
+      3. Fuzzy match: normalize unicode/case and check if any file stem
+         starts with or contains the given name fragment.
+    Returns the resolved Path or None if nothing matches.
+    """
+    candidate = Path(raw_filename)
+
+    # 1. Exact match
+    exact = root / raw_filename
+    if exact.exists() and exact.is_file() and exact.suffix.lower() in ALL_READABLE_EXTENSIONS:
+        return exact
+
+    # 2. Try appending extensions when no extension was given
+    if not candidate.suffix:
+        for ext in sorted(ALL_READABLE_EXTENSIONS):
+            p = root / (raw_filename + ext)
+            if p.exists() and p.is_file():
+                return p
+
+    # 3. Fuzzy: normalize and look for a partial stem match
+    norm_input = _normalize_name(candidate.stem or raw_filename)
+    best: Path | None = None
+    for f in sorted(root.rglob("*")):
+        if not f.is_file():
+            continue
+        if f.suffix.lower() not in ALL_READABLE_EXTENSIONS:
+            continue
+        norm_stem = _normalize_name(f.stem)
+        if norm_stem.startswith(norm_input) or norm_input in norm_stem:
+            best = f
+            break
+
+    return best
 
 
 @tool_registry.register(
@@ -46,25 +94,32 @@ def list_workspace_files(workspace_path: Path | None = None) -> str:
 
 @tool_registry.register(
     name="read_workspace_file",
-    description="Le o conteudo de um ficheiro .txt ou .md dentro da pasta workspace. Argumentos: filename.",
+    description=(
+        "Le o conteudo de um ficheiro dentro da pasta workspace. "
+        "Suporta .txt, .md, .docx e .pdf. "
+        "Usa este tool para qualquer pedido de leitura ou resumo de ficheiro. "
+        "Argumentos: filename (nome do ficheiro, com ou sem extensao)."
+    ),
     permissions=("read:workspace",),
     remember_result=False,
 )
 def read_workspace_file(filename: str, workspace_path: Path | None = None) -> str:
-    """Reads a .txt or .md file inside the workspace folder only."""
+    """Reads any supported file inside the workspace folder."""
 
     result = read_workspace_file_content(filename, workspace_path)
     if result.error is not None:
         return result.error
 
     if not result.content.strip():
-        return f"O ficheiro '{result.filename}' esta vazio."
+        return f"O ficheiro '{result.filename}' esta vazio ou nao tem texto extraivel."
 
     return f"Conteudo de {result.filename}:\n\n{result.content}"
 
 
 def read_workspace_file_content(filename: str, workspace_path: Path | None = None) -> WorkspaceFileContent:
-    """Returns raw text content for a .txt or .md file inside workspace only."""
+    """Returns raw text content for any supported file inside workspace only."""
+
+    from assistant.document_reader import read_docx_content, read_pdf_content
 
     if not filename or not filename.strip():
         return WorkspaceFileContent("", "", "Indica o nome do ficheiro que queres ler.")
@@ -75,38 +130,44 @@ def read_workspace_file_content(filename: str, workspace_path: Path | None = Non
     if candidate.is_absolute() or ".." in candidate.parts:
         return WorkspaceFileContent(raw_filename, "", "Nao posso ler caminhos fora da pasta workspace.")
 
-    if candidate.suffix.lower() not in READABLE_EXTENSIONS:
-        return WorkspaceFileContent(
-            raw_filename,
-            "",
-            "So posso ler ficheiros de texto simples com extensao .txt ou .md.",
-        )
-
     workspace = WorkspaceGuard(workspace_path or DEFAULT_WORKSPACE_PATH, create=False)
     root = workspace.resolve()
 
     if not root.exists():
         return WorkspaceFileContent(raw_filename, "", "A pasta workspace nao existe.")
 
+    # Resolve the actual file path (with fuzzy matching)
     try:
-        target = workspace.resolve(raw_filename)
+        workspace.resolve(raw_filename)  # security check on the raw input
     except ValueError:
         return WorkspaceFileContent(raw_filename, "", "Nao posso ler caminhos fora da pasta workspace.")
 
-    if not target.exists():
-        return WorkspaceFileContent(raw_filename, "", f"O ficheiro '{raw_filename}' nao existe na pasta workspace.")
+    resolved = _resolve_workspace_file(raw_filename, root)
 
-    if not target.is_file():
-        return WorkspaceFileContent(raw_filename, "", f"'{raw_filename}' nao e um ficheiro.")
+    if resolved is None:
+        return WorkspaceFileContent(
+            raw_filename,
+            "",
+            f"Nao encontrei nenhum ficheiro com o nome '{raw_filename}' na pasta workspace.",
+        )
 
+    ext = resolved.suffix.lower()
+
+    if ext == ".docx":
+        return read_docx_content(resolved.relative_to(root).as_posix(), root)
+
+    if ext == ".pdf":
+        return read_pdf_content(resolved.relative_to(root).as_posix(), root)
+
+    # .txt / .md
     try:
-        content = target.read_text(encoding="utf-8")
+        content = resolved.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return WorkspaceFileContent(raw_filename, "", f"Nao consegui ler '{raw_filename}' como texto UTF-8.")
     except OSError as exc:
         return WorkspaceFileContent(raw_filename, "", f"Nao consegui ler '{raw_filename}': {exc}")
 
-    return WorkspaceFileContent(target.relative_to(root).as_posix(), content)
+    return WorkspaceFileContent(resolved.relative_to(root).as_posix(), content)
 
 
 @tool_registry.register(

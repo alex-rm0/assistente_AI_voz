@@ -9,7 +9,6 @@ from assistant.long_term_memory import LongTermMemory
 from assistant.memory import ConversationMemory
 from assistant.security import check_user_request
 from assistant.tool_registry import ToolRegistry
-from assistant.document_reader import read_docx_content, read_pdf_content
 from assistant.tools import read_workspace_file_content
 from assistant.workspace import WorkspaceGuard
 
@@ -108,15 +107,8 @@ class AssistantEngine:
         return response
 
     def _try_summarize(self, user_message: str) -> str | None:
-        _DOCUMENT_READERS = {
-            "read_workspace_file": read_workspace_file_content,
-            "read_workspace_docx": read_docx_content,
-            "read_workspace_pdf": read_pdf_content,
-        }
-
         decision = self.llm.choose_tool(user_message, self.tools.describe())
-        tool_name = decision.get("tool")
-        if tool_name not in _DOCUMENT_READERS:
+        if decision.get("tool") != "read_workspace_file":
             return None
 
         arguments = decision.get("arguments", {})
@@ -127,8 +119,7 @@ class AssistantEngine:
         if not _looks_like_summary_request(user_message):
             return None
 
-        reader = _DOCUMENT_READERS[tool_name]
-        file_content = reader(filename, self.workspace.resolve())
+        file_content = read_workspace_file_content(filename, self.workspace.resolve())
         if file_content.error is not None:
             return file_content.error
         if len(file_content.content) > MAX_SUMMARY_CHARACTERS:
