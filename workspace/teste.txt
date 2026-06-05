@@ -1,0 +1,1 @@
+Este ficheiro serve apenas para testar a listagem segura da pasta workspace.

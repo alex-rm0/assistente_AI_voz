@@ -1,0 +1,20 @@
+{
+  "app_name": "AssistenteIA",
+  "ollama": {
+    "base_url": "http://127.0.0.1:11434",
+    "model": "llama3.2",
+    "timeout_seconds": 120
+  },
+  "assistant": {
+    "system_prompt": "Es o AssistenteIA, um assistente local para Windows 11. Responde em portugues de Portugal, de forma clara e util. Mantem-te seguro: nao executes comandos do sistema, nao acedas a ficheiros fora da pasta workspace e nao finjas ter capacidades que ainda nao existem nesta versao."
+  },
+  "workspace": {
+    "path": "workspace"
+  },
+  "memory": {
+    "data_path": "data",
+    "history_file": "history.json",
+    "long_term_db": "long_term_memory.sqlite",
+    "max_messages": 20
+  }
+}
