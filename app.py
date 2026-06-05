@@ -10,8 +10,9 @@ from assistant.long_term_memory import LongTermMemory
 from assistant.memory import ConversationMemory
 from assistant.tool_registry import tool_registry
 
-# Importing assistant.tools registers all built-in tools automatically.
+# Importing these modules registers all built-in tools automatically.
 import assistant.tools  # noqa: F401
+import assistant.document_reader  # noqa: F401
 
 
 BASE_DIR = Path(__file__).resolve().parent
