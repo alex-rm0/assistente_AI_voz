@@ -7,9 +7,16 @@ import pytest
 from assistant.tools import (
     WorkspaceGuard,
     create_workspace_file,
+    get_active_application,
+    get_active_window,
+    get_last_context_snapshot,
+    get_open_windows,
+    get_presence_state,
+    get_recent_activity,
     list_workspace_files,
     read_workspace_file,
 )
+from assistant.presence_manager import PresenceManager, PresenceState
 
 
 def test_list_workspace_files_shows_files(tmp_path: Path) -> None:
@@ -122,3 +129,24 @@ def test_workspace_guard_blocks_outside_paths(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError):
         guard.resolve("../fora.txt")
+
+
+def test_context_observer_tools_return_clear_message_without_observer() -> None:
+    expected = (
+        "Consigo tentar observar o computador, mas ainda não tenho dados suficientes. "
+        "Experimenta mudar de janela ou aguardar alguns segundos."
+    )
+
+    assert get_active_window() == expected
+    assert get_active_application() == expected
+    assert get_open_windows() == expected
+    assert get_recent_activity() == expected
+    assert get_last_context_snapshot() == expected
+
+
+def test_get_presence_state_uses_presence_manager() -> None:
+    presence = PresenceManager(PresenceState.FOCUS_MODE)
+
+    result = get_presence_state(presence)
+
+    assert result.startswith("Estou em FOCUS_MODE.")

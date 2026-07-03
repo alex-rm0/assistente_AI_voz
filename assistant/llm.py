@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -12,6 +13,7 @@ class OllamaSettings:
     base_url: str
     model: str
     timeout_seconds: int = 120
+    debug_performance: bool = False
 
 
 class OllamaClient:
@@ -32,15 +34,25 @@ class OllamaClient:
 
         return self._chat_messages(messages, response_format=response_format)
 
-    def choose_tool(self, user_message: str, tools_description: str) -> dict[str, Any]:
+    def choose_tool(
+        self,
+        user_message: str,
+        tools_description: str,
+        profile_name: str | None = None,
+        active_contexts: list[str] | None = None,
+    ) -> dict[str, Any]:
+        context_label = ", ".join(active_contexts or []) or profile_name or "desconhecido"
         system_prompt = (
             "Es um seletor de ferramentas para o AssistenteIA.\n"
             "A tua unica tarefa e decidir se a mensagem precisa de uma ferramenta de ficheiros.\n"
+            f"Contextos ativos da conversa: {context_label}.\n"
             "Responde apenas em JSON valido, sem markdown.\n\n"
             "REGRAS OBRIGATORIAS:\n"
             "- So usa uma ferramenta se a mensagem pedir CLARAMENTE uma acao sobre ficheiros na workspace.\n"
             "- Perguntas sobre o assistente, sobre perfis, sobre capacidades, saudacoes, conversas gerais "
             "ou qualquer topico que nao envolva um ficheiro especifico -> SEMPRE {\"tool\": null}.\n"
+            "- Perguntas sobre janelas, aplicacoes, programas, atividade do computador ou monitorizacao "
+            "devem usar uma ferramenta do Context Observer quando disponivel; nunca inventar esta informacao.\n"
             "- 'list_workspace_files': so usa se o utilizador pede para listar, mostrar ou ver os ficheiros "
             "da pasta workspace.\n"
             "- 'read_workspace_file': so usa se o utilizador menciona ou implica claramente um nome de "
@@ -49,9 +61,9 @@ class OllamaClient:
             "um ficheiro com conteudo.\n"
             "- Em caso de duvida, responde sempre com {\"tool\": null}.\n\n"
             "Formato quando usar ferramenta:\n"
-            '{"tool": "nome_da_ferramenta", "arguments": {"chave": "valor"}}\n\n'
+            '{"tool": "nome_da_ferramenta", "arguments": {"chave": "valor"}, "reason": "motivo curto"}\n\n'
             "Formato quando nao usar ferramenta:\n"
-            '{"tool": null, "arguments": {}}\n\n'
+            '{"tool": null, "arguments": {}, "reason": "motivo curto"}\n\n'
             "Ferramentas disponiveis:\n"
             f"{tools_description}\n"
         )
@@ -72,14 +84,18 @@ class OllamaClient:
 
         tool_name = decision.get("tool")
         arguments = decision.get("arguments", {})
+        reason = decision.get("reason", "")
         if tool_name is not None and not isinstance(tool_name, str):
             tool_name = None
         if not isinstance(arguments, dict):
             arguments = {}
+        if not isinstance(reason, str):
+            reason = ""
 
-        return {"tool": tool_name, "arguments": arguments}
+        return {"tool": tool_name, "arguments": arguments, "reason": reason}
 
     def _chat_messages(self, messages: list[dict[str, str]], response_format: str | None = None) -> str:
+        started_at = time.perf_counter()
         url = f"{self.settings.base_url.rstrip('/')}/api/chat"
         payload: dict[str, Any] = {
             "model": self.settings.model,
@@ -110,6 +126,10 @@ class OllamaClient:
         if not isinstance(content, str) or not content.strip():
             raise RuntimeError("O Ollama nao devolveu texto para esta mensagem.")
 
+        if self.settings.debug_performance:
+            elapsed_ms = (time.perf_counter() - started_at) * 1000
+            print(f"[AssistenteIA PERF] chamada Ollama /api/chat: {elapsed_ms:.1f} ms")
+
         return content.strip()
 
     def summarize_text(self, filename: str, content: str) -> str:
@@ -123,6 +143,7 @@ class OllamaClient:
         return self.chat(prompt, history=[])
 
     def embed(self, text: str) -> list[float] | None:
+        started_at = time.perf_counter()
         url = f"{self.settings.base_url.rstrip('/')}/api/embeddings"
         payload: dict[str, Any] = {
             "model": self.settings.model,
@@ -135,6 +156,10 @@ class OllamaClient:
             data = response.json()
         except (requests.RequestException, ValueError):
             return None
+
+        if self.settings.debug_performance:
+            elapsed_ms = (time.perf_counter() - started_at) * 1000
+            print(f"[AssistenteIA PERF] chamada Ollama /api/embeddings: {elapsed_ms:.1f} ms")
 
         embedding = data.get("embedding")
         if not isinstance(embedding, list):

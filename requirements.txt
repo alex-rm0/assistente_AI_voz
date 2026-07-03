@@ -3,3 +3,6 @@ requests>=2.32,<3
 pytest>=8.0,<9
 python-docx>=1.1,<2
 pypdf>=4.0,<5
+openai-whisper>=20231117
+sounddevice>=0.4,<1
+numpy>=1.26,<3

@@ -10,6 +10,11 @@ ALLOWED_ACTIONS = (
     "ler ficheiro",
     "resumir ficheiro",
     "criar ficheiro",
+    "abrir aplicacao",
+    "abrir ficheiro",
+    "abrir pasta",
+    "abrir URL",
+    "abrir projeto",
 )
 
 BLOCKED_ACTIONS = (
@@ -86,6 +91,21 @@ def _detect_blocked_action(text: str, original_message: str) -> str | None:
 def _detect_allowed_action(text: str) -> str | None:
     if any(word in text for word in ("cria ficheiro", "cria um ficheiro", "criar ficheiro", "criar um ficheiro", "novo ficheiro")):
         return "criar ficheiro"
+
+    if any(phrase in text for phrase in ("abre o projeto", "abrir projeto", "abre projeto")):
+        return "abrir projeto"
+
+    if any(phrase in text for phrase in ("abre http://", "abre https://", "abrir http://", "abrir https://")):
+        return "abrir URL"
+
+    if any(phrase in text for phrase in ("abre a pasta", "abre pasta", "abrir pasta")):
+        return "abrir pasta"
+
+    if any(phrase in text for phrase in ("abre o ficheiro", "abre ficheiro", "abrir ficheiro")):
+        return "abrir ficheiro"
+
+    if any(word in text for word in ("abre", "abrir")):
+        return "abrir aplicacao"
 
     if any(word in text for word in ("resume", "resumir", "sumariza", "sumarizar", "resumo do", "resumo de")):
         return "resumir ficheiro"

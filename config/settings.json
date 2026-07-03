@@ -1,5 +1,10 @@
 {
   "app_name": "AssistenteIA",
+  "debug": false,
+  "DEBUG_AGENT": false,
+  "DEBUG_CONTEXT": false,
+  "DEBUG_PERFORMANCE": false,
+  "default_presence": "ACTIVE_CONVERSATION",
   "ollama": {
     "base_url": "http://127.0.0.1:11434",
     "model": "llama3.2",
@@ -10,6 +15,25 @@
   },
   "workspace": {
     "path": "workspace"
+  },
+  "context_observer": {
+    "enabled": true,
+    "interval_seconds": 15,
+    "recent_files_limit": 10,
+    "summary_min_seconds": 60,
+    "db_file": "context_observer.sqlite"
+  },
+  "desktop_actions": {
+    "enabled": true,
+    "known_projects": {
+      "AssistenteIA": "."
+    }
+  },
+  "voice": {
+    "enabled": true,
+    "model": "base",
+    "language": "pt",
+    "sample_rate": 16000
   },
   "memory": {
     "data_path": "data",
