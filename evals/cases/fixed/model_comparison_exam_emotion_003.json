@@ -1,0 +1,20 @@
+{
+  "id": "model_comparison_exam_emotion_003",
+  "category": "model_comparison",
+  "description": "Resposta emocional deve reconhecer o nervosismo antes de perguntar pelo exame.",
+  "turns": [
+    {
+      "user": "Estou um bocado nervoso para um exame.",
+      "expected": {
+        "response_not_empty": true,
+        "must_contain_any": ["nervoso", "normal", "percebo", "entendo", "compreendo", "natural"],
+        "max_questions": 1,
+        "max_words": 35,
+        "memory_write_action": null,
+        "must_not_contain": ["Qual e o exame?", "Qual é o exame?", "plano completo", "primeiro ponto", "segundo ponto", "vai correr tudo bem", "nao te preocupes"],
+        "llm_calls_max": 2
+      }
+    }
+  ],
+  "tags": ["model_comparison", "conversation_pace", "subset"]
+}

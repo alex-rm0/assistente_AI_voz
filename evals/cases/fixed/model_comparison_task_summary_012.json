@@ -1,0 +1,16 @@
+{
+  "id": "model_comparison_task_summary_012",
+  "category": "model_comparison",
+  "description": "Tarefas devem ser apresentadas de forma natural.",
+  "turns": [
+    {
+      "user": "Adiciona uma tarefa para rever o projecto Echo amanha.",
+      "expected": {
+        "response_not_empty": true,
+        "must_not_contain": ["estado:", "prioridade:", "data:", "SQLite"],
+        "llm_calls_max": 1
+      }
+    }
+  ],
+  "tags": ["model_comparison", "tasks"]
+}

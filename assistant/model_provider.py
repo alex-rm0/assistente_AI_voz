@@ -1,26 +1,34 @@
-"""Minimal model-provider abstraction (Part 3 of the stabilize/evals/provider task).
+"""Runtime model-provider abstraction for Echo.
 
-This is a NEW, standalone seam — it does not replace assistant.llm.OllamaClient,
-which keeps powering the production app exactly as before (app.py is
-untouched). Only assistant/evals uses this module today, via
-ProviderBackedLLM, to make the eval runner's `--provider`/`--model` flags
-real instead of decorative.
-
-Adding a future provider (Anthropic, OpenAI) means: implement ModelProvider,
-add one line to evals/harness.py's provider registry. Nothing in memory,
-routing, tools, or the UI needs to change — they only ever see the
-duck-typed `chat(...)`/`choose_tool(...)`/`embed(...)` interface via
-ProviderBackedLLM, exactly like they see assistant.llm.OllamaClient today.
+The runtime talks to this seam instead of binding itself directly to one model
+provider. Memory, routing, tools and UI keep seeing the existing duck-typed LLM
+shape through ProviderBackedLLM.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 import requests
+
+
+DEFAULT_MODEL_PROVIDER = "ollama"
+DEFAULT_OLLAMA_MODEL = "llama3.1:8b"
+DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
+SUPPORTED_MODEL_PROVIDERS = ("ollama", "anthropic")
+
+
+class ProviderConfigurationError(RuntimeError):
+    """Raised when the selected provider cannot be used safely as configured."""
+
+    def __init__(self, message: str, *, provider: str, provider_error_type: str) -> None:
+        super().__init__(message)
+        self.provider = provider
+        self.provider_error_type = provider_error_type
 
 
 @dataclass
@@ -31,6 +39,7 @@ class ModelResponse:
     input_tokens: int | None
     output_tokens: int | None
     latency_ms: float
+    estimated_cost_usd: float = 0.0
     raw: object | None = None
 
 
@@ -49,10 +58,89 @@ class ModelProvider(Protocol):
     ) -> ModelResponse: ...
 
 
-# A pricing table, not a pricing call: no network, no API keys, just a place
-# for $/1M-token rates to live once a paid provider exists. Ollama is local
-# and always free, hence the empty default table.
-PRICING_PER_MILLION_TOKENS: dict[str, dict[str, float]] = {}
+PRICING_PER_MILLION_TOKENS: dict[str, dict[str, float]] = {
+    "anthropic:claude-haiku-4-5": {"input": 1.0, "output": 5.0},
+    "anthropic:claude-haiku-4-5-20251001": {"input": 1.0, "output": 5.0},
+    "anthropic:claude-sonnet-4-5": {"input": 3.0, "output": 15.0},
+    "anthropic:claude-sonnet-4-5-20250929": {"input": 3.0, "output": 15.0},
+    "anthropic:claude-sonnet-5": {"input": 2.0, "output": 10.0},
+    "anthropic:claude-opus-4-8": {"input": 5.0, "output": 25.0},
+}
+
+
+@dataclass(frozen=True)
+class ResolvedModelProvider:
+    provider: str
+    provider_source: str
+    model: str
+    model_source: str
+    base_url: str
+    timeout_seconds: int
+
+
+def resolve_model_provider(
+    *,
+    cli_provider: str | None = None,
+    cli_model: str | None = None,
+    env: dict[str, str] | None = None,
+    settings: dict[str, Any] | None = None,
+) -> ResolvedModelProvider:
+    """Resolve provider/model with explicit priority and legacy compatibility."""
+    environment = env if env is not None else os.environ
+    config = settings or {}
+    model_config = config.get("model", {}) if isinstance(config.get("model", {}), dict) else {}
+    ollama_config = config.get("ollama", {}) if isinstance(config.get("ollama", {}), dict) else {}
+    anthropic_config = config.get("anthropic", {}) if isinstance(config.get("anthropic", {}), dict) else {}
+
+    provider, provider_source = _first_non_empty(
+        (cli_provider, "cli"),
+        (environment.get("ECHO_MODEL_PROVIDER"), "ECHO_MODEL_PROVIDER"),
+        (model_config.get("provider"), "settings.json"),
+        (DEFAULT_MODEL_PROVIDER, "default"),
+    )
+    provider = provider.lower()
+    if provider not in SUPPORTED_MODEL_PROVIDERS:
+        supported = ", ".join(SUPPORTED_MODEL_PROVIDERS)
+        raise ValueError(f"Provider de modelo desconhecido: '{provider}'. Suportados: {supported}.")
+
+    if provider == "ollama":
+        model, model_source = _first_non_empty(
+            (cli_model, "cli"),
+            (environment.get("ECHO_MODEL_NAME"), "ECHO_MODEL_NAME"),
+            (environment.get("OLLAMA_MODEL"), "OLLAMA_MODEL"),
+            (model_config.get("name"), "settings.json"),
+            (ollama_config.get("model"), "settings.json:ollama"),
+            (DEFAULT_OLLAMA_MODEL, "default"),
+        )
+        base_url = str(ollama_config.get("base_url") or "http://127.0.0.1:11434")
+        timeout_seconds = int(ollama_config.get("timeout_seconds", 120))
+    else:
+        model, model_source = _first_non_empty(
+            (cli_model, "cli"),
+            (environment.get("ECHO_MODEL_NAME"), "ECHO_MODEL_NAME"),
+            (model_config.get("name"), "settings.json"),
+            (anthropic_config.get("model"), "settings.json:anthropic"),
+            (DEFAULT_ANTHROPIC_MODEL, "default"),
+        )
+        base_url = str(anthropic_config.get("base_url") or "https://api.anthropic.com")
+        timeout_seconds = int(anthropic_config.get("timeout_seconds", 120))
+
+    return ResolvedModelProvider(
+        provider=provider,
+        provider_source=provider_source,
+        model=model,
+        model_source=model_source,
+        base_url=base_url,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def _first_non_empty(*candidates: tuple[Any, str]) -> tuple[str, str]:
+    for value, source in candidates:
+        text = str(value or "").strip()
+        if text:
+            return text, source
+    return "", "default"
 
 
 def estimate_cost(provider: str, model: str, input_tokens: int | None, output_tokens: int | None) -> float:
@@ -67,7 +155,7 @@ def estimate_cost(provider: str, model: str, input_tokens: int | None, output_to
 
 
 class OllamaProvider:
-    """ModelProvider implementation over Ollama's /api/chat."""
+    """ModelProvider implementation over Ollama's /api/chat and /api/embeddings."""
 
     def __init__(self, model: str, base_url: str = "http://127.0.0.1:11434", timeout_seconds: int = 120) -> None:
         self.model = model
@@ -107,17 +195,17 @@ class OllamaProvider:
             data = response.json()
         except requests.RequestException as exc:
             raise RuntimeError(
-                f"Não consegui ligar ao Ollama (modelo '{resolved_model}'). "
-                "Confirma que o Ollama está aberto e que o modelo está instalado."
+                f"Nao consegui ligar ao Ollama (modelo '{resolved_model}'). "
+                "Confirma que o Ollama esta aberto e que o modelo esta instalado."
             ) from exc
         except ValueError as exc:
-            raise RuntimeError("O Ollama devolveu uma resposta inválida.") from exc
+            raise RuntimeError("O Ollama devolveu uma resposta invalida.") from exc
 
         elapsed_ms = (time.perf_counter() - started_at) * 1000
         message = data.get("message", {})
         text = message.get("content")
         if not isinstance(text, str) or not text.strip():
-            raise RuntimeError("O Ollama não devolveu texto para esta mensagem.")
+            raise RuntimeError("O Ollama nao devolveu texto para esta mensagem.")
 
         return ModelResponse(
             text=text.strip(),
@@ -126,23 +214,33 @@ class OllamaProvider:
             input_tokens=data.get("prompt_eval_count"),
             output_tokens=data.get("eval_count"),
             latency_ms=elapsed_ms,
+            estimated_cost_usd=0.0,
             raw=data,
         )
 
+    def embed(self, text: str) -> list[float] | None:
+        url = f"{self.base_url.rstrip('/')}/api/embeddings"
+        payload: dict[str, Any] = {"model": self.model, "prompt": text}
+        try:
+            response = requests.post(url, json=payload, timeout=self.timeout_seconds)
+            response.raise_for_status()
+            data = response.json()
+        except (requests.RequestException, ValueError):
+            return None
+
+        embedding = data.get("embedding")
+        if not isinstance(embedding, list):
+            return None
+        return [float(item) for item in embedding if isinstance(item, (int, float))]
+
 
 class ProviderBackedLLM:
-    """Adapts any ModelProvider to the duck-typed llm interface AssistantEngine,
-    ResponseComposer, VoiceCritic and Agent already depend on:
-    chat(user_message, history=, system_prompt=, response_format=) -> str,
-    plus choose_tool(...) and embed(...).
+    """Adapt a ModelProvider to the LLM interface used by AssistantEngine."""
 
-    This is the ONLY place that translates between the two shapes — memory,
-    routing, tools and the UI keep depending on the old shape unchanged.
-    """
-
-    def __init__(self, provider: ModelProvider, system_prompt: str = "") -> None:
+    def __init__(self, provider: ModelProvider, system_prompt: str = "", model_source: str = "provider") -> None:
         self.provider = provider
         self.system_prompt = system_prompt
+        self.model_source = model_source
         self.last_response: ModelResponse | None = None
         self.responses: list[ModelResponse] = []
         self._call_sources: list[str] = []
@@ -166,10 +264,6 @@ class ProviderBackedLLM:
 
     @property
     def chat_call_count(self) -> int:
-        # Read by AssistantEngine._llm_chat_count() (see conversation.py's
-        # _single_client_chat_count) so evals telemetry (llm_calls) works
-        # the same way whether the engine is backed by OllamaClient or by
-        # a ProviderBackedLLM.
         return len(self.responses)
 
     @property
@@ -179,7 +273,14 @@ class ProviderBackedLLM:
     @property
     def chat_call_tokens(self) -> list[dict[str, Any]]:
         return [
-            {"input_tokens": r.input_tokens, "output_tokens": r.output_tokens, "latency_ms": r.latency_ms}
+            {
+                "input_tokens": r.input_tokens,
+                "output_tokens": r.output_tokens,
+                "latency_ms": r.latency_ms,
+                "estimated_cost_usd": r.estimated_cost_usd,
+                "provider": r.provider,
+                "model": r.model,
+            }
             for r in self.responses
         ]
 
@@ -222,14 +323,14 @@ class ProviderBackedLLM:
         return {"tool": tool_name, "arguments": arguments, "reason": reason}
 
     def embed(self, text: str):
-        return None
+        embed = getattr(self.provider, "embed", None)
+        if not callable(embed):
+            return None
+        return embed(text)
 
     @property
     def settings(self) -> "_CompatSettings":
-        # AssistantEngine._model_name() reads llm.settings.model for the
-        # "model" telemetry field — this mirrors OllamaClient's shape just
-        # enough for that one read, without pretending to be OllamaClient.
-        return _CompatSettings(model=getattr(self.provider, "model", ""), model_source=f"provider:{self.provider.name}")
+        return _CompatSettings(model=getattr(self.provider, "model", ""), model_source=self.model_source)
 
 
 @dataclass

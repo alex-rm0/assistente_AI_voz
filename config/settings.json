@@ -6,10 +6,19 @@
   "DEBUG_PERFORMANCE": true,
   "DEBUG_OLLAMA_PAYLOAD": true,
   "default_presence": "ACTIVE_CONVERSATION",
+  "model": {
+    "provider": "ollama",
+    "name": "llama3.1:8b"
+  },
   "ollama": {
     "base_url": "http://127.0.0.1:11434",
     "model": "llama3.1:8b",
     "timeout_seconds": 120
+  },
+  "anthropic": {
+    "base_url": "https://api.anthropic.com",
+    "timeout_seconds": 120,
+    "max_tokens": 1024
   },
   "assistant": {
     "system_prompt": "Es o AssistenteIA, um assistente local para Windows 11. Responde em portugues de Portugal, de forma clara e util. Mantem-te seguro: nao executes comandos do sistema, nao acedas a ficheiros fora da pasta workspace e nao finjas ter capacidades que ainda nao existem nesta versao."

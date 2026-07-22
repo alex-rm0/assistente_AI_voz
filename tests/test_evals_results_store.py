@@ -36,6 +36,10 @@ def _make_case_eval(case_id: str, category: str, passed: bool) -> CaseEvaluation
         latency_ms=1.0,
         exception_type=None,
         exception_message=None,
+        input_tokens=10,
+        output_tokens=4,
+        estimated_cost_usd=0.00003,
+        provider="ollama",
     )
     assertion = AssertionOutcome(name="response_not_empty", passed=passed)
     turn_eval = TurnEvaluation(turn_index=0, user_message="oi", result=result, assertions=[assertion], passed=passed)
@@ -87,6 +91,16 @@ def test_write_run_creates_run_dir_and_copies_to_latest(tmp_path: Path, monkeypa
     assert result.metadata["passed"] == 1
     assert result.metadata["baseline"] is False
     assert result.metadata["model_source"] == "provider:ollama"
+    report = json.loads((result.run_dir / "report.json").read_text(encoding="utf-8"))
+    turn_result = report["cases"][0]["turns"][0]["result"]
+    assert turn_result["provider"] == "ollama"
+    assert turn_result["model"] == "llama3.1:8b"
+    assert turn_result["input_tokens"] == 10
+    assert turn_result["output_tokens"] == 4
+    assert turn_result["estimated_cost_usd"] == 0.00003
+    assert turn_result["llm_calls"] == 0
+    assert report["summary"]["input_tokens"] == 10
+    assert report["summary"]["output_tokens"] == 4
 
 
 def test_rebuild_index_lists_runs_newest_first(tmp_path: Path, monkeypatch) -> None:

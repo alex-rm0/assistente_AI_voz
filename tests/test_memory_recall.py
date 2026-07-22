@@ -225,6 +225,55 @@ def test_teste_i_repeated_mentions_update_one_record(tmp_path: Path) -> None:
     assert len(facts) == 1
 
 
+def test_vague_exam_emotion_is_not_saved_as_persistent_memory(tmp_path: Path) -> None:
+    engine = make_engine(tmp_path, FakeLLM("ok"))
+
+    for message in (
+        "Estou nervoso para um exame.",
+        "Tenho um exame em breve.",
+        "Amanha vai ser um dia complicado.",
+    ):
+        engine._maybe_extract_structured_memory(message)
+
+    assert engine.long_term_memory.find_structured_facts(fact_type="academic_event") == []
+
+
+def test_concrete_exam_statements_are_saved(tmp_path: Path) -> None:
+    engine = make_engine(tmp_path, FakeLLM("ok"))
+
+    engine._maybe_extract_structured_memory("Tenho exame de Computacao Grafica no dia 28.")
+    engine._try_memory_write_command("Lembra-te de que o meu exame de Matematica e sexta-feira.")
+    engine._maybe_extract_structured_memory("Chumbei ao exame de Estruturas de Dados.")
+
+    disciplines = {
+        _strip_accents(fact.discipline.lower())
+        for fact in engine.long_term_memory.find_structured_facts(fact_type="academic_event")
+    }
+
+    assert "computacao grafica" in disciplines
+    assert "matematica" in disciplines
+    assert "estruturas de dados" in disciplines
+
+
+def test_memory_recall_records_grounding_metadata(tmp_path: Path) -> None:
+    engine = make_engine(tmp_path, RaisingLLM())
+    engine.debug_ollama_payload = True
+    fact = engine.long_term_memory.remember_structured_fact(
+        "academic_event",
+        {"event": "exame", "discipline": "Estrategias Algoritmicas", "date_reference": "para a semana"},
+        confidence=0.9,
+    )
+
+    response = engine.respond("Confirma na memoria qual e o exame que vou ter para a semana.")
+    telemetry = engine.get_last_turn_telemetry()
+
+    assert "Estrategias Algoritmicas" in _strip_accents(response)
+    assert telemetry["memory_recall_detected"] is True
+    assert str(fact.id) in telemetry["selected_memory_ids"]
+    assert telemetry["response_grounded"] is True
+    assert telemetry["grounding_sources"]
+
+
 # --- Teste J: atualização de estado -----------------------------------------
 
 

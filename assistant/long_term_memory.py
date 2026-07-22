@@ -544,6 +544,7 @@ class LongTermMemory:
         of the same event as one updatable record instead of duplicates, and
         lets later turns fill in attributes that were missing earlier.
         """
+        attributes = _normalize_structured_fact_aliases(attributes)
         clean_attributes = {
             key: value.strip()
             for key, value in attributes.items()
@@ -583,6 +584,7 @@ class LongTermMemory:
 
         action is one of created|merged|ignored.
         """
+        attributes = _normalize_structured_fact_aliases(attributes)
         clean_attributes = {
             key: value.strip()
             for key, value in attributes.items()
@@ -1472,6 +1474,20 @@ def _cosine_similarity(left: list[float], right: list[float]) -> float:
 def _terms(text: str) -> list[str]:
     normalized = _normalize_text(text)
     return [term.strip(".,;:!?()[]{}\"'") for term in normalized.split() if len(term.strip()) >= 3]
+
+
+def _normalize_structured_fact_aliases(attributes: dict[str, str]) -> dict[str, str]:
+    """Accept legacy eval/setup field names without storing parallel schemas."""
+    normalized = dict(attributes or {})
+    aliases = {
+        "subject": "discipline",
+        "date_text": "date_reference",
+    }
+    for alias, canonical in aliases.items():
+        value = normalized.get(alias)
+        if value and not normalized.get(canonical):
+            normalized[canonical] = value
+    return normalized
 
 
 def _normalize_text(text: str) -> str:

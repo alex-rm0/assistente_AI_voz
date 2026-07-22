@@ -1,0 +1,16 @@
+{
+  "id": "model_comparison_workspace_tool_008",
+  "category": "model_comparison",
+  "description": "Pedido sobre ficheiros da workspace deve usar ferramenta local.",
+  "turns": [
+    {
+      "user": "Que ficheiros existem na workspace?",
+      "expected": {
+        "response_not_empty": true,
+        "expected_tools": ["list_workspace_files"],
+        "forbid_unsupported_tool_claim": true
+      }
+    }
+  ],
+  "tags": ["model_comparison", "tools"]
+}

@@ -1,0 +1,15 @@
+{
+  "id": "model_comparison_session_continuity_014",
+  "category": "model_comparison",
+  "description": "Continuidade sem dados deve admitir falta de contexto.",
+  "turns": [
+    {
+      "user": "Onde ficamos?",
+      "expected": {
+        "response_not_empty": true,
+        "must_not_contain": ["ontem estivemos", "da ultima vez estivemos a trabalhar"]
+      }
+    }
+  ],
+  "tags": ["model_comparison", "session"]
+}

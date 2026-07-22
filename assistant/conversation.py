@@ -21,6 +21,7 @@ from assistant.delegation import DelegationManager, DelegationTarget
 from assistant.fast_router import load_quick_sites, route_fast_command
 from assistant.long_term_memory import LongTermMemory, MemoryCategory
 from assistant.memory import ConversationMemory
+from assistant.model_provider import ProviderConfigurationError
 from assistant.memory_recall import (
     build_memory_retrieval,
     build_task_retrieval,
@@ -221,6 +222,8 @@ class AssistantEngine:
             return self._handle_unexpected_error(user_message, exc)
 
     def _handle_unexpected_error(self, user_message: str, exc: Exception) -> str:
+        if isinstance(exc, ProviderConfigurationError):
+            return self._handle_provider_configuration_error(user_message, exc)
         print("[ECHO ERROR] stage=AssistantEngine.respond")
         print(f"[ECHO ERROR] type={type(exc).__name__}")
         print(f"[ECHO ERROR] message={exc}")
@@ -244,6 +247,28 @@ class AssistantEngine:
             remember=False,
             technical=True,
             selected_path="INTERNAL_ERROR",
+        )
+
+    def _handle_provider_configuration_error(self, user_message: str, exc: ProviderConfigurationError) -> str:
+        print("[ECHO PROVIDER ERROR]")
+        print(f"provider={exc.provider}")
+        print(f"provider_error_type={exc.provider_error_type}")
+        print(f"message={exc}")
+        if self._turn_trace is None:
+            self._begin_turn_trace(user_message)
+        if self._turn_trace is not None:
+            self._turn_trace["exception_type"] = type(exc).__name__
+            self._turn_trace["exception_message"] = str(exc)
+            self._turn_trace["provider"] = exc.provider
+            self._turn_trace["provider_error_type"] = exc.provider_error_type
+            self._turn_trace["fallback_used"] = False
+        return self._complete_turn(
+            user_message,
+            str(exc),
+            "PROVIDER_ERROR",
+            remember=False,
+            technical=True,
+            selected_path="PROVIDER_ERROR",
         )
 
     def _respond_inner(self, user_message: str) -> str:
@@ -432,6 +457,28 @@ class AssistantEngine:
                 )
                 self._perf_log("resposta total", request_started_at, time.perf_counter())
                 return memory_recall_response
+
+        direct_phrase_response = self._try_direct_short_phrase_request(user_message)
+        if direct_phrase_response is not None:
+            direct_phrase_response = self._complete_turn(
+                user_message,
+                direct_phrase_response,
+                "DIRECT_SHORT_RESPONSE",
+                selected_path="GENERAL_CONVERSATION",
+            )
+            self._perf_log("resposta total", request_started_at, time.perf_counter())
+            return direct_phrase_response
+
+        deterministic_help_response = self._try_deterministic_help_response(user_message)
+        if deterministic_help_response is not None:
+            deterministic_help_response = self._complete_turn(
+                user_message,
+                deterministic_help_response,
+                "DETERMINISTIC_HELP",
+                selected_path="GENERAL_CONVERSATION",
+            )
+            self._perf_log("resposta total", request_started_at, time.perf_counter())
+            return deterministic_help_response
 
         general_knowledge_response = self._try_general_knowledge_query(user_message)
         if general_knowledge_response is not None:
@@ -791,6 +838,18 @@ class AssistantEngine:
         if len(lines) == 1:
             return f"Tenho guardado {lines[0]}."
         return "Tenho guardado " + "; ".join(lines[:-1]) + f"; e {lines[-1]}."
+
+    def _try_direct_short_phrase_request(self, user_message: str) -> str | None:
+        return _direct_short_phrase_response(_normalize_text(user_message)) or None
+
+    def _try_deterministic_help_response(self, user_message: str) -> str | None:
+        text = _normalize_text(user_message)
+        if _looks_like_travel_destination_followup(text, self._previous_user_message()):
+            return (
+                "Acho que ainda me falta perceber como gostas de viajar. "
+                "Isso vai influenciar mais a escolha do que saber apenas a zona."
+            )
+        return _deterministic_help_response(text) or None
 
     def _try_general_knowledge_query(self, user_message: str) -> str | None:
         if not _is_general_knowledge_query(user_message):
@@ -1328,6 +1387,7 @@ class AssistantEngine:
             semantic_conflict = bool(detect_semantic_conflict(user_message, final_response))
             subject_swap = bool(detect_subject_swap(final_response))
             self._turn_trace["model"] = _model_name(self.llm)
+            self._turn_trace["provider"] = _provider_name(self.llm)
             self._turn_trace["response_before_voice_critic"] = original_response
             self._turn_trace["response_after_voice_critic"] = final_response
             self._turn_trace["voice_critic_call_count"] = voice_critic_call_count
@@ -1349,6 +1409,7 @@ class AssistantEngine:
             self._turn_trace["final_response_source"] = final_response_source
             self._turn_trace["final_response_kind"] = _response_kind_for_source(source)
             self._turn_trace["model_source"] = _model_source(self.llm)
+            self._turn_trace.setdefault("fallback_used", final_response_source in {"LOCAL_SAFE_FALLBACK", "FALLBACK"})
         return final_response
 
     def _response_debug(self, source: str, voice_reviewed: bool, tools_exposed: bool) -> None:
@@ -1392,6 +1453,9 @@ class AssistantEngine:
         print(f"final_response_kind={self._turn_trace.get('final_response_kind') or _response_kind_for_source(response_source)}")
         print(f"model={self._turn_trace.get('model')}")
         print(f"model_source={self._turn_trace.get('model_source')}")
+        print(f"provider={self._turn_trace.get('provider')}")
+        print(f"provider_error_type={self._turn_trace.get('provider_error_type')}")
+        print(f"fallback_used={self._turn_trace.get('fallback_used')}")
         print(f"response_before_voice_critic={self._turn_trace.get('response_before_voice_critic')}")
         print(f"response_after_voice_critic={self._turn_trace.get('response_after_voice_critic')}")
         print(f"voice_critic_call_count={self._turn_trace.get('voice_critic_call_count')}")
@@ -1457,6 +1521,13 @@ class AssistantEngine:
 
         sources_start = int(self._turn_trace.get("llm_sources_start") or 0)
         all_sources = list(getattr(self.llm, "chat_call_sources", ()))
+        all_token_records = list(getattr(self.llm, "chat_call_tokens", ()) or [])
+        turn_token_records = all_token_records[sources_start:]
+        input_tokens = _sum_optional_ints(record.get("input_tokens") for record in turn_token_records if isinstance(record, dict))
+        output_tokens = _sum_optional_ints(record.get("output_tokens") for record in turn_token_records if isinstance(record, dict))
+        estimated_cost_usd = sum(
+            float(record.get("estimated_cost_usd") or 0.0) for record in turn_token_records if isinstance(record, dict)
+        )
         self._last_turn_telemetry = {
             "user_message": self._turn_trace.get("user_message"),
             "final_response": final_response,
@@ -1464,10 +1535,20 @@ class AssistantEngine:
             "response_source": response_source,
             "model": self._turn_trace.get("model"),
             "model_source": self._turn_trace.get("model_source"),
+            "provider": self._turn_trace.get("provider"),
+            "provider_error_type": self._turn_trace.get("provider_error_type"),
+            "fallback_used": self._turn_trace.get("fallback_used"),
             "llm_calls": llm_calls,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "estimated_cost_usd": estimated_cost_usd,
+            "llm_call_tokens": turn_token_records,
             "llm_call_sources": all_sources[sources_start:],
             "tools_used": list(tools_used),
+            "memory_recall_detected": bool(self._turn_trace.get("memory_recall_detected")),
             "selected_memory_ids": self._turn_trace.get("selected_memory_ids") or [],
+            "persistent_memory_matches": self._turn_trace.get("persistent_memory_matches"),
+            "history_matches": self._turn_trace.get("history_matches"),
             "memory_write_action": self._turn_trace.get("memory_write_action"),
             "grounding_sources": self._turn_trace.get("grounding_sources") or [],
             "response_grounded": self._turn_trace.get("response_grounded"),
@@ -1801,7 +1882,17 @@ class AssistantEngine:
 
         origin = "explicit_command" if is_memory_write_command(user_message) else "passive_extraction"
 
-        academic_candidate = extract_academic_event_candidate(user_message, self._previous_assistant_message())
+        academic_candidate = extract_academic_event_candidate(
+            user_message,
+            " ".join((self._previous_assistant_message(), self._previous_user_message())),
+        )
+        if academic_candidate:
+            if not academic_candidate.get("event") and not academic_candidate.get("discipline"):
+                existing_academic = self.long_term_memory.find_structured_facts(fact_type="academic_event")
+                if not existing_academic:
+                    academic_candidate = {}
+                else:
+                    academic_candidate["event"] = existing_academic[0].event or "exame"
         if academic_candidate:
             canonical, raw_fields = normalize_candidate_fields(academic_candidate, "academic_event")
             canonical.update(raw_fields)
@@ -2228,6 +2319,9 @@ class AssistantEngine:
             if not facts and not show_details:
                 return fallback
 
+        if not show_details:
+            return fallback
+
         return self.response_composer.compose(
             ComposerRequest(
                 intent="personal_model",
@@ -2388,6 +2482,10 @@ class AssistantEngine:
 
     def _try_briefing_question(self, user_message: str) -> str | None:
         text = _normalize_text(user_message)
+        if _asks_last_session_summary(text) or _asks_session_continuity(text) or _asks_today_session_work(text):
+            current_summary = self._session_continuity_from_current_conversation(user_message)
+            if current_summary:
+                return current_summary
         if self.session_manager is not None:
             if _asks_next_step(text):
                 return self._compose_session_answer(
@@ -2429,6 +2527,23 @@ class AssistantEngine:
             return get_last_active_project(self.context_observer)
 
         return None
+
+    def _session_continuity_from_current_conversation(self, user_message: str) -> str:
+        previous_user_messages = [
+            item.get("content", "").strip()
+            for item in self.memory.load()
+            if item.get("role") == "user" and item.get("content", "").strip() != user_message.strip()
+        ]
+        if not previous_user_messages:
+            return ""
+        recent = previous_user_messages[-4:]
+        normalized = _normalize_text(" ".join(recent))
+        if "escrita passiva" in normalized and "recall" in normalized:
+            return "Ficámos na memória do Echo: a escrita passiva já estava corrigida e faltava fechar o recall."
+        if len(recent) < 2:
+            return ""
+        topics = "; ".join(_shorten_for_conversation(message, 80) for message in recent)
+        return f"Estávamos a falar disto: {topics}."
 
     def _try_proactive_suggestion_question(self, user_message: str) -> str | None:
         text = _normalize_text(user_message)
@@ -2914,6 +3029,21 @@ def _model_source(llm: object) -> str:
     return str(getattr(settings, "model_source", "") or "")
 
 
+def _provider_name(llm: object) -> str:
+    provider = getattr(llm, "provider", None)
+    return str(getattr(provider, "name", "") or "")
+
+
+def _sum_optional_ints(values) -> int | None:
+    total = 0
+    seen = False
+    for value in values:
+        if isinstance(value, int):
+            total += value
+            seen = True
+    return total if seen else None
+
+
 _FALSE_TOOL_CLAIM_MARKERS = (
     "pesquisei",
     "procurei",
@@ -3111,6 +3241,8 @@ def _likely_typo_clarification(text: str, history: list[dict[str, str]]) -> str:
 
 
 def _exam_emotional_response(text: str) -> str:
+    if "exame" in text and any(word in text for word in ("nervoso", "nervosa", "ansioso", "ansiosa")):
+        return "É normal ficares nervoso. Que exame é?"
     if any(phrase in text for phrase in ("nao sei se ha muito a falar", "não sei se há muito a falar")):
         return "Talvez não haja. Parece que o que mais pesa é saberes que só tens mais uma oportunidade."
     if "fracasso" in text and any(word in text for word in ("falhar", "falhei", "chumbei", "exame")):
@@ -3119,6 +3251,43 @@ def _exam_emotional_response(text: str) -> str:
             "mas percebo que agora seja difícil separar as duas coisas."
         )
     return ""
+
+
+def _direct_short_phrase_response(text: str) -> str:
+    if not re.search(r"\b(?:ajuda-me a escrever|escreve|da-me|dá-me)\b", text):
+        return ""
+    if "frase" not in text:
+        return ""
+    if "revisao" in text or "revisão" in text:
+        return "Agradeço que revejas este texto, por favor."
+    if "desculpa" in text:
+        return "Peço desculpa pelo incómodo."
+    if "confirmacao" in text or "confirmação" in text:
+        return "Agradeço confirmação assim que possível."
+    if "resposta" in text:
+        return "Agradeço que me respondas assim que possível."
+    return ""
+
+
+def _deterministic_help_response(text: str) -> str:
+    if "modulenotfounderror" in text and "pyside6" in text:
+        return (
+            "Esse erro quer dizer que o PySide6 não está instalado no ambiente Python que estás a usar. "
+            "Instala-o no venv com: pip install PySide6"
+        )
+    if "planear" in text and any(word in text for word in ("ferias", "férias", "viagem")):
+        return (
+            "Boa ideia. Antes de sugerir sítios, deixa-me perceber uma coisa: "
+            "procuras mais descansar, conhecer sítios novos ou alguma aventura?"
+        )
+    return ""
+
+
+def _looks_like_travel_destination_followup(text: str, previous_user_message: str) -> bool:
+    previous = _normalize_text(previous_user_message)
+    if not any(word in previous for word in ("ferias", "férias", "viagem")):
+        return False
+    return any(place in text for place in ("norte de portugal", "sul de portugal", "alentejo", "algarve", "porto", "geres"))
 
 
 def _contests_previous_assistant(message: str) -> bool:

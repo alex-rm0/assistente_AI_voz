@@ -3,9 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import assistant.conversation as conversation_module
+from assistant.anthropic_provider import AnthropicProvider
 from assistant.conversation import AssistantEngine
 from assistant.long_term_memory import LongTermMemory
 from assistant.memory import ConversationMemory
+from assistant.model_provider import ProviderBackedLLM
 from assistant.presence_manager import PresenceManager
 from assistant.prompts import get_base_system_prompt
 from assistant.tool_registry import ToolRegistry
@@ -35,6 +37,28 @@ def make_engine(tmp_path: Path) -> AssistantEngine:
         workspace_path=workspace,
         base_system_prompt=get_base_system_prompt(),
         presence_manager=PresenceManager(),
+    )
+
+
+def make_anthropic_engine(tmp_path: Path, *, api_key: str = "", allow_paid_calls: bool = True) -> AssistantEngine:
+    provider = AnthropicProvider(
+        model="claude-haiku-4-5-20251001",
+        api_key=api_key,
+        allow_paid_calls=allow_paid_calls,
+    )
+    llm = ProviderBackedLLM(provider, system_prompt=get_base_system_prompt(), model_source="cli")
+    data = tmp_path / "data"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    return AssistantEngine(
+        llm=llm,
+        memory=ConversationMemory(data, "history.json", 20),
+        long_term_memory=LongTermMemory(data, embedder=llm),
+        tools=ToolRegistry(),
+        workspace_path=workspace,
+        base_system_prompt=get_base_system_prompt(),
+        presence_manager=PresenceManager(),
+        debug_ollama_payload=True,
     )
 
 
@@ -116,3 +140,37 @@ def test_normal_conversation_messages_do_not_raise(tmp_path: Path) -> None:
         answer = engine.respond(message)
         assert isinstance(answer, str)
         assert answer.strip()
+
+
+def test_anthropic_missing_api_key_surfaces_clear_provider_error(tmp_path: Path) -> None:
+    engine = make_anthropic_engine(tmp_path, api_key="", allow_paid_calls=True)
+
+    answer = engine.respond("Explica-me em duas frases o que e uma arvore binaria.")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert answer == "O provider Anthropic esta selecionado, mas falta configurar ANTHROPIC_API_KEY."
+    assert telemetry["selected_path"] == "PROVIDER_ERROR"
+    assert telemetry["response_source"] == "PROVIDER_ERROR"
+    assert telemetry["exception_type"] == "ProviderConfigurationError"
+    assert telemetry["provider_error_type"] == "missing_api_key"
+    assert telemetry["provider"] == "anthropic"
+    assert telemetry["llm_calls"] == 0
+    assert telemetry["fallback_used"] is False
+    assert "problema t" not in answer.lower()
+
+
+def test_anthropic_missing_paid_confirmation_surfaces_clear_provider_error(tmp_path: Path) -> None:
+    engine = make_anthropic_engine(tmp_path, api_key="secret", allow_paid_calls=False)
+
+    answer = engine.respond("Explica-me em duas frases o que e uma arvore binaria.")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert "chamadas pagas estao bloqueadas" in answer
+    assert "ECHO_ALLOW_PAID_MODEL_CALLS=true" in answer
+    assert telemetry["selected_path"] == "PROVIDER_ERROR"
+    assert telemetry["response_source"] == "PROVIDER_ERROR"
+    assert telemetry["exception_type"] == "ProviderConfigurationError"
+    assert telemetry["provider_error_type"] == "paid_calls_not_confirmed"
+    assert telemetry["provider"] == "anthropic"
+    assert telemetry["llm_calls"] == 0
+    assert telemetry["fallback_used"] is False

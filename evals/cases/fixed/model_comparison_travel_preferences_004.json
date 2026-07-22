@@ -1,0 +1,17 @@
+{
+  "id": "model_comparison_travel_preferences_004",
+  "category": "model_comparison",
+  "description": "Planeamento de ferias deve perguntar preferencias antes de recomendar.",
+  "turns": [
+    {
+      "user": "Queria planear umas ferias no Norte de Portugal.",
+      "expected": {
+        "response_not_empty": true,
+        "max_questions": 2,
+        "must_not_contain": ["Porto", "Braga", "Guimaraes", "Gerês", "lista"],
+        "llm_calls_max": 2
+      }
+    }
+  ],
+  "tags": ["model_comparison", "planning"]
+}

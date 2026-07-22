@@ -1,0 +1,21 @@
+{
+  "id": "model_comparison_personal_model_011",
+  "category": "model_comparison",
+  "description": "O Personal Model deve soar natural, nao tecnico.",
+  "setup": [
+    {
+      "say": "Lembra-te que uso o Codex nos meus projectos pessoais."
+    }
+  ],
+  "turns": [
+    {
+      "user": "O que sabes sobre mim?",
+      "expected": {
+        "response_not_empty": true,
+        "must_contain": ["Codex"],
+        "must_not_contain": ["categoria", "confidence", "source", "status"]
+      }
+    }
+  ],
+  "tags": ["model_comparison", "personal_model"]
+}

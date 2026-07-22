@@ -19,7 +19,8 @@ AssistenteIA e uma aplicacao desktop local para Windows 11 feita em Python, PySi
 - Janela desktop com conversa, caixa de texto e botao Enviar.
 - Interface Echo OS experimental com workspace adaptativo inicial para pesquisa.
 - Conversa normal com um modelo local via Ollama.
-- Modelo configuravel em `config/settings.json`.
+- Runtime baseado em providers, com Ollama por defeito e Anthropic preparado de forma opcional e protegida.
+- Modelo configuravel em `config/settings.json`, variaveis de ambiente ou argumentos CLI.
 - Agent Loop para decidir entre resposta direta e uso de uma ou varias ferramentas.
 - Presence Manager com estados globais de funcionamento.
 - Context Observer passivo para registar aplicacao ativa, janela ativa, ficheiros recentes, projeto aberto e tempo por atividade.

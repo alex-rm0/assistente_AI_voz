@@ -1,6 +1,6 @@
 """Isolated AssistantEngine construction for evals.
 
-Every case gets its own fresh engine backed by a throwaway directory — never
+Every case gets its own fresh engine backed by a throwaway directory, never
 the user's real `data/` folder. See section 2.2 of the eval spec: isolation
 is via ECHO_ENV=test / ECHO_TEST_DATA_DIR, not by mocking the memory layer.
 """
@@ -22,9 +22,7 @@ from assistant.prompts import get_base_system_prompt
 from assistant.tool_registry import tool_registry
 
 # Registers the built-in tools onto tool_registry as a side effect. Imported
-# here (not left to the caller) so every eval engine sees the same tool set
-# app.py wires up — a case that types "pesquisa sobre Picasso" should react
-# exactly like the real app would.
+# here so every eval engine sees the same tool set app.py wires up.
 import assistant.tools  # noqa: F401
 
 
@@ -37,24 +35,17 @@ class ProviderConfig:
 
 
 def build_llm(config: ProviderConfig):
-    """Single seam that turns a --provider/--model choice into an llm object.
+    """Turn a --provider/--model choice into the LLM object used by evals."""
+    from assistant.anthropic_provider import AnthropicProvider
+    from assistant.model_provider import DEFAULT_ANTHROPIC_MODEL, DEFAULT_OLLAMA_MODEL, OllamaProvider, ProviderBackedLLM
 
-    Goes through assistant.model_provider.ModelProvider (Part 3) rather than
-    assistant.llm.OllamaClient directly, so evals actually exercise the same
-    provider abstraction future providers (Anthropic, OpenAI) would slot
-    into — adding one only ever means adding a branch here.
-    """
-    if config.provider != "ollama":
-        raise ValueError(
-            f"Provider '{config.provider}' ainda não está implementado. "
-            "Só 'ollama' está disponível nesta tarefa (ver Parte 3 do pedido: "
-            "não integrar Anthropic/OpenAI ainda)."
-        )
-    from assistant.llm import OLLAMA_MODEL
-    from assistant.model_provider import OllamaProvider, ProviderBackedLLM
-
-    provider = OllamaProvider(model=config.model or OLLAMA_MODEL, base_url=config.base_url)
-    return ProviderBackedLLM(provider, system_prompt=get_base_system_prompt())
+    if config.provider == "ollama":
+        provider = OllamaProvider(model=config.model or DEFAULT_OLLAMA_MODEL, base_url=config.base_url)
+    elif config.provider == "anthropic":
+        provider = AnthropicProvider(model=config.model or DEFAULT_ANTHROPIC_MODEL)
+    else:
+        raise ValueError(f"Provider '{config.provider}' nao esta implementado.")
+    return ProviderBackedLLM(provider, system_prompt=get_base_system_prompt(), model_source=config.model_source)
 
 
 class EvalRun:
@@ -102,24 +93,14 @@ def build_engine(case_dir: Path, config: ProviderConfig) -> AssistantEngine:
         known_projects={"AssistenteIA": "."},
         desktop_config={},
     )
-    # Always on for evals regardless of the provider/model — this is what
-    # drives AssistantEngine.get_last_turn_telemetry() (see conversation.py);
-    # it never touches the user's real config/settings.json.
+    # Always on for evals. This drives AssistantEngine.get_last_turn_telemetry()
+    # and never touches the user's real config/settings.json.
     engine.debug_ollama_payload = True
     return engine
 
 
 def apply_setup_steps(engine: AssistantEngine, setup: tuple[dict, ...]) -> None:
-    """Seeds conversation/memory state before the graded turns run.
-
-    Two step kinds:
-    - {"say": "..."}: a real conversational turn (drives passive extraction,
-      history, etc.) whose result is discarded — not graded.
-    - {"fact_type": "...", "fields": {...}}: writes a structured fact
-      directly via long_term_memory, bypassing the LLM entirely — for
-      seeding memory deterministically without depending on extraction
-      regexes picking up the setup phrasing.
-    """
+    """Seed conversation/memory state before the graded turns run."""
     for step in setup:
         if "say" in step:
             engine.respond(str(step["say"]))

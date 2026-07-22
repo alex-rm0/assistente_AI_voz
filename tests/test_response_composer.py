@@ -214,7 +214,8 @@ def test_technical_details_only_appear_when_explicitly_requested(tmp_path: Path)
     natural_answer = engine.respond("o que sabes sobre mim?")
     technical_answer = engine.respond("o que sabes sobre mim com detalhes?")
 
-    assert llm.chat_calls == 1
-    assert natural_answer == llm.reply
+    assert llm.chat_calls == 0
+    assert "Codex" in natural_answer
+    assert "Categoria:" not in natural_answer
     assert "Categoria:" in technical_answer
     assert "confiança:" in technical_answer.lower()

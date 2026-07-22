@@ -270,8 +270,8 @@ _ACADEMIC_CONTEXT_PATTERN = re.compile(r",?\s*da\s+(faculdade|universidade)\b", 
 
 _DATE_REFERENCE_PATTERN = re.compile(
     r"\b(para a semana|na pr[oó]xima semana|depois de amanh[aã]|amanh[aã]|"
-    r"n[ao] (?:segunda|ter[cç]a|quarta|quinta|sexta)-feira|s[aá]bado|domingo|"
-    r"dia\s+\d{1,2}|no pr[oó]ximo m[eê]s)\b",
+    r"(?:n[ao]\s+)?(?:segunda|ter[cç]a|quarta|quinta|sexta)-feira|s[aá]bado|domingo|"
+    r"(?:no\s+)?dia\s+\d{1,2}|no pr[oó]ximo m[eê]s)\b",
     re.IGNORECASE,
 )
 
@@ -315,6 +315,7 @@ def extract_academic_event_candidate(message: str, previous_assistant_message: s
     date_match = _DATE_REFERENCE_PATTERN.search(text)
     if date_match:
         attributes["date_reference"] = date_match.group(1)
+        text = _DATE_REFERENCE_PATTERN.sub("", text)
 
     for pattern in _DISCIPLINE_PATTERNS:
         discipline_match = pattern.search(text)
@@ -330,9 +331,11 @@ def extract_academic_event_candidate(message: str, previous_assistant_message: s
     if degree_match:
         attributes["degree"] = (degree_match.group(1) or degree_match.group(2)).strip(" .,!?:;")
 
+    explicit_status = False
     for status, markers in _STATUS_MARKERS.items():
         if any(marker in normalized for marker in markers):
             attributes["status"] = status
+            explicit_status = True
             attributes.setdefault("event", "exame")
 
     if attributes.get("event") == "exame" and "status" not in attributes:
@@ -341,13 +344,19 @@ def extract_academic_event_candidate(message: str, previous_assistant_message: s
     # A question ("Lembras-te do exame?") is not new evidence on its own —
     # associating a short reply with a preceding "Que exame?" only makes
     # sense when the current turn is itself a statement, not another query.
+    previous_normalized = _normalize(previous_assistant_message)
     if not is_query:
-        previous_normalized = _normalize(previous_assistant_message)
         if "discipline" not in attributes and any(marker in previous_normalized for marker in _ASKED_WHICH_EVENT):
             candidate = _ACADEMIC_CONTEXT_PATTERN.sub("", text).strip(" .!?")
             if candidate and len(candidate.split()) <= 6:
                 attributes["discipline"] = candidate
                 attributes.setdefault("event", "exame")
+
+    if "degree" in attributes and "event" not in attributes and any(marker in previous_normalized for marker in _EVENT_MARKERS):
+        attributes["event"] = "exame"
+
+    if "event" not in attributes and "discipline" not in attributes and not any(attributes.get(key) for key in ("degree", "course")):
+        return {}
 
     if is_query:
         # A bare mention of "exame" inside a question is not new evidence —
@@ -356,6 +365,14 @@ def extract_academic_event_candidate(message: str, previous_assistant_message: s
         substantive_keys = set(attributes) - {"event", "status"}
         trivial_status = attributes.get("status") == "upcoming"
         if not substantive_keys and trivial_status:
+            return {}
+
+    if attributes.get("event") == "exame" and not is_query:
+        has_concrete_detail = any(
+            attributes.get(key)
+            for key in ("discipline", "degree", "course", "date_reference", "context", "person", "location", "outcome")
+        )
+        if not has_concrete_detail and not explicit_status:
             return {}
 
     return attributes
@@ -551,6 +568,8 @@ def _trim_trailing_time_reference(value: str) -> str:
     trimmed = value
     for pattern in (
         r"\s+(?:e|é|esta|está|foi)?\s*para\s+.*$",
+        r"\s+(?:e|é|esta|está|foi)?\s*(?:no\s+)?dia\s+\d{1,2}.*$",
+        r"\s+(?:e|é|esta|está|foi)?\s*(?:n[ao]\s+)?(?:segunda|ter[cç]a|quarta|quinta|sexta)-feira.*$",
         r"\s+n[ao]\s+semana.*$",
         r"\s+(?:hoje|amanha|depois de amanha).*$",
         r"\s+(?:e|é|esta|está|foi)\s*$",

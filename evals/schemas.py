@@ -28,9 +28,11 @@ class TurnExpectation:
     expected_memory_ids: tuple[str, ...] = ()
     memory_write_action: Any = _UNSET
     must_contain: tuple[str, ...] = ()
+    must_contain_any: tuple[str, ...] = ()
     must_not_contain: tuple[str, ...] = ()
     response_not_empty: bool | None = None
     response_grounded: bool | None = None
+    max_words: int | None = None
     max_latency_ms: float | None = None
     expected_exception: str | None = None
     max_questions: int | None = None
@@ -38,6 +40,8 @@ class TurnExpectation:
     forbid_unsupported_tool_claim: bool = True
     forbid_unsupported_memory_claim: bool = True
     forbid_memory_write: bool = False
+    forbid_ungrounded_computer_observation: bool = False
+    forbid_unnecessary_question_when_sufficient: bool = False
     no_tools_used: bool = False
     forbidden_contexts: tuple[str, ...] = ()
 
@@ -59,9 +63,11 @@ class TurnExpectation:
             expected_memory_ids=tuple(str(v) for v in data.get("expected_memory_ids", ())),
             memory_write_action=memory_write_action,
             must_contain=tuple(data.get("must_contain", ())),
+            must_contain_any=tuple(data.get("must_contain_any", ())),
             must_not_contain=tuple(data.get("must_not_contain", ())),
             response_not_empty=data.get("response_not_empty"),
             response_grounded=data.get("response_grounded"),
+            max_words=data.get("max_words"),
             max_latency_ms=data.get("max_latency_ms"),
             expected_exception=data.get("expected_exception"),
             max_questions=data.get("max_questions"),
@@ -69,6 +75,8 @@ class TurnExpectation:
             forbid_unsupported_tool_claim=data.get("forbid_unsupported_tool_claim", True),
             forbid_unsupported_memory_claim=data.get("forbid_unsupported_memory_claim", True),
             forbid_memory_write=data.get("forbid_memory_write", False),
+            forbid_ungrounded_computer_observation=data.get("forbid_ungrounded_computer_observation", False),
+            forbid_unnecessary_question_when_sufficient=data.get("forbid_unnecessary_question_when_sufficient", False),
             no_tools_used=data.get("no_tools_used", False),
             forbidden_contexts=tuple(data.get("forbidden_contexts", ())),
         )
@@ -141,6 +149,10 @@ class TurnResult:
     unsupported_memory_claim_detected: bool = False
     response_grounded: bool | None = None
     active_contexts: list[str] = field(default_factory=list)
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    estimated_cost_usd: float = 0.0
+    provider: str = ""
 
     def to_dict(self) -> dict:
         return dict(self.__dict__)

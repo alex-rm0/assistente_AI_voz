@@ -10,6 +10,7 @@ workspace/conversation.json
 evals/results/runs/
 evals/results/latest/
 evals/results/comparisons/
+evals/results/model_comparison*/
 evals/results/legacy/
 evals/results/index.md
 evals/results/baselines/

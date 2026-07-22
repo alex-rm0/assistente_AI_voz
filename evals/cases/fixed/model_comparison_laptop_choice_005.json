@@ -1,0 +1,17 @@
+{
+  "id": "model_comparison_laptop_choice_005",
+  "category": "model_comparison",
+  "description": "Escolha de portatil deve recolher necessidades antes de recomendar marcas.",
+  "turns": [
+    {
+      "user": "Ajuda-me a escolher um portatil novo.",
+      "expected": {
+        "response_not_empty": true,
+        "max_questions": 2,
+        "must_not_contain": ["compra", "MacBook", "ThinkPad", "Dell XPS"],
+        "llm_calls_max": 2
+      }
+    }
+  ],
+  "tags": ["model_comparison", "preferences"]
+}

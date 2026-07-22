@@ -1,0 +1,18 @@
+{
+  "id": "model_comparison_social_001",
+  "category": "model_comparison",
+  "description": "Conversa social curta sem ferramentas.",
+  "turns": [
+    {
+      "user": "Ola, como estas?",
+      "expected": {
+        "response_not_empty": true,
+        "max_questions": 1,
+        "no_tools_used": true,
+        "llm_calls_max": 1,
+        "must_not_contain": ["workspace", "Personal Model", "SQLite"]
+      }
+    }
+  ],
+  "tags": ["model_comparison", "conversation"]
+}

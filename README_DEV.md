@@ -53,20 +53,65 @@ Se aparecerem textos como `NÃ£o` ou `EstratÃ©gias` na consola, confirma prim
 com os logs `[UTF8 DEBUG]`: a consola do Windows pode mostrar UTF-8 como ANSI,
 mesmo quando as strings internas continuam corretas.
 
-### Modelo
+### Modelo e provider
 
-O Echo usa um unico modelo Ollama para tudo (Response Composer, regeneracao e
-Voice Critic, quando este e chamado). Configuravel por variavel de ambiente,
-com valor por defeito se nao for definida:
+Por defeito, o Echo usa Ollama local com `llama3.1:8b`.
+
+A configuracao principal fica em `config/settings.json`:
+
+```json
+"model": {
+  "provider": "ollama",
+  "name": "llama3.1:8b"
+}
+```
+
+A configuracao antiga `ollama.model` continua suportada por compatibilidade.
+
+Prioridade de escolha:
+
+```text
+argumentos CLI > variaveis de ambiente > settings.json > defaults
+```
+
+Exemplos:
 
 ```powershell
-$env:OLLAMA_MODEL="llama3.1:8b"
+python app.py --ui echo-os --provider ollama --model llama3.1:8b
+```
+
+```powershell
+$env:ECHO_MODEL_PROVIDER="ollama"
+$env:ECHO_MODEL_NAME="llama3.1:8b"
 python app.py
 ```
 
-Por defeito (sem variavel definida): `OLLAMA_MODEL=llama3.1:8b` (ver
-`assistant/llm.py`). No arranque, a consola mostra `[OLLAMA CONFIG]` com o
-modelo efetivamente usado.
+Anthropic esta preparado, mas protegido para evitar custos acidentais:
+
+```powershell
+$env:ECHO_MODEL_PROVIDER="anthropic"
+$env:ECHO_MODEL_NAME="<model-id>"
+$env:ANTHROPIC_API_KEY="<chave>"
+$env:ECHO_ALLOW_PAID_MODEL_CALLS="true"
+python app.py --ui echo-os --provider anthropic --model <model-id>
+```
+
+Sem `ANTHROPIC_API_KEY`, o Echo mostra um erro claro. Sem
+`ECHO_ALLOW_PAID_MODEL_CALLS=true`, nenhuma chamada Anthropic e executada.
+Nunca coloques a chave em `settings.json`.
+
+No arranque, a consola mostra:
+
+```text
+[MODEL CONFIG]
+provider=ollama
+provider_source=settings.json
+model=llama3.1:8b
+model_source=settings.json
+```
+
+Telemetria de turnos regista provider, modelo, latencia, tokens e custo
+estimado quando o provider devolver essa informacao.
 
 ## Correr testes
 

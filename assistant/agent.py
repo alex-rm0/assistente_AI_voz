@@ -1096,6 +1096,8 @@ _RECENT_ACTIVITY_MARKERS = (
     "em que projeto trabalhei",
     "em que projeto estive a trabalhar",
     "o que tenho aberto",
+    "que aplicacoes estou a usar",
+    "que aplicacao estou a usar",
     "programas estou a usar",
     "que programas estou a usar",
 )

@@ -1,0 +1,17 @@
+{
+  "id": "model_comparison_latency_simple_015",
+  "category": "model_comparison",
+  "description": "Comando rapido simples deve evitar LLM.",
+  "turns": [
+    {
+      "user": "abre youtube",
+      "expected": {
+        "response_not_empty": true,
+        "llm_calls_max": 0,
+        "forbidden_contexts": ["TECH_CONTEXT", "WORK_CONTEXT"],
+        "max_latency_ms": 1000
+      }
+    }
+  ],
+  "tags": ["model_comparison", "latency", "fast_router"]
+}

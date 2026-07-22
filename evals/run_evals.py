@@ -34,7 +34,12 @@ CASES_DIR = Path(__file__).resolve().parent / "cases"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def load_cases(category: str | None, case_id: str | None, include_generated: bool) -> list[EvalCase]:
+def load_cases(
+    category: str | None,
+    case_id: str | None,
+    include_generated: bool,
+    case_ids: set[str] | None = None,
+) -> list[EvalCase]:
     cases: list[EvalCase] = []
     sources = [CASES_DIR / "fixed"]
     if include_generated:
@@ -49,8 +54,21 @@ def load_cases(category: str | None, case_id: str | None, include_generated: boo
                 continue
             if case_id and case.id != case_id:
                 continue
+            if case_ids is not None and case.id not in case_ids:
+                continue
             cases.append(case)
     return cases
+
+
+def load_case_ids(path: str) -> set[str] | None:
+    if not path:
+        return None
+    values = {
+        line.strip()
+        for line in Path(path).read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    }
+    return values or None
 
 
 def run_case(case: EvalCase, run: EvalRun, config: ProviderConfig) -> CaseEvaluation:
@@ -73,6 +91,10 @@ def run_case(case: EvalCase, run: EvalRun, config: ProviderConfig) -> CaseEvalua
             model_source=telemetry.get("model_source") or config.model_source,
             llm_calls=int(telemetry.get("llm_calls") or 0),
             llm_call_sources=list(telemetry.get("llm_call_sources") or []),
+            input_tokens=telemetry.get("input_tokens"),
+            output_tokens=telemetry.get("output_tokens"),
+            estimated_cost_usd=float(telemetry.get("estimated_cost_usd") or 0.0),
+            provider=str(telemetry.get("provider") or config.provider),
             tools_used=list(telemetry.get("tools_used") or []),
             selected_memory_ids=list(telemetry.get("selected_memory_ids") or []),
             memory_write_action=telemetry.get("memory_write_action"),
@@ -138,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Echo evals runner")
     parser.add_argument("--category", default=None)
     parser.add_argument("--case", default=None, help="run a single case by id")
+    parser.add_argument("--case-list", default="", help="run the case ids listed in a text file")
     parser.add_argument("--provider", default="ollama")
     parser.add_argument("--model", default="")
     parser.add_argument("--include-generated", action="store_true")
@@ -162,16 +185,16 @@ def main(argv: list[str] | None = None) -> int:
         results_store.BASELINES_DIR = results_store.RESULTS_ROOT / "baselines"
         results_store.INDEX_PATH = results_store.RESULTS_ROOT / "index.md"
 
-    cases = load_cases(args.category, args.case, args.include_generated)
+    cases = load_cases(args.category, args.case, args.include_generated, load_case_ids(args.case_list))
     if not cases:
         print("[evals] nenhum caso encontrado para os filtros indicados.")
         return 1
 
     resolved_model = args.model
-    if not resolved_model and args.provider == "ollama":
-        from assistant.llm import OLLAMA_MODEL
+    if not resolved_model:
+        from assistant.model_provider import DEFAULT_ANTHROPIC_MODEL, DEFAULT_OLLAMA_MODEL
 
-        resolved_model = OLLAMA_MODEL
+        resolved_model = DEFAULT_ANTHROPIC_MODEL if args.provider == "anthropic" else DEFAULT_OLLAMA_MODEL
     config = ProviderConfig(provider=args.provider, model=resolved_model)
     config.model_source = f"provider:{config.provider}"
     command_used = "python -m evals.run_evals " + " ".join(argv if argv is not None else sys.argv[1:])

@@ -111,6 +111,15 @@ def test_recent_activity_on_pc_has_evidence() -> None:
     assert evidence_span == "atividade recente"
 
 
+def test_current_applications_question_has_system_state_evidence() -> None:
+    text = _normalize_text("Que aplicacoes estou a usar agora?")
+    supported, evidence_span, confidence = system_state_tool_intent(text)
+
+    assert supported is True
+    assert evidence_span == "que aplicacoes estou a usar"
+    assert confidence == 1.0
+
+
 def test_negotiate_protocol_question_has_no_tool_evidence() -> None:
     text = _normalize_text("Quanto devo negociar no protocolo?")
     supported, evidence_span, confidence = system_state_tool_intent(text)

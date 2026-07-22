@@ -5,6 +5,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from assistant.model_provider import ProviderConfigurationError
 from assistant.voice_critic import VoiceCritic
 
 
@@ -97,6 +98,8 @@ class ResponseComposer:
                 history=request.history,
                 system_prompt=_system_prompt_for(request),
             )
+        except ProviderConfigurationError:
+            raise
         except Exception:
             return _simple_fallback(request)
 
@@ -119,6 +122,8 @@ class ResponseComposer:
                 history=history or [],
                 system_prompt=_SYSTEM_PROMPT,
             )
+        except ProviderConfigurationError:
+            raise
         except Exception:
             return ""
         return (reply or "").strip()

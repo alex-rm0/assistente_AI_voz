@@ -24,6 +24,21 @@ def summarize(case_evaluations: list[CaseEvaluation], provider: str, model: str)
     exceptions = [t for c in case_evaluations for t in c.turn_evaluations if t.result and t.result.exception_type]
     latencies = [t.result.latency_ms for c in case_evaluations for t in c.turn_evaluations if t.result]
     avg_latency = sum(latencies) / len(latencies) if latencies else 0.0
+    input_tokens = [
+        t.result.input_tokens
+        for c in case_evaluations
+        for t in c.turn_evaluations
+        if t.result and t.result.input_tokens is not None
+    ]
+    output_tokens = [
+        t.result.output_tokens
+        for c in case_evaluations
+        for t in c.turn_evaluations
+        if t.result and t.result.output_tokens is not None
+    ]
+    estimated_cost_usd = sum(
+        t.result.estimated_cost_usd for c in case_evaluations for t in c.turn_evaluations if t.result
+    )
 
     by_category: dict[str, dict[str, int]] = {}
     for case_eval in case_evaluations:
@@ -53,6 +68,9 @@ def summarize(case_evaluations: list[CaseEvaluation], provider: str, model: str)
         "failed_turns": len(failed_turns),
         "exceptions": len(exceptions),
         "average_latency_ms": avg_latency,
+        "input_tokens": sum(input_tokens) if input_tokens else None,
+        "output_tokens": sum(output_tokens) if output_tokens else None,
+        "estimated_cost_usd": estimated_cost_usd,
         "human_review_required_turns": len(human_review_turns),
         "by_category": by_category,
         "by_classification": by_classification,
@@ -76,6 +94,11 @@ _CSV_FIELDNAMES = [
     "selected_path",
     "response_source",
     "llm_calls",
+    "input_tokens",
+    "output_tokens",
+    "estimated_cost_usd",
+    "provider",
+    "model",
     "latency_ms",
     "exception_type",
     "failure_classification",
@@ -102,6 +125,11 @@ def render_csv(case_evaluations: list[CaseEvaluation]) -> str:
                     "selected_path": result.selected_path if result else "",
                     "response_source": result.response_source if result else "",
                     "llm_calls": result.llm_calls if result else "",
+                    "input_tokens": result.input_tokens if result and result.input_tokens is not None else "",
+                    "output_tokens": result.output_tokens if result and result.output_tokens is not None else "",
+                    "estimated_cost_usd": f"{result.estimated_cost_usd:.8f}" if result else "",
+                    "provider": result.provider if result else "",
+                    "model": result.model if result else "",
                     "latency_ms": f"{result.latency_ms:.1f}" if result else "",
                     "exception_type": result.exception_type if result else "",
                     "failure_classification": turn.failure_classification,
@@ -134,6 +162,9 @@ def render_markdown(run_id: str, summary: dict, case_evaluations: list[CaseEvalu
     lines.append(f"- Turnos falhados: {summary['failed_turns']}")
     lines.append(f"- Exceções: {summary['exceptions']}")
     lines.append(f"- Latência média: {summary['average_latency_ms']:.0f} ms")
+    lines.append(f"- Input tokens: {summary.get('input_tokens') if summary.get('input_tokens') is not None else 'n/a'}")
+    lines.append(f"- Output tokens: {summary.get('output_tokens') if summary.get('output_tokens') is not None else 'n/a'}")
+    lines.append(f"- Custo estimado: ${summary.get('estimated_cost_usd', 0.0):.6f}")
     if summary.get("human_review_required_turns"):
         lines.append(f"- Turnos sinalizados para revisão humana: {summary['human_review_required_turns']}")
     lines.append("")

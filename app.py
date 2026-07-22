@@ -12,6 +12,12 @@ from assistant.conversation import AssistantEngine
 from assistant.context_observer import ContextObserver
 from assistant.long_term_memory import LongTermMemory
 from assistant.memory import ConversationMemory
+from assistant.model_provider import (
+    DEFAULT_OLLAMA_MODEL,
+    OllamaProvider,
+    ProviderBackedLLM,
+    resolve_model_provider,
+)
 from assistant.personal_model import PersonalModel
 from assistant.presence_manager import PresenceManager
 from assistant.prompts import get_base_system_prompt
@@ -25,7 +31,6 @@ import assistant.tools  # noqa: F401
 
 BASE_DIR = Path(__file__).resolve().parent
 SETTINGS_PATH = BASE_DIR / "config" / "settings.json"
-DEFAULT_OLLAMA_MODEL = "llama3.1:8b"
 
 
 def load_settings() -> dict[str, Any]:
@@ -40,30 +45,24 @@ def resolve_ollama_model(
     settings: dict[str, Any] | None = None,
     default_model: str = DEFAULT_OLLAMA_MODEL,
 ) -> tuple[str, str]:
-    """Resolve the Ollama model once, with explicit priority and source."""
-    environment = env if env is not None else os.environ
-    config = settings or {}
-    ollama_config = config.get("ollama", {})
-    settings_model = ollama_config.get("model") if isinstance(ollama_config, dict) else None
-    candidates = (
-        (cli_model, "cli"),
-        (environment.get("ECHO_MODEL_NAME"), "ECHO_MODEL_NAME"),
-        (environment.get("OLLAMA_MODEL"), "OLLAMA_MODEL"),
-        (settings_model, "settings.json"),
-        (default_model, "default"),
+    """Compatibility wrapper around the provider resolver for old tests/imports."""
+    resolved = resolve_model_provider(
+        cli_provider="ollama",
+        cli_model=cli_model,
+        env=env,
+        settings=settings if settings is not None else {},
     )
-    for value, source in candidates:
-        model = str(value or "").strip()
-        if model:
-            return model, source
-    return default_model, "default"
+    source = "settings.json" if resolved.model_source == "settings.json:ollama" else resolved.model_source
+    if source == "default" and default_model != DEFAULT_OLLAMA_MODEL:
+        return default_model, "default"
+    return resolved.model or default_model, source
 
 
 def main() -> int:
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication
 
-    from assistant.llm import OllamaClient, OllamaSettings
+    from assistant.anthropic_provider import AnthropicProvider
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     if hasattr(sys.stderr, "reconfigure"):
@@ -71,7 +70,8 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description="Echo desktop app")
     parser.add_argument("--ui", choices=("classic", "echo-os"), default="classic")
-    parser.add_argument("--model", default="", help="Ollama model name for this run")
+    parser.add_argument("--provider", choices=("ollama", "anthropic"), default="", help="Model provider for this run")
+    parser.add_argument("--model", default="", help="Model name for this run")
     args, qt_args = parser.parse_known_args()
 
     settings = load_settings()
@@ -147,22 +147,37 @@ def main() -> int:
     observer_enabled = bool(observer_config.get("enabled", True))
     observer_interval_ms = int(observer_config.get("interval_seconds", 15)) * 1000
 
-    ollama_config = settings.get("ollama", {})
-    model, model_source = resolve_ollama_model(cli_model=args.model, settings=settings)
-    print("[OLLAMA CONFIG]")
-    print(f"model={model}")
-    print(f"model_source={model_source}")
-
-    ollama_settings = OllamaSettings(
-        base_url=ollama_config.get("base_url", "http://127.0.0.1:11434"),
-        model=model,
-        model_source=model_source,
-        timeout_seconds=int(ollama_config.get("timeout_seconds", 120)),
-        debug_performance=debug_performance,
-        debug_ollama_payload=debug_ollama_payload,
+    resolved_model = resolve_model_provider(
+        cli_provider=args.provider,
+        cli_model=args.model,
+        settings=settings,
     )
+    print("[MODEL CONFIG]")
+    print(f"provider={resolved_model.provider}")
+    print(f"provider_source={resolved_model.provider_source}")
+    print(f"model={resolved_model.model}")
+    print(f"model_source={resolved_model.model_source}")
+
     default_system_prompt = get_base_system_prompt()
-    llm = OllamaClient(settings=ollama_settings, system_prompt=default_system_prompt)
+    if resolved_model.provider == "ollama":
+        provider = OllamaProvider(
+            model=resolved_model.model,
+            base_url=resolved_model.base_url,
+            timeout_seconds=resolved_model.timeout_seconds,
+        )
+    else:
+        anthropic_config = settings.get("anthropic", {}) if isinstance(settings.get("anthropic", {}), dict) else {}
+        provider = AnthropicProvider(
+            model=resolved_model.model,
+            base_url=resolved_model.base_url,
+            timeout_seconds=resolved_model.timeout_seconds,
+            max_tokens=int(anthropic_config.get("max_tokens", 1024)),
+        )
+    llm = ProviderBackedLLM(
+        provider=provider,
+        system_prompt=default_system_prompt,
+        model_source=resolved_model.model_source,
+    )
     long_term_memory = LongTermMemory(
         data_path=data_path,
         db_file=memory_config.get("long_term_db", "long_term_memory.sqlite"),
@@ -237,7 +252,7 @@ def main() -> int:
 
         window = MainWindow(
             app_name=app_name,
-            model_name=ollama_settings.model,
+            model_name=resolved_model.model,
             responder=engine.respond,
             clear_history=engine.clear_history,
             change_presence=change_presence,
