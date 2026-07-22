@@ -1,0 +1,21 @@
+{
+  "id": "conversation_unrelated_after_exception_regression_007",
+  "category": "conversation",
+  "description": "Segunda mensagem da conversa da regressão original: nunca pode lançar exceção",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Há pedidos a que não consegues responder?",
+      "expected": {
+        "response_not_empty": true,
+        "expected_exception": null
+      }
+    }
+  ],
+  "tags": [
+    "conversation",
+    "regression",
+    "part1"
+  ]
+}

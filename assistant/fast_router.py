@@ -1,23 +1,32 @@
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from pathlib import Path
+from urllib.parse import quote_plus, urlparse
 
 
-URL_ALIASES = {
+DEFAULT_QUICK_SITES = {
     "google": "https://www.google.com",
     "youtube": "https://www.youtube.com",
     "gmail": "https://mail.google.com",
     "outlook": "https://outlook.office.com",
+    "chatgpt": "https://chatgpt.com",
+    "github": "https://github.com",
 }
 BLOCKED_SCHEMES = {"file", "javascript", "data"}
 BLOCKED_TARGET_WORDS = {"powershell", "cmd", "terminal"}
 BLOCKED_EXECUTABLE_SUFFIXES = {".exe", ".bat", ".ps1", ".cmd"}
+QUICK_SITES_PATH = Path(__file__).resolve().parents[1] / "config" / "quick_sites.json"
+SEARCH_ENGINES = {
+    "google": ("Google", "https://www.google.com/search?q={query}"),
+    "youtube": ("YouTube", "https://www.youtube.com/results?search_query={query}"),
+}
 SAFE_URL_REFUSAL = (
     "Nao posso abrir esse destino por seguranca. "
-    "So aceito URLs http/https seguros ou atalhos conhecidos como youtube e google."
+    "So aceito URLs http/https seguros ou atalhos configurados."
 )
 
 
@@ -30,7 +39,7 @@ class FastRoute:
     reason: str = "Comando simples resolvido pelo router rapido."
 
 
-def route_fast_command(message: str) -> FastRoute | None:
+def route_fast_command(message: str, quick_sites: dict[str, str] | None = None) -> FastRoute | None:
     text = _normalize_text(message).strip(" .,!?:;")
 
     if text in {"limpar conversa", "limpa conversa", "limpa a conversa", "apaga conversa"}:
@@ -39,20 +48,63 @@ def route_fast_command(message: str) -> FastRoute | None:
     if text in {"testar microfone", "testa microfone", "testa o microfone", "testar o microfone"}:
         return FastRoute(kind="test_microphone")
 
+    search_route = _search_route(message)
+    if search_route is not None:
+        return search_route
+
     open_target = _extract_open_target(message)
     if open_target is not None and _is_dangerous_open_target(open_target):
         return FastRoute(kind="denied", response=SAFE_URL_REFUSAL)
 
-    url = _url_from_open_target(open_target)
+    url = _url_from_open_target(open_target, quick_sites=quick_sites)
+    if url == "":
+        return FastRoute(kind="denied", response=SAFE_URL_REFUSAL)
     if url:
+        arguments = {"url": url}
+        display_name = _display_name_for_open_target(open_target, url)
+        if display_name:
+            arguments["display_name"] = display_name
         return FastRoute(
             kind="tool",
             tool_name="open_url",
-            arguments={"url": url},
+            arguments=arguments,
             reason="O utilizador pediu para abrir um URL simples.",
         )
 
     return None
+
+
+def _search_route(message: str) -> FastRoute | None:
+    match = re.match(
+        r"^\s*(?:pesquisa|pesquisar|procura|procurar)\s+no\s+(google|youtube)(?:\s+por)?\s+(.+?)\s*$",
+        message,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    engine = _normalize_text(match.group(1))
+    query = match.group(2).strip()
+    if not query:
+        return None
+
+    engine_info = SEARCH_ENGINES.get(engine)
+    if engine_info is None:
+        return None
+
+    engine_label, url_template = engine_info
+    encoded_query = quote_plus(query)
+    url = url_template.format(query=encoded_query)
+    return FastRoute(
+        kind="tool",
+        tool_name="open_url",
+        arguments={
+            "url": url,
+            "search_engine": engine_label,
+            "search_query": query,
+        },
+        reason=f"O utilizador pediu uma pesquisa rapida no {engine_label}.",
+    )
 
 
 def _extract_open_target(message: str) -> str | None:
@@ -65,13 +117,40 @@ def _extract_open_target(message: str) -> str | None:
     return raw_target.strip().strip("\"'").rstrip(".,;")
 
 
-def _url_from_open_target(target: str | None) -> str | None:
+def load_quick_sites(config_path: Path | None = None) -> dict[str, str]:
+    path = config_path or QUICK_SITES_PATH
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return dict(DEFAULT_QUICK_SITES)
+
+    if isinstance(raw, dict) and isinstance(raw.get("quick_sites"), dict):
+        raw_sites = raw["quick_sites"]
+    elif isinstance(raw, dict):
+        raw_sites = raw
+    else:
+        return dict(DEFAULT_QUICK_SITES)
+
+    sites: dict[str, str] = {}
+    for name, url in raw_sites.items():
+        if isinstance(name, str) and isinstance(url, str):
+            normalized_name = _normalize_text(name).strip(" .,!?:;")
+            if normalized_name:
+                sites[normalized_name] = url.strip()
+    return sites or dict(DEFAULT_QUICK_SITES)
+
+
+def _url_from_open_target(target: str | None, quick_sites: dict[str, str] | None = None) -> str | None:
     if target is None:
         return None
     normalized_target = _normalize_text(target)
+    sites = _normalized_quick_sites(quick_sites)
 
-    if normalized_target in URL_ALIASES:
-        return URL_ALIASES[normalized_target]
+    if normalized_target in sites:
+        configured_url = sites[normalized_target]
+        if not _is_http_url(configured_url):
+            return ""
+        return configured_url.strip()
 
     if _is_http_url(target):
         return target.strip()
@@ -80,6 +159,25 @@ def _url_from_open_target(target: str | None) -> str | None:
         return _normalize_url(target)
 
     return None
+
+
+def _display_name_for_open_target(target: str | None, url: str) -> str:
+    normalized = _normalize_text(target or "").strip(" .,!?:;")
+    if normalized in {"gmail", "mail", "email", "correio"} or "mail.google.com" in url:
+        return "Gmail"
+    return ""
+
+
+def _normalized_quick_sites(quick_sites: dict[str, str] | None = None) -> dict[str, str]:
+    sites = quick_sites if quick_sites is not None else load_quick_sites()
+    normalized: dict[str, str] = {}
+    for name, url in sites.items():
+        if not isinstance(name, str) or not isinstance(url, str):
+            continue
+        key = _normalize_text(name).strip(" .,!?:;")
+        if key:
+            normalized[key] = url.strip()
+    return normalized
 
 
 def _is_dangerous_open_target(target: str) -> bool:

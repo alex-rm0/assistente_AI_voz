@@ -1,0 +1,19 @@
+{
+  "id": "conversation_failed_exam_005",
+  "category": "conversation",
+  "description": "Reação a más notícias não deve ser genérica nem exceder uma pergunta",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Chumbei num exame.",
+      "expected": {
+        "response_not_empty": true,
+        "max_questions": 1
+      }
+    }
+  ],
+  "tags": [
+    "conversation"
+  ]
+}

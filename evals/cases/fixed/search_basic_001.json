@@ -1,0 +1,28 @@
+{
+  "id": "search_basic_001",
+  "category": "search",
+  "description": "Pedido direto de pesquisa é reconhecido e nunca inventa resultados sem ferramenta",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Pesquisa sobre Picasso.",
+      "expected": {
+        "selected_path": "RESEARCH_REQUEST",
+        "llm_calls_max": 0,
+        "must_contain": [
+          "Ainda não tenho uma ferramenta de pesquisa ligada."
+        ],
+        "must_not_contain": [
+          "segundo",
+          "de acordo com",
+          "encontrei"
+        ]
+      }
+    }
+  ],
+  "tags": [
+    "search",
+    "grounding"
+  ]
+}

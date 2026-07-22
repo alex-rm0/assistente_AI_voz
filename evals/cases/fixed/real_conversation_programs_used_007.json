@@ -1,0 +1,20 @@
+{
+  "id": "real_conversation_programs_used_007",
+  "category": "real_conversation",
+  "description": "Pergunta sobre programas usados recentemente deve usar get_recent_activity",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Que programas usei recentemente?",
+      "expected": {
+        "expected_exception": null,
+        "expected_tools": ["get_recent_activity"],
+        "forbidden_paths": ["GENERAL_CONVERSATION"],
+        "response_grounded": true,
+        "response_not_empty": true
+      }
+    }
+  ],
+  "tags": ["real_conversation", "ferro_erro"]
+}

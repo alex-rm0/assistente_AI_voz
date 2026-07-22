@@ -1,0 +1,39 @@
+{
+  "id": "memory_exam_recall_001",
+  "category": "memory",
+  "description": "Recuperar a disciplina de um exame persistente",
+  "setup": [
+    {
+      "fact_type": "academic_event",
+      "fields": {
+        "event": "exame",
+        "discipline": "Estratégias Algorítmicas",
+        "date_reference": "para a semana",
+        "status": "upcoming"
+      }
+    }
+  ],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Que exame vou ter para a semana?",
+      "expected": {
+        "selected_path": "MEMORY_RECALL",
+        "llm_calls_max": 0,
+        "memory_write_action": null,
+        "must_contain": [
+          "Estratégias Algorítmicas"
+        ],
+        "must_not_contain": [
+          "não sei",
+          "qual é ele"
+        ]
+      }
+    }
+  ],
+  "tags": [
+    "memory",
+    "regression",
+    "grounding"
+  ]
+}

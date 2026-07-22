@@ -72,7 +72,7 @@ def test_private_mode_does_not_store_conversation(tmp_path: Path) -> None:
 
     response = engine.respond("ola")
 
-    assert response == "resposta"
+    assert response == "Olá! Como estás?"
     assert memory.load() == []
 
 
@@ -93,7 +93,7 @@ def test_active_conversation_passes_memory_context_to_agent(tmp_path: Path) -> N
     presence = PresenceManager(PresenceState.ACTIVE_CONVERSATION)
     engine = make_engine(tmp_path, presence, memory)
 
-    response = engine.respond("ola")
+    response = engine.respond("Ajuda-me a pensar numa arquitetura melhor para este assistente.")
 
     assert response == "resposta"
     assert "Memoria permanente relevante" in engine.llm.last_system_prompt

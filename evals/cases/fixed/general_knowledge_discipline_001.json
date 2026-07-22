@@ -1,0 +1,24 @@
+{
+  "id": "general_knowledge_discipline_001",
+  "category": "general_knowledge",
+  "description": "Pergunta de conhecimento geral sobre uma disciplina não é um comando de memória",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "O que sabes sobre Estratégias Algorítmicas?",
+      "expected": {
+        "selected_path": "GENERAL_KNOWLEDGE_QUERY",
+        "forbidden_paths": [
+          "MEMORY_COMMAND",
+          "MEMORY_RECALL"
+        ],
+        "forbid_memory_write": true
+      }
+    }
+  ],
+  "tags": [
+    "general_knowledge",
+    "routing"
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "id": "gen_memory_recall_phrasing_003",
+  "category": "memory",
+  "description": "Variação de formulação de recall: 'O que tens guardado sobre o meu exame?'",
+  "setup": [
+    {
+      "fact_type": "academic_event",
+      "fields": {
+        "event": "exame",
+        "discipline": "Estratégias Algorítmicas",
+        "date_reference": "para a semana",
+        "status": "upcoming"
+      }
+    }
+  ],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "O que tens guardado sobre o meu exame?",
+      "expected": {
+        "response_not_empty": true,
+        "forbid_unsupported_memory_claim": true
+      }
+    }
+  ],
+  "tags": [
+    "memory",
+    "generated"
+  ],
+  "generated": true,
+  "review_status": "unreviewed",
+  "generator": "template",
+  "source_case_id": "memory_exam_recall_001"
+}

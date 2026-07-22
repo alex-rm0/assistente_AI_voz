@@ -1,0 +1,26 @@
+{
+  "id": "real_conversation_arm_wrestling_001",
+  "category": "real_conversation",
+  "description": "'Braco de ferro' nunca deve ativar TECH_CONTEXT nem chamar get_recent_activity",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Não vou fazer braço de ferro.",
+      "expected": {
+        "expected_exception": null,
+        "no_tools_used": true,
+        "forbidden_tools": [
+          "get_recent_activity"
+        ],
+        "forbidden_contexts": [
+          "TECH_CONTEXT"
+        ]
+      }
+    }
+  ],
+  "tags": [
+    "real_conversation",
+    "ferro_erro"
+  ]
+}

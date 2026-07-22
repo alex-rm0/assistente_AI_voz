@@ -1,0 +1,21 @@
+{
+  "id": "conversation_hello_001",
+  "category": "conversation",
+  "description": "Cumprimento simples deve ter resposta breve e natural",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Olá",
+      "expected": {
+        "response_not_empty": true,
+        "max_questions": 1,
+        "forbid_memory_write": true
+      }
+    }
+  ],
+  "tags": [
+    "conversation",
+    "regression"
+  ]
+}

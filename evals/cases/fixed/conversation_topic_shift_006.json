@@ -1,0 +1,23 @@
+{
+  "id": "conversation_topic_shift_006",
+  "category": "conversation",
+  "description": "Pedido explícito de mudança de tema é determinístico (sem LLM)",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Vamos falar sobre outro tema.",
+      "expected": {
+        "selected_path": "TOPIC_SHIFT",
+        "llm_calls_max": 0,
+        "must_contain": [
+          "Que tema queres seguir agora"
+        ]
+      }
+    }
+  ],
+  "tags": [
+    "conversation",
+    "routing"
+  ]
+}

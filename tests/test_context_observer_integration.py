@@ -64,7 +64,7 @@ def test_observed_context_is_passed_to_agent(tmp_path: Path) -> None:
         context_observer=observer,
     )
 
-    engine.respond("ola")
+    engine.respond("Ajuda-me a resolver este erro no ficheiro nota.txt.")
 
     assert "contexto_observado" in llm.last_system_prompt
     assert "Code.exe" in llm.last_system_prompt

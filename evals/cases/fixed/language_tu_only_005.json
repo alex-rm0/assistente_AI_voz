@@ -1,0 +1,28 @@
+{
+  "id": "language_tu_only_005",
+  "category": "language",
+  "description": "Depois de pedir tratamento por tu, nunca deve usar você",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Trata-me por tu, por favor.",
+      "expected": {
+        "response_not_empty": true
+      }
+    },
+    {
+      "user": "Como correu o teu dia?",
+      "expected": {
+        "must_not_contain": [
+          "você",
+          "voce"
+        ]
+      }
+    }
+  ],
+  "tags": [
+    "language",
+    "tu_voce"
+  ]
+}

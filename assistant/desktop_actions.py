@@ -50,6 +50,14 @@ ALLOWED_APPLICATIONS = {
         "executables": ("explorer.exe",),
     },
 }
+SPECIAL_FOLDER_ALIASES = {
+    "documentos": "Documents",
+    "documents": "Documents",
+    "os documentos": "Documents",
+    "downloads": "Downloads",
+    "transferencias": "Downloads",
+    "transferencias": "Downloads",
+}
 
 
 @dataclass(frozen=True)
@@ -69,6 +77,9 @@ class DesktopActionRunner(Protocol):
         ...
 
     def open_project(self, editor_executable: str | None, project_path: Path) -> DesktopActionResult:
+        ...
+
+    def focus_application(self, app_key: str) -> DesktopActionResult:
         ...
 
 
@@ -113,6 +124,16 @@ class WindowsDesktopActionRunner:
         except Exception as exc:
             return DesktopActionResult(False, f"Nao consegui abrir o projeto '{project_path.name}': {exc}")
         return DesktopActionResult(True, f"Abri o projeto {project_path.name}.")
+
+    def focus_application(self, app_key: str) -> DesktopActionResult:
+        label = app_label(app_key)
+        try:
+            focused = _focus_window_for_application(app_key)
+        except Exception as exc:
+            return DesktopActionResult(False, f"O {label} ja esta aberto, mas nao consegui traze-lo para a frente: {exc}")
+        if not focused:
+            return DesktopActionResult(False, f"O {label} ja esta aberto, mas nao encontrei uma janela para trazer para a frente.")
+        return DesktopActionResult(True, f"Trouxe o {label} para a frente.")
 
 
 def normalize_app_name(value: str) -> str:
@@ -179,6 +200,19 @@ def resolve_safe_path(raw_path: str, allowed_roots: list[Path]) -> Path | None:
     return None
 
 
+def resolve_special_folder(raw_path: str) -> Path | None:
+    normalized = _normalize(raw_path).strip(" .,!?:;")
+    folder_name = SPECIAL_FOLDER_ALIASES.get(normalized)
+    if not folder_name:
+        return None
+    path = Path.home() / folder_name
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return None
+    return resolved if resolved.exists() and resolved.is_dir() else None
+
+
 def validate_url(url: str) -> str:
     value = url.strip()
     parsed = urlparse(value)
@@ -192,7 +226,8 @@ def known_project_path(project_name: str, known_projects: dict[str, str], projec
     candidates = dict(known_projects)
     candidates.setdefault("assistenteia", str(project_root))
     for name, raw_path in candidates.items():
-        if _normalize(name) != normalized:
+        normalized_name = _normalize(name)
+        if normalized_name != normalized and normalized not in _project_aliases(normalized_name):
             continue
         path = Path(raw_path)
         if not path.is_absolute():
@@ -214,6 +249,14 @@ def remember_desktop_action(long_term_memory, action: str, target: str) -> None:
         return
     try:
         remember(f"O utilizador usa frequentemente {target} para {action}.", category="preferencias")
+    except Exception:
+        pass
+
+    remember_timeline_event = getattr(long_term_memory, "remember_timeline_event", None)
+    if remember_timeline_event is None:
+        return
+    try:
+        remember_timeline_event(f"Acao no Windows: {action} - {target}.")
     except Exception:
         return
 
@@ -240,6 +283,47 @@ def _app_markers(app_key: str) -> set[str]:
     markers.update(_normalize(executable) for executable in info.get("executables", ()))
     markers.update(_normalize(alias) for alias in info.get("aliases", ()))
     return {marker for marker in markers if marker}
+
+
+def _project_aliases(normalized_name: str) -> set[str]:
+    aliases = {normalized_name}
+    compact = normalized_name.replace(" ", "")
+    aliases.add(compact)
+    if "assistente" in normalized_name:
+        aliases.update({"assistente", "assistente ia", "assistenteia"})
+    return aliases
+
+
+def _focus_window_for_application(app_key: str) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    markers = _app_markers(app_key)
+    found_hwnd = wintypes.HWND()
+
+    enum_proc_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def callback(hwnd, _lparam):
+        nonlocal found_hwnd
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buffer, length + 1)
+        title = _normalize(buffer.value)
+        if any(marker in title for marker in markers):
+            found_hwnd = hwnd
+            return False
+        return True
+
+    user32.EnumWindows(enum_proc_type(callback), 0)
+    if not found_hwnd:
+        return False
+    user32.ShowWindow(found_hwnd, 9)
+    return bool(user32.SetForegroundWindow(found_hwnd))
 
 
 def _normalize(value: str) -> str:

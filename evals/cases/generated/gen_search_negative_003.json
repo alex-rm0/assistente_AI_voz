@@ -1,0 +1,29 @@
+{
+  "id": "gen_search_negative_003",
+  "category": "search",
+  "description": "Controlo negativo de pesquisa: 'Quero pesquisar Picasso mais tarde.'",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Quero pesquisar Picasso mais tarde.",
+      "expected": {
+        "forbidden_paths": [
+          "RESEARCH_REQUEST"
+        ],
+        "must_not_contain": [
+          "Ainda não tenho uma ferramenta de pesquisa ligada."
+        ]
+      }
+    }
+  ],
+  "tags": [
+    "search",
+    "generated",
+    "negative"
+  ],
+  "generated": true,
+  "review_status": "unreviewed",
+  "generator": "template",
+  "source_case_id": "search_negative_control_004"
+}

@@ -1,0 +1,19 @@
+{
+  "id": "academic_status_upcoming_001",
+  "category": "academic_status",
+  "description": "\"Vou ter um exame.\" cria um registo com estado upcoming",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Vou ter um exame muito importante para a semana.",
+      "expected": {
+        "memory_write_action": "created"
+      }
+    }
+  ],
+  "tags": [
+    "academic_status",
+    "memory"
+  ]
+}

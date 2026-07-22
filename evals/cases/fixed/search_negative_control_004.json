@@ -1,0 +1,24 @@
+{
+  "id": "search_negative_control_004",
+  "category": "search",
+  "description": "Caso negativo: gostar de pesquisar não é um pedido de pesquisa",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Gosto de pesquisar Picasso.",
+      "expected": {
+        "forbidden_paths": [
+          "RESEARCH_REQUEST"
+        ],
+        "must_not_contain": [
+          "Ainda não tenho uma ferramenta de pesquisa ligada."
+        ]
+      }
+    }
+  ],
+  "tags": [
+    "search",
+    "negative"
+  ]
+}

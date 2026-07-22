@@ -4,4 +4,11 @@ __pycache__/
 *.pyc
 data/history.json
 data/*.sqlite
+data/debug/*.wav
 workspace/conversation.json
+evals/results/runs/
+evals/results/latest/
+evals/results/comparisons/
+evals/results/legacy/
+evals/results/index.md
+# baselines/ is deliberately NOT ignored — those runs are explicitly kept.

@@ -15,6 +15,7 @@ from assistant.desktop_actions import (
     remember_desktop_action,
     resolve_application,
     resolve_safe_path,
+    resolve_special_folder,
     validate_url,
 )
 from assistant.tool_registry import tool_registry
@@ -164,17 +165,22 @@ def open_application(
     context_observer: Any | None = None,
     long_term_memory: Any | None = None,
     desktop_action_runner: Any | None = None,
+    focus_existing: bool = False,
 ) -> str:
     app_key, executable, uri = resolve_application(app_name)
     if not app_key:
         return "Nao posso abrir essa aplicacao. So posso abrir apps permitidas."
     label = app_label(app_key)
-    if is_application_open(app_key, context_observer):
-        return f"O {label} ja esta aberto."
     runner = desktop_action_runner or DESKTOP_ACTION_RUNNER
+    if is_application_open(app_key, context_observer):
+        if focus_existing:
+            focus = getattr(runner, "focus_application", None)
+            if focus is not None:
+                return focus(app_key).message
+        return f"O {label} ja esta aberto."
     result = runner.open_application(app_key, executable, uri)
     if result.ok:
-        remember_desktop_action(long_term_memory, "abrir aplicacoes", label)
+        remember_desktop_action(long_term_memory, "abriu aplicacao", label)
     return result.message
 
 
@@ -188,6 +194,7 @@ def open_file(
     path: str,
     workspace_path: Path | None = None,
     project_root: Path | None = None,
+    long_term_memory: Any | None = None,
     desktop_action_runner: Any | None = None,
 ) -> str:
     roots = _allowed_desktop_roots(workspace_path, project_root)
@@ -195,7 +202,10 @@ def open_file(
     if resolved is None or not resolved.is_file():
         return "Nao posso abrir esse ficheiro. So abro ficheiros dentro da workspace ou de projetos conhecidos."
     runner = desktop_action_runner or DESKTOP_ACTION_RUNNER
-    return runner.open_path(resolved).message
+    result = runner.open_path(resolved)
+    if result.ok:
+        remember_desktop_action(long_term_memory, "abriu ficheiro", resolved.name)
+    return result.message
 
 
 @tool_registry.register(
@@ -208,14 +218,21 @@ def open_folder(
     path: str,
     workspace_path: Path | None = None,
     project_root: Path | None = None,
+    long_term_memory: Any | None = None,
     desktop_action_runner: Any | None = None,
 ) -> str:
     roots = _allowed_desktop_roots(workspace_path, project_root)
-    resolved = resolve_safe_path(path, roots)
+    resolved = resolve_special_folder(path) or resolve_safe_path(path, roots)
     if resolved is None or not resolved.is_dir():
-        return "Nao posso abrir essa pasta. So abro pastas dentro da workspace ou de projetos conhecidos."
+        return (
+            "Nao posso abrir essa pasta. So abro pastas dentro da workspace, "
+            "de projetos conhecidos, Documents ou Downloads."
+        )
     runner = desktop_action_runner or DESKTOP_ACTION_RUNNER
-    return runner.open_path(resolved).message
+    result = runner.open_path(resolved)
+    if result.ok:
+        remember_desktop_action(long_term_memory, "abriu pasta", resolved.name)
+    return result.message
 
 
 @tool_registry.register(
@@ -235,7 +252,7 @@ def open_url(
     runner = desktop_action_runner or DESKTOP_ACTION_RUNNER
     result = runner.open_url(safe_url)
     if result.ok:
-        remember_desktop_action(long_term_memory, "abrir URLs", safe_url)
+        remember_desktop_action(long_term_memory, "abriu URL", safe_url)
     return result.message
 
 
@@ -263,7 +280,7 @@ def open_project(
     runner = desktop_action_runner or DESKTOP_ACTION_RUNNER
     result = runner.open_project(executable, resolved)
     if result.ok:
-        remember_desktop_action(long_term_memory, "abrir projetos", resolved.name)
+        remember_desktop_action(long_term_memory, "abriu projeto", resolved.name)
     return result.message
 
 

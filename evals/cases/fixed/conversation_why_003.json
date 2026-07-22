@@ -1,0 +1,21 @@
+{
+  "id": "conversation_why_003",
+  "category": "conversation",
+  "description": "Pergunta vaga isolada não deve causar excecao (caso da regressao Parte 1)",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Porquê?",
+      "expected": {
+        "response_not_empty": true,
+        "expected_exception": null
+      }
+    }
+  ],
+  "tags": [
+    "conversation",
+    "regression",
+    "part1"
+  ]
+}

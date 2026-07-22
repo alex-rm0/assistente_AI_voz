@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="pt-PT">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Echo Web UI Prototype</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+  <script defer src="./echo_entity.js"></script>
+  <script defer src="./echo_ui.js"></script>
+</head>
+<body>
+  <main class="prototype-shell">
+    <div id="stageScaler" class="stage-scaler">
+      <section class="stage" aria-label="Echo prototype">
+        <canvas id="mind"></canvas>
+
+        <svg class="ticks" viewBox="0 0 1300 812" aria-hidden="true">
+          <path d="M28 44 h20 M28 44 v20"></path>
+          <path d="M1272 44 h-20 M1272 44 v20"></path>
+          <path d="M28 768 h20 M28 768 v-20"></path>
+          <path d="M1272 768 h-20 M1272 768 v-20"></path>
+        </svg>
+
+        <header class="topbar">
+          <div class="brand">
+            <span class="wordmark">ECHO</span>
+            <span id="statusDot" class="status-dot"></span>
+            <span id="statusLine" class="status-line">ACTIVE · PROTOTYPE</span>
+          </div>
+          <span class="context-line">KNOWN 1240 · TOGETHER 15 MO</span>
+        </header>
+
+        <p id="echoSays" class="echo-says" aria-live="polite"></p>
+        <div id="echoResponse" class="echo-response" aria-live="polite"></div>
+
+        <section id="researchWorkspace" class="research-workspace" aria-label="Workspace de pesquisa">
+          <div class="research-header">
+            <span class="hint-label">PESQUISA</span>
+            <strong id="researchTopic">Sem pesquisa ativa</strong>
+            <button id="closeResearch" class="research-close" type="button" aria-label="Fechar pesquisa">×</button>
+          </div>
+          <p id="researchStatus" class="research-status">A aguardar.</p>
+          <p id="researchSummary" class="research-summary"></p>
+          <div id="researchResults" class="research-results"></div>
+        </section>
+
+        <div id="workspaceHint" class="workspace-hint">
+          <div class="hint-panel">
+            <span class="hint-label">ECHO</span>
+            <strong id="responseTitle">Última resposta</strong>
+            <p id="bridgeReply">A resposta aparece aqui.</p>
+          </div>
+        </div>
+
+        <section class="input-zone" aria-label="Entrada de texto">
+          <form id="echoForm" class="input-pill">
+            <div class="waver" aria-hidden="true">
+              <i></i><i></i><i></i><i></i><i></i>
+            </div>
+            <input id="voiceIn" type="text" autocomplete="off" spellcheck="false" placeholder="talk to Echo, or type...">
+            <button id="clearButton" class="clear-button" type="button">CLEAR ↩</button>
+          </form>
+
+          <div id="suggestions" class="suggestions">
+            <span>TRY</span>
+            <button type="button" data-message="Olá">olá</button>
+            <button type="button" data-message="planear férias">planear férias</button>
+            <button type="button" data-message="ship the api">ship the api</button>
+            <button type="button" data-message="onde ficámos?">onde ficámos?</button>
+          </div>
+        </section>
+
+        <aside class="debug-states" aria-label="Estados de protótipo">
+          <button type="button" data-state="idle">1</button>
+          <button type="button" data-state="thinking">2</button>
+          <button type="button" data-state="speaking">3</button>
+          <button type="button" data-state="error">4</button>
+        </aside>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

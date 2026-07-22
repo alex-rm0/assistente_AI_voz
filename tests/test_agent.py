@@ -228,9 +228,12 @@ def test_compound_list_and_summarize_first_file(tmp_path: Path) -> None:
     result = agent.run("Lista os ficheiros da workspace e resume o primeiro.", make_context())
 
     assert "Resumo do primeiro ficheiro." in result.response
-    assert "[DEBUG_AGENT]" in result.response
-    assert "list_workspace_files" in result.response
-    assert "read_workspace_file" in result.response
+    # Debug info is a separate field, never part of the response shown to
+    # the user (see Part 4 of the ferro/erro/debug-leakage task).
+    assert "[DEBUG_AGENT]" not in result.response
+    assert "[DEBUG_AGENT]" in result.debug_trace
+    assert "list_workspace_files" in result.debug_trace
+    assert "read_workspace_file" in result.tools_used
 
 
 def test_compound_read_and_create_note_requires_confirmation(tmp_path: Path) -> None:
@@ -266,8 +269,8 @@ def test_find_relevant_documents_uses_multiple_reads(tmp_path: Path) -> None:
     result = agent.run("Procura documentos sobre RVCC e diz-me quais parecem relevantes.", make_context())
 
     assert "documento_rvcc.txt parece relevante." in result.response
-    assert "list_workspace_files" in result.response
-    assert "read_workspace_file" in result.response
+    assert "list_workspace_files" in result.tools_used
+    assert "read_workspace_file" in result.tools_used
 
 
 def test_analyze_existing_files_suggests_organization(tmp_path: Path) -> None:
@@ -320,9 +323,10 @@ def test_system_state_debug_shows_tool_and_result(tmp_path: Path) -> None:
     result = agent.run("Que janelas tens detetadas?", make_context())
 
     assert "Janelas detetadas:" in result.response
-    assert "[DEBUG_AGENT]" in result.response
-    assert "Ferramenta escolhida: get_open_windows" in result.response
-    assert "Resultado resumido:" in result.response
+    assert "[DEBUG_AGENT]" not in result.response
+    assert "[DEBUG_AGENT]" in result.debug_trace
+    assert "Ferramenta escolhida: get_open_windows" in result.debug_trace
+    assert "Resultado resumido:" in result.debug_trace
 
 
 def test_presence_state_question_uses_presence_tool_not_llm(tmp_path: Path) -> None:

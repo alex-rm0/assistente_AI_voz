@@ -1,0 +1,32 @@
+{
+  "id": "memory_question_does_not_write_004",
+  "category": "memory",
+  "description": "Uma pergunta sobre memória não é nova evidência (não deve criar/atualizar factos)",
+  "setup": [
+    {
+      "fact_type": "academic_event",
+      "fields": {
+        "event": "exame",
+        "discipline": "Estratégias Algorítmicas",
+        "status": "upcoming"
+      }
+    }
+  ],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Ainda te lembras do exame de que te tinha falado?",
+      "expected": {
+        "selected_path": "MEMORY_RECALL",
+        "memory_write_action": null,
+        "must_contain": [
+          "Estratégias Algorítmicas"
+        ]
+      }
+    }
+  ],
+  "tags": [
+    "memory",
+    "regression"
+  ]
+}

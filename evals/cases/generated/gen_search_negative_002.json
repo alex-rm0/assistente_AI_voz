@@ -1,0 +1,29 @@
+{
+  "id": "gen_search_negative_002",
+  "category": "search",
+  "description": "Controlo negativo de pesquisa: 'Estive a pesquisar Picasso ontem.'",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Estive a pesquisar Picasso ontem.",
+      "expected": {
+        "forbidden_paths": [
+          "RESEARCH_REQUEST"
+        ],
+        "must_not_contain": [
+          "Ainda não tenho uma ferramenta de pesquisa ligada."
+        ]
+      }
+    }
+  ],
+  "tags": [
+    "search",
+    "generated",
+    "negative"
+  ],
+  "generated": true,
+  "review_status": "unreviewed",
+  "generator": "template",
+  "source_case_id": "search_negative_control_004"
+}

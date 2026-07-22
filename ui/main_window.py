@@ -52,8 +52,7 @@ class VoiceWorker(QObject):
 
     def run(self) -> None:
         try:
-            self.status_changed.emit("A ouvir...")
-            text = self.transcriber.record_and_transcribe(self.stop_event)
+            text = self.transcriber.record_and_transcribe(self.stop_event, self.status_changed.emit)
             self.status_changed.emit("Concluido.")
             self.finished.emit(text)
         except Exception as exc:
@@ -64,13 +63,35 @@ class MicrophoneTestWorker(QObject):
     finished = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, sample_rate: int) -> None:
+    def __init__(
+        self,
+        sample_rate: int,
+        input_device: str | int | None,
+        auto_select_input: bool,
+        silent_rms_threshold: float,
+        channels: int,
+        probe_duration: float,
+    ) -> None:
         super().__init__()
         self.sample_rate = sample_rate
+        self.input_device = input_device
+        self.auto_select_input = auto_select_input
+        self.silent_rms_threshold = silent_rms_threshold
+        self.channels = channels
+        self.probe_duration = probe_duration
 
     def run(self) -> None:
         try:
-            self.finished.emit(check_microphone(self.sample_rate))
+            self.finished.emit(
+                check_microphone(
+                    sample_rate=self.sample_rate,
+                    input_device=self.input_device,
+                    auto_select=self.auto_select_input,
+                    silent_rms_threshold=self.silent_rms_threshold,
+                    channels=self.channels,
+                    probe_duration=self.probe_duration,
+                )
+            )
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -119,13 +140,22 @@ class MainWindow(QMainWindow):
         set_tasks_panel_expanded: Callable[[bool], None],
         presence_names: list[str],
         active_presence: str,
+        on_close: Callable[[], None] | None = None,
         debug_contexts: bool = False,
         get_context_debug: Callable[[], str] | None = None,
         voice_available: bool = False,
         voice_status: str = "",
         voice_model: str = "base",
         voice_language: str = "pt",
-        voice_sample_rate: int = 16000,
+        voice_sample_rate: int = 44100,
+        voice_input_device: str | int | None = "default",
+        voice_auto_select_input: bool = True,
+        voice_silent_rms_threshold: float = 0.001,
+        voice_channels: int = 1,
+        voice_probe_duration: float = 0.5,
+        voice_min_record_seconds: float = 2.0,
+        voice_preroll_ms: int = 500,
+        voice_ready_delay_ms: int = 200,
         initial_messages: list[dict[str, str]] | None = None,
     ) -> None:
         super().__init__()
@@ -137,6 +167,7 @@ class MainWindow(QMainWindow):
         self.get_pending_task_count = get_pending_task_count
         self.get_tasks_panel_expanded = get_tasks_panel_expanded
         self.set_tasks_panel_expanded = set_tasks_panel_expanded
+        self.on_close = on_close
         self.debug_contexts = debug_contexts
         self.get_context_debug = get_context_debug
         self.thread: QThread | None = None
@@ -147,10 +178,26 @@ class MainWindow(QMainWindow):
         self.microphone_test_worker: MicrophoneTestWorker | None = None
         self.voice_available = voice_available
         self.voice_sample_rate = voice_sample_rate
+        self.voice_input_device = voice_input_device
+        self.voice_auto_select_input = voice_auto_select_input
+        self.voice_silent_rms_threshold = voice_silent_rms_threshold
+        self.voice_channels = voice_channels
+        self.voice_probe_duration = voice_probe_duration
+        self.voice_min_record_seconds = voice_min_record_seconds
+        self.voice_preroll_ms = voice_preroll_ms
+        self.voice_ready_delay_ms = voice_ready_delay_ms
         self.voice_transcriber = VoiceTranscriber(
             model_name=voice_model,
-            language=voice_language,
+            language=voice_language or "pt",
             sample_rate=voice_sample_rate,
+            input_device=voice_input_device,
+            auto_select_input=voice_auto_select_input,
+            silent_rms_threshold=voice_silent_rms_threshold,
+            channels=voice_channels,
+            probe_duration=voice_probe_duration,
+            min_record_seconds=voice_min_record_seconds,
+            preroll_ms=voice_preroll_ms,
+            ready_delay_ms=voice_ready_delay_ms,
         )
 
         self.setWindowTitle(app_name)
@@ -379,7 +426,7 @@ class MainWindow(QMainWindow):
         self.voice_worker.finished.connect(self._cleanup_voice_worker)
         self.voice_worker.failed.connect(self._cleanup_voice_worker)
         self.voice_button.setText("Parar")
-        self.voice_status_label.setText("A ouvir...")
+        self.voice_status_label.setText("Preparar...")
         self.voice_thread.start()
 
     def test_microphone(self) -> None:
@@ -388,7 +435,14 @@ class MainWindow(QMainWindow):
             return
 
         self.microphone_test_thread = QThread()
-        self.microphone_test_worker = MicrophoneTestWorker(self.voice_sample_rate)
+        self.microphone_test_worker = MicrophoneTestWorker(
+            self.voice_sample_rate,
+            self.voice_input_device,
+            self.voice_auto_select_input,
+            self.voice_silent_rms_threshold,
+            self.voice_channels,
+            self.voice_probe_duration,
+        )
         self.microphone_test_worker.moveToThread(self.microphone_test_thread)
         self.microphone_test_thread.started.connect(self.microphone_test_worker.run)
         self.microphone_test_worker.finished.connect(self._handle_microphone_test_success)
@@ -426,7 +480,9 @@ class MainWindow(QMainWindow):
             self.input_box.setPlainText(f"{current_text}\n{text}")
         else:
             self.input_box.setPlainText(text)
-        self.voice_status_label.setText("Pronto.")
+        duration = getattr(self.voice_transcriber, "last_audio_duration_seconds", 0.0)
+        rms = getattr(self.voice_transcriber, "last_audio_rms", 0.0)
+        self.voice_status_label.setText(f"Pronto. Audio: {duration:.1f}s, RMS {rms:.5f}")
         self._focus_input()
 
     def _handle_voice_error(self, error: str) -> None:
@@ -561,4 +617,6 @@ class MainWindow(QMainWindow):
             flush_summary = getattr(context_observer, "flush_summary", None)
             if flush_summary is not None:
                 flush_summary()
+        if self.on_close is not None:
+            self.on_close()
         super().closeEvent(event)

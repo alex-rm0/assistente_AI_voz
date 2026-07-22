@@ -1,0 +1,38 @@
+{
+  "id": "memory_continuation_do_not_know_005",
+  "category": "memory",
+  "description": "\"Não sabes?\" mantém o recall em curso via TTL de continuidade",
+  "setup": [
+    {
+      "fact_type": "academic_event",
+      "fields": {
+        "event": "exame",
+        "discipline": "Estratégias Algorítmicas",
+        "status": "upcoming"
+      }
+    }
+  ],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Qual era a disciplina do exame?",
+      "expected": {
+        "selected_path": "MEMORY_RECALL",
+        "must_contain": [
+          "Estratégias Algorítmicas"
+        ]
+      }
+    },
+    {
+      "user": "Não sabes?",
+      "expected": {
+        "selected_path": "MEMORY_RECALL",
+        "llm_calls_max": 0
+      }
+    }
+  ],
+  "tags": [
+    "memory",
+    "continuity"
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "id": "memory_clear_preserves_persistent_003",
+  "category": "memory",
+  "description": "Limpar a conversa não apaga a memória persistente (structured_facts)",
+  "setup": [
+    {
+      "fact_type": "academic_event",
+      "fields": {
+        "event": "exame",
+        "discipline": "Estratégias Algorítmicas",
+        "status": "upcoming"
+      }
+    }
+  ],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Limpa a conversa.",
+      "expected": {
+        "selected_path": "FAST_ROUTE",
+        "llm_calls_max": 0,
+        "must_contain": [
+          "Conversa limpa"
+        ]
+      }
+    },
+    {
+      "user": "Qual era a disciplina do exame?",
+      "expected": {
+        "selected_path": "MEMORY_RECALL",
+        "llm_calls_max": 0,
+        "must_contain": [
+          "Estratégias Algorítmicas"
+        ]
+      }
+    }
+  ],
+  "tags": [
+    "memory",
+    "regression",
+    "persistence"
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "id": "real_conversation_meeting_protocol_001",
+  "category": "real_conversation",
+  "description": "Reuniao/negociacao de protocolo real que expos o falso positivo ferro/erro e a chamada indevida a get_recent_activity",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Tenho uma reunião com a Águas de Coimbra.",
+      "expected": {
+        "expected_exception": null,
+        "no_tools_used": true,
+        "forbidden_tools": ["get_recent_activity"],
+        "must_not_contain": ["[DEBUG_AGENT]", "Passos internos", "Razao da escolha"],
+        "response_not_empty": true
+      }
+    },
+    {
+      "user": "É para rever e negociar um protocolo da Secção de Desportos Náuticos.",
+      "expected": {
+        "expected_exception": null,
+        "no_tools_used": true,
+        "forbidden_tools": ["get_recent_activity"],
+        "must_not_contain": ["[DEBUG_AGENT]", "Passos internos", "Razao da escolha"],
+        "response_not_empty": true
+      }
+    },
+    {
+      "user": "O apoio deles é superior a dez mil euros por ano.",
+      "expected": {
+        "expected_exception": null,
+        "no_tools_used": true,
+        "forbidden_tools": ["get_recent_activity"],
+        "must_not_contain": ["[DEBUG_AGENT]", "Passos internos", "Razao da escolha"],
+        "response_not_empty": true
+      }
+    },
+    {
+      "user": "Quero saber quanto estão dispostos a aumentar, mas não vou fazer braço de ferro.",
+      "expected": {
+        "expected_exception": null,
+        "selected_path": "GENERAL_CONVERSATION",
+        "forbidden_paths": ["AGENT"],
+        "llm_calls_max": 1,
+        "expected_tools": [],
+        "no_tools_used": true,
+        "forbidden_tools": ["get_recent_activity"],
+        "forbidden_contexts": ["TECH_CONTEXT"],
+        "must_not_contain": ["[DEBUG_AGENT]", "Passos internos", "Razao da escolha"],
+        "response_not_empty": true
+      }
+    }
+  ],
+  "tags": ["real_conversation", "regression", "ferro_erro"]
+}

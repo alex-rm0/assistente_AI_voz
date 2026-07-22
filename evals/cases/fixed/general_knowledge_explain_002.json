@@ -1,0 +1,21 @@
+{
+  "id": "general_knowledge_explain_002",
+  "category": "general_knowledge",
+  "description": "Pedido de explicação técnica geral",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Explica-me programação dinâmica.",
+      "expected": {
+        "selected_path": "GENERAL_KNOWLEDGE_QUERY",
+        "forbidden_paths": [
+          "MEMORY_COMMAND"
+        ]
+      }
+    }
+  ],
+  "tags": [
+    "general_knowledge"
+  ]
+}

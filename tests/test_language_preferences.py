@@ -68,7 +68,7 @@ def test_user_can_switch_current_language_preference(tmp_path: Path) -> None:
 def test_language_instruction_is_sent_to_llm(tmp_path: Path) -> None:
     engine = make_engine(tmp_path)
 
-    engine.respond("Olá")
+    engine.respond("Explica-me rapidamente o que é uma API.")
 
     assert "idioma_base = pt-PT" in engine.llm.last_system_prompt
     assert "idioma_atual = pt-PT" in engine.llm.last_system_prompt

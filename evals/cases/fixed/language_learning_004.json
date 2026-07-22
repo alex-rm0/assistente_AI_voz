@@ -1,0 +1,18 @@
+{
+  "id": "language_learning_004",
+  "category": "language",
+  "description": "Vocabulário PT-PT ao falar de aprendizagem",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "O que aprendeste hoje?",
+      "expected": {
+        "response_not_empty": true
+      }
+    }
+  ],
+  "tags": [
+    "language"
+  ]
+}

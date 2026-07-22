@@ -1,0 +1,18 @@
+{
+  "id": "conversation_so_so_004",
+  "category": "conversation",
+  "description": "Resposta emocional neutra não deve escrever memória",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Estou mais ou menos.",
+      "expected": {
+        "response_not_empty": true
+      }
+    }
+  ],
+  "tags": [
+    "conversation"
+  ]
+}

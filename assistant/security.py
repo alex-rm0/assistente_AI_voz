@@ -122,7 +122,7 @@ def _detect_allowed_action(text: str) -> str | None:
 
 
 def _mentions_path_outside_workspace(text: str, original_message: str) -> bool:
-    if ".." in original_message:
+    if re.search(r"(^|[\\/])\.\.([\\/]|$)", original_message):
         return True
 
     windows_drive = re.search(r"\b[a-zA-Z]:[\\/]", original_message)

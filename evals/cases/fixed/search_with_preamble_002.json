@@ -1,0 +1,22 @@
+{
+  "id": "search_with_preamble_002",
+  "category": "search",
+  "description": "Pedido de pesquisa precedido de conversa social ainda é reconhecido",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Estou bem. Pesquisa sobre Picasso.",
+      "expected": {
+        "selected_path": "RESEARCH_REQUEST",
+        "llm_calls_max": 0,
+        "must_contain": [
+          "Ainda não tenho uma ferramenta de pesquisa ligada."
+        ]
+      }
+    }
+  ],
+  "tags": [
+    "search"
+  ]
+}

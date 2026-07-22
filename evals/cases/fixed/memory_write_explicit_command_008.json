@@ -1,0 +1,25 @@
+{
+  "id": "memory_write_explicit_command_008",
+  "category": "memory",
+  "description": "Comando explícito de escrita é determinístico e nunca passa pelo Composer",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Regista que a disciplina é estratégias algoritmicas.",
+      "expected": {
+        "selected_path": "MEMORY_WRITE",
+        "llm_calls_max": 0,
+        "must_contain": [
+          "Registado",
+          "Estratégias Algorítmicas"
+        ]
+      }
+    }
+  ],
+  "tags": [
+    "memory",
+    "write",
+    "regression"
+  ]
+}

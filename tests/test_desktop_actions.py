@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from assistant.agent import Agent, AgentContext
 from assistant.desktop_actions import DesktopActionResult, normalize_app_name, validate_url
 from assistant.prompts import get_system_prompt
@@ -37,6 +39,24 @@ class FakeRunner:
     def open_project(self, editor_executable, project_path: Path):
         self.calls.append(("project", str(project_path)))
         return DesktopActionResult(True, f"Abri o projeto {project_path.name}.")
+
+    def focus_application(self, app_key):
+        self.calls.append(("focus", app_key))
+        return DesktopActionResult(True, f"Trouxe o {app_key} para a frente.")
+
+
+class FakeMemory:
+    def __init__(self) -> None:
+        self.remembered: list[tuple[str, str | None]] = []
+        self.timeline: list[str] = []
+
+    def remember(self, content: str, category: str | None = None) -> str:
+        self.remembered.append((content, category))
+        return "guardado"
+
+    def remember_timeline_event(self, content: str) -> str:
+        self.timeline.append(content)
+        return "registado"
 
 
 class FakeOpenAppObserver:
@@ -174,6 +194,48 @@ def test_agent_asks_confirmation_before_opening_application(tmp_path: Path) -> N
     assert runner.calls == [("application", "outlook")]
 
 
+@pytest.mark.parametrize("confirmation", ["sim", "Sim.", "ok"])
+def test_pending_action_accepts_confirmation_variants(tmp_path: Path, confirmation: str) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runner = FakeRunner()
+    agent = Agent(
+        FakeLLM(),
+        make_desktop_registry(),
+        workspace,
+        desktop_action_runner=runner,
+    )
+
+    first = agent.run("abre o browser", make_context())
+    second = agent.run(confirmation, make_context())
+
+    assert "Responde 'sim'" in first.response
+    assert "Abri chrome." in second.response
+    assert runner.calls == [("application", "chrome")]
+    assert not agent.has_pending_confirmation()
+
+
+@pytest.mark.parametrize("cancel", ["não", "nao.", "cancela"])
+def test_pending_action_accepts_cancel_variants(tmp_path: Path, cancel: str) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runner = FakeRunner()
+    agent = Agent(
+        FakeLLM(),
+        make_desktop_registry(),
+        workspace,
+        desktop_action_runner=runner,
+    )
+
+    first = agent.run("abre o browser", make_context())
+    second = agent.run(cancel, make_context())
+
+    assert "Responde 'sim'" in first.response
+    assert "cancelada" in second.response.lower()
+    assert runner.calls == []
+    assert not agent.has_pending_confirmation()
+
+
 def test_agent_does_not_ask_confirmation_when_application_is_already_open(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -188,8 +250,14 @@ def test_agent_does_not_ask_confirmation_when_application_is_already_open(tmp_pa
 
     result = agent.run("abre o codigo", make_context())
 
-    assert result.response == "O VS Code ja esta aberto."
+    assert result.response.startswith("O VS Code ja esta aberto. Queres que o traga para a frente?")
+    assert agent.has_pending_confirmation()
     assert runner.calls == []
+
+    confirmed = agent.run("sim", make_context())
+
+    assert "Trouxe o vscode para a frente." in confirmed.response
+    assert runner.calls == [("focus", "vscode")]
 
 
 def test_agent_can_open_known_project_after_confirmation(tmp_path: Path) -> None:
@@ -212,3 +280,70 @@ def test_agent_can_open_known_project_after_confirmation(tmp_path: Path) -> None
     assert "Queres que abra o projeto" in first.response
     assert "Abri o projeto assistenteIA." in second.response
     assert runner.calls == [("project", str(project))]
+
+
+def test_agent_opens_mail_as_gmail_when_configured(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runner = FakeRunner()
+    registry = make_desktop_registry()
+    agent = Agent(
+        FakeLLM(),
+        registry,
+        workspace,
+        desktop_config={"default_email": "gmail"},
+        desktop_action_runner=runner,
+    )
+
+    first = agent.run("abre o mail", make_context())
+    second = agent.run("sim", make_context())
+
+    assert "Queres que abra o Gmail?" in first.response
+    assert second.response == "Abri o URL: https://mail.google.com"
+    assert runner.calls == [("url", "https://mail.google.com")]
+
+
+def test_agent_opens_browser_alias_as_default_browser(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runner = FakeRunner()
+    agent = Agent(
+        FakeLLM(),
+        make_desktop_registry(),
+        workspace,
+        desktop_config={"default_browser": "chrome"},
+        desktop_action_runner=runner,
+    )
+
+    first = agent.run("abre o browser", make_context())
+    second = agent.run("sim", make_context())
+
+    assert "Queres que abra o Chrome?" in first.response
+    assert "Abri chrome." in second.response
+    assert runner.calls == [("application", "chrome")]
+
+
+def test_open_special_documents_folder_is_allowed(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    documents = home / "Documents"
+    documents.mkdir(parents=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runner = FakeRunner()
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    result = open_folder("documentos", workspace_path=workspace, project_root=workspace.parent, desktop_action_runner=runner)
+
+    assert result == "Abri 'Documents'."
+    assert runner.calls == [("path", str(documents))]
+
+
+def test_desktop_action_records_timeline_when_executed(tmp_path: Path) -> None:
+    memory = FakeMemory()
+    runner = FakeRunner()
+
+    result = open_url("https://example.com", long_term_memory=memory, desktop_action_runner=runner)
+
+    assert result == "Abri o URL: https://example.com"
+    assert ("O utilizador usa frequentemente https://example.com para abriu URL.", "preferencias") in memory.remembered
+    assert memory.timeline == ["Acao no Windows: abriu URL - https://example.com."]

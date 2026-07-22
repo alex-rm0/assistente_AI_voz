@@ -1,0 +1,28 @@
+{
+  "id": "academic_status_passed_003",
+  "category": "academic_status",
+  "description": "\"Passei.\" atualiza o registo existente para passed",
+  "setup": [
+    {
+      "fact_type": "academic_event",
+      "fields": {
+        "event": "exame",
+        "discipline": "Estratégias Algorítmicas",
+        "status": "upcoming"
+      }
+    }
+  ],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Passei.",
+      "expected": {
+        "forbid_memory_write": false
+      }
+    }
+  ],
+  "tags": [
+    "academic_status",
+    "memory"
+  ]
+}

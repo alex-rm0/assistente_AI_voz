@@ -1,0 +1,24 @@
+{
+  "id": "memory_no_grounding_blocks_claim_007",
+  "category": "memory",
+  "description": "Sem memória guardada, o Echo nunca deve fingir que se lembra",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Lembras-te do meu animal de estimação preferido?",
+      "expected": {
+        "selected_path": "MEMORY_RECALL",
+        "must_not_contain": [
+          "sim, lembro-me",
+          "era o"
+        ]
+      }
+    }
+  ],
+  "tags": [
+    "memory",
+    "grounding",
+    "regression"
+  ]
+}

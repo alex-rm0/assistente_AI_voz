@@ -4,6 +4,8 @@ import unicodedata
 from dataclasses import dataclass
 from enum import Enum
 
+from assistant.text_matching import contains_phrase, normalize_for_matching
+
 
 class ContextType(str, Enum):
     PERSONAL_CONTEXT = "PERSONAL_CONTEXT"
@@ -75,7 +77,7 @@ class ContextManager:
             total = 0.0
             reasons: list[str] = []
             for keyword, weight in weighted_keywords:
-                if keyword in text:
+                if contains_phrase(text, keyword):
                     total += weight
                     reasons.append(f"detetado '{keyword}'")
             if total > 0:

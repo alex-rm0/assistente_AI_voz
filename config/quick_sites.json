@@ -1,0 +1,9 @@
+{
+  "quick_sites": {
+    "youtube": "https://www.youtube.com",
+    "google": "https://www.google.com",
+    "gmail": "https://mail.google.com",
+    "chatgpt": "https://chatgpt.com",
+    "github": "https://github.com"
+  }
+}

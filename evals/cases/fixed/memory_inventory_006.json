@@ -1,0 +1,32 @@
+{
+  "id": "memory_inventory_006",
+  "category": "memory",
+  "description": "\"O que tens na memória?\" usa o caminho MEMORY_INVENTORY determinístico",
+  "setup": [
+    {
+      "fact_type": "academic_event",
+      "fields": {
+        "event": "exame",
+        "discipline": "Estratégias Algorítmicas",
+        "status": "upcoming"
+      }
+    }
+  ],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "O que tens na memória?",
+      "expected": {
+        "selected_path": "MEMORY_INVENTORY",
+        "llm_calls_max": 0,
+        "must_contain": [
+          "Estratégias Algorítmicas"
+        ]
+      }
+    }
+  ],
+  "tags": [
+    "memory",
+    "routing"
+  ]
+}

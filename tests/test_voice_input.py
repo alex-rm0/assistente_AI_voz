@@ -9,10 +9,19 @@ def test_voice_status_report_ready() -> None:
         missing_dependencies=[],
         microphone_ok=True,
         microphone_message="Microfone pronto.",
+        input_device="default",
+        auto_select_input=True,
+        model_name="base",
+        language="pt",
     )
 
     assert "whisper: pronto" in result
     assert "ffmpeg: pronto" in result
+    assert "voice.enabled: True" in result
+    assert "input_device: default" in result
+    assert "auto_select_input: True" in result
+    assert "modelo whisper: base" in result
+    assert "idioma configurado: pt" in result
     assert "A voz esta pronta para uso." in result
 
 

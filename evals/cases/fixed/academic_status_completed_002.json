@@ -1,0 +1,28 @@
+{
+  "id": "academic_status_completed_002",
+  "category": "academic_status",
+  "description": "\"Já fiz o exame.\" atualiza o registo existente",
+  "setup": [
+    {
+      "fact_type": "academic_event",
+      "fields": {
+        "event": "exame",
+        "discipline": "Estratégias Algorítmicas",
+        "status": "upcoming"
+      }
+    }
+  ],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Já fiz o exame.",
+      "expected": {
+        "forbid_memory_write": false
+      }
+    }
+  ],
+  "tags": [
+    "academic_status",
+    "memory"
+  ]
+}

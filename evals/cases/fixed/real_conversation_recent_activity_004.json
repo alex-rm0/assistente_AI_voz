@@ -1,0 +1,23 @@
+{
+  "id": "real_conversation_recent_activity_004",
+  "category": "real_conversation",
+  "description": "Pergunta legitima sobre atividade recente do computador deve usar get_recent_activity, nunca o Composer",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Atividade recente do computador",
+      "expected": {
+        "expected_exception": null,
+        "expected_tools": ["get_recent_activity"],
+        "forbidden_paths": ["GENERAL_CONVERSATION"],
+        "response_grounded": true,
+        "response_not_empty": true
+      }
+    }
+  ],
+  "tags": [
+    "real_conversation",
+    "ferro_erro"
+  ]
+}

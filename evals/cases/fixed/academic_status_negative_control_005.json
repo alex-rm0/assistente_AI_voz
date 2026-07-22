@@ -1,0 +1,19 @@
+{
+  "id": "academic_status_negative_control_005",
+  "category": "academic_status",
+  "description": "\"Vais conseguir responder.\" não é um evento académico (controlo negativo)",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Vais conseguir responder.",
+      "expected": {
+        "memory_write_action": null
+      }
+    }
+  ],
+  "tags": [
+    "academic_status",
+    "negative"
+  ]
+}

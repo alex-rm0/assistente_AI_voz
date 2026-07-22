@@ -1,0 +1,23 @@
+{
+  "id": "real_conversation_what_was_i_doing_005",
+  "category": "real_conversation",
+  "description": "Pergunta legitima sobre atividade recente (outra formulacao) deve usar get_recent_activity",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "O que estive a fazer no PC?",
+      "expected": {
+        "expected_exception": null,
+        "expected_tools": ["get_recent_activity"],
+        "forbidden_paths": ["GENERAL_CONVERSATION"],
+        "response_grounded": true,
+        "response_not_empty": true
+      }
+    }
+  ],
+  "tags": [
+    "real_conversation",
+    "ferro_erro"
+  ]
+}

@@ -31,3 +31,38 @@ def test_context_debug_includes_reason_and_weight() -> None:
     assert "PRODUCTIVITY_CONTEXT" in debug
     assert "peso" in debug
     assert "razao" in debug
+
+
+# --- Part 2: "erro" must never match as a substring inside "ferro" ---------
+
+
+def test_program_error_activates_tech_context() -> None:
+    manager = ContextManager()
+
+    names = {c.name for c in manager.identify("Tive um erro no programa.")}
+
+    assert ContextType.TECH_CONTEXT in names
+
+
+def test_arm_wrestling_does_not_activate_tech_context() -> None:
+    manager = ContextManager()
+
+    names = {c.name for c in manager.identify("Não vou fazer braço de ferro.")}
+
+    assert ContextType.TECH_CONTEXT not in names
+
+
+def test_iron_structure_does_not_activate_tech_context() -> None:
+    manager = ContextManager()
+
+    names = {c.name for c in manager.identify("A estrutura é em ferro.")}
+
+    assert ContextType.TECH_CONTEXT not in names
+
+
+def test_bare_erro_word_activates_tech_context() -> None:
+    manager = ContextManager()
+
+    names = {c.name for c in manager.identify("Ocorreu um erro.")}
+
+    assert ContextType.TECH_CONTEXT in names

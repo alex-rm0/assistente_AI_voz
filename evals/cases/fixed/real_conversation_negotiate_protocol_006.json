@@ -1,0 +1,24 @@
+{
+  "id": "real_conversation_negotiate_protocol_006",
+  "category": "real_conversation",
+  "description": "Pergunta sobre negociacao de protocolo nunca deve chamar get_recent_activity",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Quanto devo negociar no protocolo?",
+      "expected": {
+        "expected_exception": null,
+        "no_tools_used": true,
+        "forbidden_tools": [
+          "get_recent_activity"
+        ],
+        "response_not_empty": true
+      }
+    }
+  ],
+  "tags": [
+    "real_conversation",
+    "ferro_erro"
+  ]
+}

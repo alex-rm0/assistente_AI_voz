@@ -1,0 +1,20 @@
+{
+  "id": "conversation_hows_it_going_002",
+  "category": "conversation",
+  "description": "Pergunta social recíproca não deve escrever memória nem inventar ferramentas",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Tudo bem, e tu?",
+      "expected": {
+        "response_not_empty": true,
+        "forbid_memory_write": true
+      }
+    }
+  ],
+  "tags": [
+    "conversation",
+    "regression"
+  ]
+}

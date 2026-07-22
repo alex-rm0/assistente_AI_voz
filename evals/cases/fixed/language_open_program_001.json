@@ -1,0 +1,18 @@
+{
+  "id": "language_open_program_001",
+  "category": "language",
+  "description": "Vocabulário PT-PT ao falar de abrir um programa (sinaliza, não bloqueia)",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Como é que abro um programa no computador?",
+      "expected": {
+        "response_not_empty": true
+      }
+    }
+  ],
+  "tags": [
+    "language"
+  ]
+}

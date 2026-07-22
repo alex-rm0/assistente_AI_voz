@@ -1,0 +1,17 @@
+{
+  "id": "real_conversation_speculative_activity_009",
+  "category": "real_conversation",
+  "description": "Pergunta especulativa ('achas que') nao deve causar excecao nem resposta vazia; nao exige ferramenta obrigatoriamente",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "O que achas que estive a fazer?",
+      "expected": {
+        "expected_exception": null,
+        "response_not_empty": true
+      }
+    }
+  ],
+  "tags": ["real_conversation", "ferro_erro"]
+}

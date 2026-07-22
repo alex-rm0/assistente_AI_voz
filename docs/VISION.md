@@ -1,5 +1,14 @@
 # Visao do AssistenteIA
 
+Este documento complementa o manifesto central do projeto: [MANIFESTO.md](MANIFESTO.md).
+Para decisoes praticas de produto, usar tambem [PRODUCT_PRINCIPLES.md](PRODUCT_PRINCIPLES.md).
+O modelo cognitivo central esta definido em [COGNITIVE_MODEL.md](COGNITIVE_MODEL.md).
+Para novas funcionalidades, respeitar tambem [COGNITIVE_ARCHITECTURE.md](COGNITIVE_ARCHITECTURE.md)
+e [UI_PHILOSOPHY.md](UI_PHILOSOPHY.md).
+A voz e o estilo de conversa estao definidos em [VOICE_AND_CONVERSATION.md](VOICE_AND_CONVERSATION.md).
+O modelo de conhecimento sobre o Alexandre esta definido em [PERSONAL_MODEL.md](PERSONAL_MODEL.md).
+A evolucao por fases esta descrita em [ROADMAP.md](ROADMAP.md).
+
 ## Principio central
 
 O AssistenteIA e um companheiro digital persistente para Windows 11.

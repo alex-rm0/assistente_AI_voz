@@ -136,6 +136,10 @@ def test_fast_safe_url_examples_create_pending_actions_without_llm(tmp_path: Pat
     examples = (
         ("abre youtube", "https://www.youtube.com"),
         ("abre o google", "https://www.google.com"),
+        ("abre gmail", "https://mail.google.com"),
+        ("abre o gmail", "https://mail.google.com"),
+        ("abre chatgpt", "https://chatgpt.com"),
+        ("abre github", "https://github.com"),
         ("abre www.youtube.com", "https://www.youtube.com"),
         ("abre https://www.google.com", "https://www.google.com"),
     )
@@ -145,9 +149,37 @@ def test_fast_safe_url_examples_create_pending_actions_without_llm(tmp_path: Pat
 
         response = engine.respond(message)
 
-        assert f"Queres que abra este URL? {url}" in response
+        if url == "https://mail.google.com":
+            assert "Queres que abra o Gmail?" in response
+        else:
+            assert f"Queres que abra este URL? {url}" in response
         assert engine.agent.has_pending_confirmation()
         assert runner.opened_urls == []
+        assert_no_model_or_semantic_memory_calls(llm, memory)
+
+
+def test_confirming_each_configured_site_executes_expected_url_without_llm(tmp_path: Path) -> None:
+    examples = (
+        ("abre youtube", "https://www.youtube.com"),
+        ("abre google", "https://www.google.com"),
+        ("abre gmail", "https://mail.google.com"),
+        ("abre chatgpt", "https://chatgpt.com"),
+        ("abre github", "https://github.com"),
+    )
+
+    for index, (message, url) in enumerate(examples):
+        engine, llm, memory, runner = make_engine(tmp_path / f"confirm_{index}")
+
+        engine.respond(message)
+        llm.chat_calls = 0
+        llm.choose_tool_calls = 0
+        llm.embed_calls = 0
+        memory.context_for_calls = 0
+        response = engine.respond("sim")
+
+        assert response == f"Abri o URL: {url}"
+        assert runner.opened_urls == [url]
+        assert not engine.agent.has_pending_confirmation()
         assert_no_model_or_semantic_memory_calls(llm, memory)
 
 
@@ -171,6 +203,93 @@ def test_canceling_pending_fast_url_does_not_execute_or_call_llm(tmp_path: Path)
     engine, llm, memory, runner = make_engine(tmp_path)
 
     engine.respond("abre o youtube")
+    llm.chat_calls = 0
+    llm.choose_tool_calls = 0
+    llm.embed_calls = 0
+    memory.context_for_calls = 0
+    response = engine.respond("nao")
+
+    assert "cancelada" in response.lower()
+    assert runner.opened_urls == []
+    assert not engine.agent.has_pending_confirmation()
+    assert_no_model_or_semantic_memory_calls(llm, memory)
+
+
+def test_fast_search_examples_create_pending_actions_without_llm_or_runner(tmp_path: Path) -> None:
+    examples = (
+        (
+            "pesquisa no google por gatos",
+            "Google",
+            "gatos",
+            "https://www.google.com/search?q=gatos",
+        ),
+        (
+            "procura no google por temperaturas históricas em Coimbra",
+            "Google",
+            "temperaturas históricas em Coimbra",
+            "https://www.google.com/search?q=temperaturas+hist%C3%B3ricas+em+Coimbra",
+        ),
+        (
+            "pesquisar no google comandos powershell básicos",
+            "Google",
+            "comandos powershell básicos",
+            "https://www.google.com/search?q=comandos+powershell+b%C3%A1sicos",
+        ),
+        (
+            "pesquisa no youtube por tutorial python",
+            "YouTube",
+            "tutorial python",
+            "https://www.youtube.com/results?search_query=tutorial+python",
+        ),
+        (
+            "procura no youtube por música lo-fi",
+            "YouTube",
+            "música lo-fi",
+            "https://www.youtube.com/results?search_query=m%C3%BAsica+lo-fi",
+        ),
+        (
+            "pesquisa no google por file:///C:/Windows/System32/cmd.exe",
+            "Google",
+            "file:///C:/Windows/System32/cmd.exe",
+            "https://www.google.com/search?q=file%3A%2F%2F%2FC%3A%2FWindows%2FSystem32%2Fcmd.exe",
+        ),
+    )
+
+    for index, (message, engine_name, query, url) in enumerate(examples):
+        engine, llm, memory, runner = make_engine(tmp_path / f"search_{index}")
+
+        response = engine.respond(message)
+
+        assert f"Queres que pesquise no {engine_name} por: {query}?" in response
+        assert engine.agent.has_pending_confirmation()
+        assert runner.opened_urls == []
+        pending = engine.agent.pending_confirmation
+        assert pending is not None
+        assert pending["arguments"]["url"] == url
+        assert_no_model_or_semantic_memory_calls(llm, memory)
+
+
+def test_confirming_pending_fast_search_executes_without_llm(tmp_path: Path) -> None:
+    engine, llm, memory, runner = make_engine(tmp_path)
+
+    engine.respond("pesquisa no youtube por tutorial python tkinter")
+    llm.chat_calls = 0
+    llm.choose_tool_calls = 0
+    llm.embed_calls = 0
+    memory.context_for_calls = 0
+    response = engine.respond("sim")
+
+    expected_url = "https://www.youtube.com/results?search_query=tutorial+python+tkinter"
+    assert response == f"Abri o URL: {expected_url}"
+    assert runner.opened_urls == [expected_url]
+    assert not engine.agent.has_pending_confirmation()
+    assert_no_model_or_semantic_memory_calls(llm, memory)
+
+
+def test_canceling_pending_fast_search_does_not_execute_or_call_llm(tmp_path: Path) -> None:
+    engine, llm, memory, runner = make_engine(tmp_path)
+
+    engine.respond("pesquisa no google por gatos")
     llm.chat_calls = 0
     llm.choose_tool_calls = 0
     llm.embed_calls = 0

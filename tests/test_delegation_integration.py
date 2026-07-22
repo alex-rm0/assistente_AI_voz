@@ -69,4 +69,4 @@ def test_engine_keeps_simple_request_local(tmp_path: Path) -> None:
 
     response = engine.respond("Ola")
 
-    assert response == "resposta local"
+    assert response == "Olá! Como estás?"

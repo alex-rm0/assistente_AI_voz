@@ -2,9 +2,22 @@
 
 AssistenteIA e uma aplicacao desktop local para Windows 11 feita em Python, PySide6 e Ollama.
 
+## Documentos centrais
+
+- [MANIFESTO.md](docs/MANIFESTO.md): identidade e missão do Echo.
+- [PRODUCT_PRINCIPLES.md](docs/PRODUCT_PRINCIPLES.md): critérios de decisão do produto.
+- [COGNITIVE_MODEL.md](docs/COGNITIVE_MODEL.md): teoria central de como o Echo pensa.
+- [COGNITIVE_ARCHITECTURE.md](docs/COGNITIVE_ARCHITECTURE.md): componentes que implementam esse pensamento.
+- [PERSONAL_MODEL.md](docs/PERSONAL_MODEL.md): o que o Echo conhece sobre o Alexandre.
+- [VOICE_AND_CONVERSATION.md](docs/VOICE_AND_CONVERSATION.md): como o Echo comunica.
+- [UI_PHILOSOPHY.md](docs/UI_PHILOSOPHY.md): filosofia da interface como presença.
+- [ROADMAP.md](docs/ROADMAP.md): ordem de implementação por capacidades cognitivas.
+- [architecture.md](docs/architecture.md): arquitetura técnica atual.
+
 ## Funcionalidades atuais
 
 - Janela desktop com conversa, caixa de texto e botao Enviar.
+- Interface Echo OS experimental com workspace adaptativo inicial para pesquisa.
 - Conversa normal com um modelo local via Ollama.
 - Modelo configuravel em `config/settings.json`.
 - Agent Loop para decidir entre resposta direta e uso de uma ou varias ferramentas.
@@ -13,7 +26,11 @@ AssistenteIA e uma aplicacao desktop local para Windows 11 feita em Python, PySi
 - Context Interpreter para transformar snapshots tecnicos em resumo humano util.
 - Context Reasoning para transformar observacoes em conclusoes suportadas por evidencias.
 - Context Manager automatico com multiplos contextos ativos por mensagem.
+- Planner para transformar mensagem, contexto, memoria, tarefas e ferramentas num plano antes da resposta.
+- Session Manager para resumir sessoes de trabalho e recuperar continuidade entre aberturas da aplicacao.
 - Sistema de delegacao para escolher entre resolver localmente, preparar contexto para ChatGPT/Codex ou sugerir ferramenta externa.
+- Desktop Actions seguras com confirmacao para abrir apps, URLs, ficheiros, pastas e projetos conhecidos.
+- Deteccao deterministica de pedidos de pesquisa (`RESEARCH_REQUEST`) com resposta honesta quando nao existe ferramenta real ligada.
 - Tool Registry com ferramentas registadas automaticamente.
 - Ferramentas de estado do computador baseadas no Context Observer.
 - Listagem de ficheiros dentro de `workspace`.
@@ -25,7 +42,9 @@ AssistenteIA e uma aplicacao desktop local para Windows 11 feita em Python, PySi
 - Painel opcional de debug de contextos quando `DEBUG_AGENT=true`.
 - Memoria de conversa em `data/history.json`.
 - Memoria permanente em SQLite em `data/long_term_memory.sqlite`.
+- Personal Model em SQLite em `data/personal_model.sqlite`, com categorias, evidencias e niveis de confianca.
 - Sistema de tarefas e lembretes guardado na memoria permanente.
+- Voice Input com Whisper local, teste de microfone e diagnostico de audio.
 - Comandos de memoria permanente:
   - `lembra-te que...`
   - `guarda isto...`
@@ -45,6 +64,7 @@ assistant/
   conversation.py
   context_manager.py
   agent.py
+  session_manager.py
   presence_manager.py
   context_observer.py
   delegation.py
@@ -59,6 +79,15 @@ ui/
 data/
 workspace/
 docs/
+  MANIFESTO.md
+  PRODUCT_PRINCIPLES.md
+  COGNITIVE_MODEL.md
+  COGNITIVE_ARCHITECTURE.md
+  VOICE_AND_CONVERSATION.md
+  UI_PHILOSOPHY.md
+  PERSONAL_MODEL.md
+  ROADMAP.md
+  VISION.md
   architecture.md
 ```
 
@@ -192,6 +221,86 @@ Edita `config/settings.json` para alterar:
 - logs simples de debug em `debug`.
 - debug do Agent Loop e dos contextos em `DEBUG_AGENT`.
 - debug bruto do Context Observer em `DEBUG_CONTEXT`.
+
+Configuracao de voz:
+
+```json
+"voice": {
+  "enabled": true,
+  "model": "base",
+  "language": "pt",
+  "input_device": "default",
+  "auto_select_input": true,
+  "silent_rms_threshold": 0.001,
+  "sample_rate": 44100,
+  "channels": 1,
+  "probe_duration_seconds": 0.5,
+  "min_record_seconds": 2,
+  "preroll_ms": 500,
+  "ready_delay_ms": 200
+}
+```
+
+Na interface, usa **Testar microfone** para ver microfone usado, nivel RMS,
+duracao testada, sample rate e se o audio parece silencioso, baixo, normal ou
+saturado. O botao **Mic** grava, transcreve com Whisper local e coloca o texto
+na caixa de mensagem para revisao; nao envia automaticamente.
+
+Quando carregas em **Mic**, a app mostra primeiro `Preparar...` e so depois
+`A ouvir...`. Comeca a falar quando vires `A ouvir...`; existe tambem um pequeno
+pre-roll configuravel para evitar cortar as primeiras palavras.
+
+O ultimo audio gravado fica em `data/debug/last_voice_input.wav`. Para o ouvir,
+escreve:
+
+```text
+reproduz ultimo audio
+```
+
+Para diagnostico geral:
+
+```text
+estado da voz
+```
+
+Troubleshooting rapido:
+
+- se o microfone estiver errado, altera `voice.input_device`;
+- se o RMS estiver baixo, aumenta o ganho do microfone no Windows;
+- se aparecer saturado, reduz o ganho ou afasta o microfone;
+- se `ffmpeg` estiver em falta, instala-o e confirma que esta no `PATH`;
+- se o idioma sair errado, confirma `voice.language = "pt"`.
+
+Configuracao de Desktop Actions:
+
+```json
+"desktop_actions": {
+  "enabled": true,
+  "default_browser": "chrome",
+  "default_email": "gmail",
+  "known_projects": {
+    "assistenteIA": "C:/Users/alexm/.vscode/projects/assistenteIA"
+  }
+}
+```
+
+Exemplos:
+
+```text
+abre o mail
+abre o gmail
+abre o browser
+abre o codigo
+abre o projeto assistente
+abre os documentos
+abre downloads
+abre https://www.google.com
+```
+
+Antes de abrir algo, o AssistenteIA pede confirmacao. Se uma aplicacao ja
+estiver aberta e for detetada pelo Context Observer, responde que ja esta aberta
+e pergunta se queres traze-la para a frente. As acoes executadas ficam registadas
+na timeline. O AssistenteIA nunca executa comandos shell arbitrarios.
 
 ## Contextos automaticos
 
@@ -334,6 +443,43 @@ Categorias usadas:
 
 O assistente pesquisa a memoria permanente antes de responder, quando o estado de presenca permite gravar/usar memoria. A pesquisa usa embeddings do Ollama quando disponiveis e uma pesquisa textual simples como alternativa.
 
+## Personal Model
+
+O Personal Model fica em `data/personal_model.sqlite` e guarda conhecimento
+estruturado sobre o Alexandre. Cada entrada tem categoria, chave, descricao,
+confianca, evidencias, origem e estado.
+
+Categorias iniciais:
+
+- `identidade`
+- `vida`
+- `trabalho`
+- `estudos`
+- `projetos`
+- `ferramentas`
+- `preferencias`
+- `habitos`
+- `relacoes`
+- `objetivos`
+
+Comandos:
+
+```text
+lembra-te que prefiro mapas mentais
+guarda isto: uso o VS Code para programar
+nao te esquecas que estou a trabalhar em RVCC
+o que sabes sobre mim?
+o que sabes sobre os meus estudos?
+o que sabes sobre as minhas ferramentas?
+o que sabes sobre mim com detalhes?
+esquece mapas mentais
+corrige isto: prefiro respostas em portugues de Portugal
+```
+
+Conhecimento com confianca inferior a 60% e apresentado como hipotese. A partir
+de 90%, e apresentado como conhecimento forte. O Echo nao deve transformar
+hipoteses em factos sem evidencias suficientes.
+
 ## Timeline pessoal
 
 A timeline pessoal regista eventos importantes com data, projeto e pessoas associadas.
@@ -347,6 +493,26 @@ Ha tres meses comecaste este projeto.
 O que fizemos ontem?
 Em que estavamos a trabalhar?
 Quando comecamos este projeto?
+```
+
+## Continuidade de sessao
+
+O Session Manager guarda resumos compactos das sessoes de trabalho em
+`data/session_manager.sqlite`. Nao guarda tudo em bruto; tenta preservar apenas
+factos uteis como projeto principal, atividade, ficheiros tocados, ferramentas
+usadas, tarefas alteradas, decisoes tomadas e proximo passo sugerido. Ao fechar
+uma sessao, o resumo util tambem e promovido para a memoria permanente/timeline.
+As respostas ao utilizador passam por uma camada de reflexao para evitar logs
+tecnicos e apresentar continuidade em linguagem natural.
+
+Exemplos:
+
+```text
+Onde ficamos?
+Resume a ultima sessao.
+O que fizemos hoje?
+O que mudou desde a ultima vez?
+Qual e o proximo passo?
 ```
 
 ## Tarefas e lembretes

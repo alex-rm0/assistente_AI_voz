@@ -1,0 +1,29 @@
+{
+  "id": "search_no_fake_results_005",
+  "category": "search",
+  "description": "Sem ferramenta ligada, nunca deve fingir ter pesquisado",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Pesquisa notícias sobre inteligência artificial.",
+      "expected": {
+        "selected_path": "RESEARCH_REQUEST",
+        "llm_calls_max": 0,
+        "must_contain": [
+          "ferramenta de pesquisa"
+        ],
+        "must_not_contain": [
+          "encontrei",
+          "segundo o site",
+          "de acordo com",
+          "os resultados mostram"
+        ]
+      }
+    }
+  ],
+  "tags": [
+    "search",
+    "grounding"
+  ]
+}

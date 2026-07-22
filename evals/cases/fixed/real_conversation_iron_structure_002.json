@@ -1,0 +1,23 @@
+{
+  "id": "real_conversation_iron_structure_002",
+  "category": "real_conversation",
+  "description": "'Estrutura em ferro' (material) nunca deve ativar TECH_CONTEXT",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "A estrutura é em ferro.",
+      "expected": {
+        "expected_exception": null,
+        "forbidden_contexts": [
+          "TECH_CONTEXT"
+        ],
+        "response_not_empty": true
+      }
+    }
+  ],
+  "tags": [
+    "real_conversation",
+    "ferro_erro"
+  ]
+}

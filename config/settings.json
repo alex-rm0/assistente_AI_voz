@@ -1,13 +1,14 @@
 {
   "app_name": "AssistenteIA",
-  "debug": false,
-  "DEBUG_AGENT": false,
-  "DEBUG_CONTEXT": false,
-  "DEBUG_PERFORMANCE": false,
+  "debug": true,
+  "DEBUG_AGENT": true,
+  "DEBUG_CONTEXT": true,
+  "DEBUG_PERFORMANCE": true,
+  "DEBUG_OLLAMA_PAYLOAD": true,
   "default_presence": "ACTIVE_CONVERSATION",
   "ollama": {
     "base_url": "http://127.0.0.1:11434",
-    "model": "llama3.2",
+    "model": "gemma3:12b",
     "timeout_seconds": 120
   },
   "assistant": {
@@ -25,20 +26,32 @@
   },
   "desktop_actions": {
     "enabled": true,
+    "default_browser": "chrome",
+    "default_email": "gmail",
     "known_projects": {
-      "AssistenteIA": "."
+      "assistenteIA": "C:/Users/alexm/.vscode/projects/assistenteIA"
     }
   },
   "voice": {
     "enabled": true,
     "model": "base",
     "language": "pt",
-    "sample_rate": 16000
+    "input_device": "default",
+    "auto_select_input": true,
+    "silent_rms_threshold": 0.001,
+    "sample_rate": 44100,
+    "channels": 1,
+    "probe_duration_seconds": 0.5,
+    "min_record_seconds": 2,
+    "preroll_ms": 500,
+    "ready_delay_ms": 200
   },
   "memory": {
     "data_path": "data",
     "history_file": "history.json",
     "long_term_db": "long_term_memory.sqlite",
+    "personal_model_db": "personal_model.sqlite",
+    "session_db": "session_manager.sqlite",
     "max_messages": 20
   }
 }

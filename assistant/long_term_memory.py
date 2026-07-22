@@ -5,7 +5,7 @@ import math
 import re
 import sqlite3
 import unicodedata
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -46,6 +46,112 @@ class TimelineEvent:
     content: str
     project: str = ""
     people: str = ""
+
+
+STRUCTURED_FACT_ATTRIBUTES = (
+    "event",
+    "discipline",
+    "degree",
+    "person",
+    "date_reference",
+    "location",
+    "outcome",
+    "emotion",
+    "project",
+    "course",
+    # task-type attributes
+    "action",
+    "target",
+    "context",
+    "reminder_requested",
+    "priority",
+    "raw_user_text",
+    # raw (pre-normalization) companions for canonicalized fields — evidence
+    # for audit/reprocessing only, never used for verbalization directly.
+    "discipline_raw",
+    "degree_raw",
+    "course_raw",
+    "action_raw",
+    "target_raw",
+)
+
+# Fields that are the "canonical" half of a raw/canonical pair. These are the
+# only ones the verbalizer is allowed to speak — never their _raw companion.
+CANONICALIZABLE_ATTRIBUTES = ("discipline", "degree", "course", "action", "target")
+
+
+@dataclass(frozen=True)
+class StructuredFact:
+    """A validated, attribute-level fact extracted from something the user said.
+
+    Unlike `MemoryRecord` (free text), this tracks which specific attributes
+    are actually known, so retrieval can honestly say "I know an exam
+    happened but not the discipline" instead of guessing. `raw_user_text` is
+    kept only as evidence/audit trail — it must never be returned to the
+    user as the answer itself (that is memory_recall.py's job).
+    """
+
+    id: int
+    fact_type: str
+    event: str = ""
+    discipline: str = ""
+    degree: str = ""
+    person: str = ""
+    date_reference: str = ""
+    location: str = ""
+    status: str = "unknown"
+    outcome: str = ""
+    emotion: str = ""
+    project: str = ""
+    course: str = ""
+    action: str = ""
+    target: str = ""
+    context: str = ""
+    reminder_requested: str = ""
+    priority: str = ""
+    raw_user_text: str = ""
+    discipline_raw: str = ""
+    degree_raw: str = ""
+    course_raw: str = ""
+    action_raw: str = ""
+    target_raw: str = ""
+    confidence: float = 0.8
+    source: str = "user_statement"
+    status_history: str = "[]"
+    created_at: str = ""
+    updated_at: str = ""
+
+    def known_attributes(self) -> set[str]:
+        # raw_user_text/_raw companions are evidence, not answerable slots:
+        # they must never make a query look "covered" on their own, and the
+        # verbalizer must never speak them.
+        return {
+            attribute
+            for attribute in STRUCTURED_FACT_ATTRIBUTES
+            if attribute != "raw_user_text" and not attribute.endswith("_raw") and getattr(self, attribute)
+        }
+
+    def spoken_value(self, field: str) -> str:
+        """The value that should ever be said aloud or shown to the user for
+        this field — always the canonical form. A dedicated accessor (rather
+        than reading the attribute directly) keeps this schema ready for a
+        future explicit spoken_value/phonetic layer without another migration.
+        """
+        return getattr(self, field, "") or ""
+
+    def summary(self) -> str:
+        parts = []
+        if self.discipline:
+            parts.append(f"exame de {self.discipline}" if self.event == "exame" else self.discipline)
+        elif self.event:
+            parts.append(self.event)
+        if self.degree:
+            parts.append(f"da licenciatura em {self.degree}")
+        if self.status == "failed":
+            parts.append("(chumbado)")
+        elif self.status == "completed":
+            parts.append("(concluído)")
+        return " ".join(parts).strip() or "facto sem detalhe"
 
 
 @dataclass(frozen=True)
@@ -425,6 +531,207 @@ class LongTermMemory:
         )
         return "\n".join(lines)
 
+    def remember_structured_fact(
+        self,
+        fact_type: str,
+        attributes: dict[str, str],
+        confidence: float = 0.9,
+        source: str = "user_statement",
+    ) -> StructuredFact:
+        """Create or merge a validated, attribute-level fact.
+
+        Merging (rather than always inserting) is what keeps repeated mentions
+        of the same event as one updatable record instead of duplicates, and
+        lets later turns fill in attributes that were missing earlier.
+        """
+        clean_attributes = {
+            key: value.strip()
+            for key, value in attributes.items()
+            if key in STRUCTURED_FACT_ATTRIBUTES and value and value.strip()
+        }
+        existing = self._find_mergeable_structured_fact(fact_type, clean_attributes)
+        now = _now_iso()
+
+        if existing is None:
+            columns = ", ".join(STRUCTURED_FACT_ATTRIBUTES)
+            placeholders = ", ".join("?" for _ in STRUCTURED_FACT_ATTRIBUTES)
+            values = [clean_attributes.get(attribute, "") for attribute in STRUCTURED_FACT_ATTRIBUTES]
+            status = (attributes.get("status") or "unknown").strip() or "unknown"
+            with sqlite3.connect(self.db_path) as connection:
+                cursor = connection.execute(
+                    f"""
+                    INSERT INTO structured_facts (
+                        fact_type, {columns}, status, confidence, source, status_history, created_at, updated_at
+                    )
+                    VALUES (?, {placeholders}, ?, ?, ?, '[]', ?, ?)
+                    """,
+                    (fact_type, *values, status, confidence, source, now, now),
+                )
+                fact_id = int(cursor.lastrowid)
+            return self._structured_fact_by_id(fact_id)
+
+        return self._merge_structured_fact(existing, clean_attributes, attributes.get("status"), confidence, now)
+
+    def remember_structured_fact_with_trace(
+        self,
+        fact_type: str,
+        attributes: dict[str, str],
+        confidence: float = 0.9,
+        source: str = "user_statement",
+    ) -> tuple[StructuredFact, str, str]:
+        """Same as remember_structured_fact, plus (action, reason) for write telemetry.
+
+        action is one of created|merged|ignored.
+        """
+        clean_attributes = {
+            key: value.strip()
+            for key, value in attributes.items()
+            if key in STRUCTURED_FACT_ATTRIBUTES and value and value.strip()
+        }
+        existing = self._find_mergeable_structured_fact(fact_type, clean_attributes)
+        if existing is None:
+            fact = self.remember_structured_fact(fact_type, attributes, confidence, source)
+            return fact, "created", f"novo registo de {fact_type}"
+
+        new_fields = [key for key, value in clean_attributes.items() if value and not getattr(existing, key)]
+        new_status = attributes.get("status")
+        status_changes = bool(new_status and new_status != existing.status)
+        if not new_fields and not status_changes:
+            return existing, "ignored", "sem novidade face ao registo existente"
+
+        fact = self.remember_structured_fact(fact_type, attributes, confidence, source)
+        if status_changes:
+            reason = f"estado atualizado de {existing.status} para {new_status} no registo #{existing.id}"
+        else:
+            reason = f"campos {', '.join(sorted(new_fields))} adicionados ao registo #{existing.id}"
+        return fact, "merged", reason
+
+    def update_structured_fact_status(self, fact_id: int, new_status: str) -> StructuredFact | None:
+        existing = self._structured_fact_by_id(fact_id)
+        if existing is None:
+            return None
+        return self._merge_structured_fact(existing, {}, new_status, existing.confidence, _now_iso())
+
+    def find_structured_facts(self, fact_type: str = "", **filters: str) -> list[StructuredFact]:
+        query = "SELECT * FROM structured_facts WHERE 1=1"
+        params: list[str] = []
+        if fact_type:
+            query += " AND fact_type = ?"
+            params.append(fact_type)
+        for key, value in filters.items():
+            if key in STRUCTURED_FACT_ATTRIBUTES and value:
+                query += f" AND LOWER({key}) = LOWER(?)"
+                params.append(value)
+        query += " ORDER BY updated_at DESC, id DESC"
+        with sqlite3.connect(self.db_path) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(query, params).fetchall()
+        return [_structured_fact_from_row(row) for row in rows]
+
+    def search_structured_facts_text(self, query: str, limit: int = 8) -> list[StructuredFact]:
+        terms = _terms(query)
+        if not terms:
+            return []
+        candidates = self.find_structured_facts()
+        scored: list[tuple[int, StructuredFact]] = []
+        for fact in candidates:
+            haystack = _normalize_text(
+                " ".join(
+                    (
+                        fact.fact_type,
+                        fact.event,
+                        fact.discipline,
+                        fact.degree,
+                        fact.person,
+                        fact.location,
+                        fact.project,
+                        fact.course,
+                        fact.action,
+                        fact.target,
+                        fact.context,
+                    )
+                )
+            )
+            score = sum(1 for term in terms if term in haystack)
+            if score > 0:
+                scored.append((score, fact))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [fact for _score, fact in scored[:limit]]
+
+    def _find_mergeable_structured_fact(self, fact_type: str, attributes: dict[str, str]) -> StructuredFact | None:
+        candidates = self.find_structured_facts(fact_type=fact_type)
+        if not candidates:
+            return None
+
+        if fact_type == "task":
+            # Each casual mention is usually its own, distinct task; only merge
+            # when the action (and target, if any) genuinely repeat verbatim.
+            action = attributes.get("action", "")
+            target = attributes.get("target", "")
+            if not action:
+                return None
+            for candidate in candidates:
+                if _normalize_text(candidate.action) == _normalize_text(action) and _normalize_text(
+                    candidate.target
+                ) == _normalize_text(target):
+                    return candidate
+            return None
+
+        discipline = attributes.get("discipline", "")
+        if discipline:
+            for candidate in candidates:
+                if candidate.discipline and _normalize_text(candidate.discipline) == _normalize_text(discipline):
+                    return candidate
+
+        event = attributes.get("event", "")
+        for candidate in candidates:
+            if not discipline or not candidate.discipline:
+                if not event or not candidate.event or candidate.event == event:
+                    return candidate
+        return None
+
+    def _merge_structured_fact(
+        self,
+        existing: StructuredFact,
+        attributes: dict[str, str],
+        new_status: str | None,
+        confidence: float,
+        now: str,
+    ) -> StructuredFact:
+        status_history = json.loads(existing.status_history or "[]")
+        set_clauses = []
+        params: list[object] = []
+        for attribute in STRUCTURED_FACT_ATTRIBUTES:
+            value = attributes.get(attribute)
+            if value and not getattr(existing, attribute):
+                set_clauses.append(f"{attribute} = ?")
+                params.append(value)
+
+        if new_status and new_status != existing.status:
+            status_history.append({"from": existing.status, "to": new_status, "at": now})
+            set_clauses.append("status = ?")
+            params.append(new_status)
+            set_clauses.append("status_history = ?")
+            params.append(json.dumps(status_history, ensure_ascii=False))
+
+        set_clauses.append("confidence = ?")
+        params.append(max(existing.confidence, confidence))
+        set_clauses.append("updated_at = ?")
+        params.append(now)
+
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute(
+                f"UPDATE structured_facts SET {', '.join(set_clauses)} WHERE id = ?",
+                (*params, existing.id),
+            )
+        return self._structured_fact_by_id(existing.id)
+
+    def _structured_fact_by_id(self, fact_id: int) -> StructuredFact:
+        with sqlite3.connect(self.db_path) as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute("SELECT * FROM structured_facts WHERE id = ?", (fact_id,)).fetchone()
+        return _structured_fact_from_row(row)
+
     def _init_db(self) -> None:
         with sqlite3.connect(self.db_path) as connection:
             connection.execute(
@@ -517,6 +824,34 @@ class LongTermMemory:
                 )
                 """
             )
+            connection.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS structured_facts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    fact_type TEXT NOT NULL,
+                    {", ".join(f"{attribute} TEXT NOT NULL DEFAULT ''" for attribute in STRUCTURED_FACT_ATTRIBUTES)},
+                    status TEXT NOT NULL DEFAULT 'unknown',
+                    confidence REAL NOT NULL DEFAULT 0.8,
+                    source TEXT NOT NULL DEFAULT 'user_statement',
+                    status_history TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            self._ensure_structured_fact_columns(connection)
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_structured_facts_type
+                ON structured_facts(fact_type)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_structured_facts_discipline
+                ON structured_facts(discipline)
+                """
+            )
             self._migrate_categories(connection)
 
     def _ensure_task_columns(self, connection: sqlite3.Connection) -> None:
@@ -528,6 +863,15 @@ class LongTermMemory:
             connection.execute("ALTER TABLE tasks ADD COLUMN description TEXT NOT NULL DEFAULT ''")
         if "priority" not in columns:
             connection.execute("ALTER TABLE tasks ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'")
+
+    def _ensure_structured_fact_columns(self, connection: sqlite3.Connection) -> None:
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(structured_facts)").fetchall()
+        }
+        for attribute in STRUCTURED_FACT_ATTRIBUTES:
+            if attribute not in columns:
+                connection.execute(f"ALTER TABLE structured_facts ADD COLUMN {attribute} TEXT NOT NULL DEFAULT ''")
 
     def _migrate_categories(self, connection: sqlite3.Connection) -> None:
         legacy_categories = {
@@ -1021,6 +1365,44 @@ def _task_from_row(row: tuple) -> TaskRecord:
         status=row[5] or "pending",
         priority=row[6] or "normal",
     )
+
+
+def _structured_fact_from_row(row: sqlite3.Row) -> StructuredFact:
+    return StructuredFact(
+        id=row["id"],
+        fact_type=row["fact_type"],
+        event=row["event"] or "",
+        discipline=row["discipline"] or "",
+        degree=row["degree"] or "",
+        person=row["person"] or "",
+        date_reference=row["date_reference"] or "",
+        location=row["location"] or "",
+        status=row["status"] or "unknown",
+        outcome=row["outcome"] or "",
+        emotion=row["emotion"] or "",
+        project=row["project"] or "",
+        course=row["course"] or "",
+        action=row["action"] or "",
+        target=row["target"] or "",
+        context=row["context"] or "",
+        reminder_requested=row["reminder_requested"] or "",
+        priority=row["priority"] or "",
+        raw_user_text=row["raw_user_text"] or "",
+        discipline_raw=row["discipline_raw"] or "",
+        degree_raw=row["degree_raw"] or "",
+        course_raw=row["course_raw"] or "",
+        action_raw=row["action_raw"] or "",
+        target_raw=row["target_raw"] or "",
+        confidence=float(row["confidence"] or 0.8),
+        source=row["source"] or "user_statement",
+        status_history=row["status_history"] or "[]",
+        created_at=row["created_at"] or "",
+        updated_at=row["updated_at"] or "",
+    )
+
+
+def _now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
 
 
 def _format_timeline_events(title: str, events: list[TimelineEvent]) -> str:

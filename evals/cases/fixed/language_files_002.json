@@ -1,0 +1,18 @@
+{
+  "id": "language_files_002",
+  "category": "language",
+  "description": "Vocabulário PT-PT ao falar de ficheiros guardados",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Onde é que guardaste os meus ficheiros?",
+      "expected": {
+        "response_not_empty": true
+      }
+    }
+  ],
+  "tags": [
+    "language"
+  ]
+}

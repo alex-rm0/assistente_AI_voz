@@ -1,0 +1,20 @@
+{
+  "id": "real_conversation_program_error_003",
+  "category": "real_conversation",
+  "description": "'Erro no programa' e uma mencao tecnica real, deve ser respondida normalmente",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "Tive um erro no programa.",
+      "expected": {
+        "expected_exception": null,
+        "response_not_empty": true
+      }
+    }
+  ],
+  "tags": [
+    "real_conversation",
+    "ferro_erro"
+  ]
+}

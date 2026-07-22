@@ -1,5 +1,10 @@
 # Arquitetura do AssistenteIA
 
+Este documento descreve a arquitetura técnica atual.
+
+O modelo cognitivo que orienta estes componentes está em [COGNITIVE_MODEL.md](COGNITIVE_MODEL.md).
+A arquitetura cognitiva dos módulos de pensamento está em [COGNITIVE_ARCHITECTURE.md](COGNITIVE_ARCHITECTURE.md).
+
 O AssistenteIA esta separado em quatro areas principais:
 
 ## Conversacao
@@ -15,6 +20,24 @@ Responsabilidades:
 - executar ferramentas atraves do registry;
 - guardar apenas historico de conversa apropriado;
 - enviar conversa normal para o Ollama.
+
+O `AssistantEngine` não deve tentar usar todas as capacidades em todas as
+mensagens. A Executive Function decide quando usar Sistema 1 ou Sistema 2 e que
+módulos cognitivos participam.
+
+## Cognição
+
+`assistant/cognition/` contem os módulos que implementam o modelo cognitivo:
+
+- `intent_engine.py`: identifica o objetivo provável do pedido.
+- `executive_function.py`: escolhe que módulos devem participar.
+- `context_builder.py`: recolhe apenas contexto relevante.
+- `reflection_engine.py`: transforma contexto em incertezas, insights e perguntas.
+- `reasoning_engine.py`: cria raciocínio interno e plano, sem responder diretamente.
+- `preference_builder.py`: avalia preferências antes de recomendações.
+
+Estes módulos produzem conhecimento, estratégia e hipóteses. Não devem produzir
+linguagem final para o utilizador.
 
 ## Delegacao
 
@@ -152,6 +175,55 @@ A memoria permanente e separada do historico da conversa. Quando o Ollama
 suporta embeddings para o modelo configurado, a pesquisa usa similaridade
 semantica. Se os embeddings nao estiverem disponiveis, a app usa uma pesquisa
 textual simples como fallback.
+
+## Response Composer
+
+`assistant/response_composer.py` contem o `ResponseComposer`.
+
+O Personal Model, o Session Manager e a memoria de longo prazo nao respondem
+diretamente ao utilizador. Estes modulos apenas fornecem factos em linguagem
+simples (sem categorias, confianca, timestamps ou estrutura tecnica). O
+`ResponseComposer` e o unico ponto que decide o que interessa, o que omitir,
+o tom e a estrutura da resposta final:
+
+- se o pedido nao exige detalhe tecnico, os factos sao entregues ao LLM
+  atraves de `ComposerRequest`, que gera a resposta em linguagem natural;
+- se o utilizador pedir explicitamente detalhes ("mostra os detalhes",
+  "mostra a confianca", "mostra as evidencias", "mostra os factos"), a
+  resposta tecnica pre-formatada e devolvida sem chamar o LLM;
+- se nao houver factos disponiveis, ou se o LLM falhar, e devolvido um
+  `fallback` deterministico.
+
+### Regra de memoria como evidencia
+
+As memorias nunca devem aparecer literalmente na resposta final.
+
+Cada memoria passa por tres etapas:
+
+1. Interpretacao.
+2. Contextualizacao.
+3. Integracao na conversa.
+
+O texto original da memoria deve ser tratado apenas como evidencia. Nunca deve
+ser usado como resposta pronta.
+
+Se uma resposta puder ser construida apenas copiando uma memoria, o Response
+Composer falhou.
+
+Quando existirem muitas memorias, o objetivo nao e mostrar "o que esta guardado".
+O objetivo e extrair significado do conjunto: padroes, preferencias, recorrencias,
+mudancas, tensoes, objetivos e sinais de contexto. A sensacao de continuidade
+deve vir da interpretacao dessas evidencias, nao da sua listagem.
+
+O Response Composer tambem aplica [VOICE_AND_CONVERSATION.md](VOICE_AND_CONVERSATION.md):
+falar pouco, evitar monologos, respeitar o ritmo da conversa e nunca expor
+raciocinio interno tecnico por defeito.
+
+Comandos que ja usam o Response Composer:
+- `o que sabes sobre...` / `o que sabes sobre mim` (Personal Model);
+- `onde ficamos` / `em que estavamos a trabalhar`;
+- `resume a ultima sessao`;
+- `o que fizemos hoje`, `qual e o proximo passo`, `o que mudou desde a ultima vez`.
 
 ## Interface
 

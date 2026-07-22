@@ -1,0 +1,22 @@
+{
+  "id": "general_knowledge_not_memory_command_003",
+  "category": "general_knowledge",
+  "description": "Pergunta de conhecimento geral nunca deve ser tratada como MEMORY_COMMAND",
+  "setup": [],
+  "clear_conversation_before": true,
+  "turns": [
+    {
+      "user": "O que sabes sobre bases de dados?",
+      "expected": {
+        "selected_path": "GENERAL_KNOWLEDGE_QUERY",
+        "forbidden_paths": [
+          "MEMORY_COMMAND"
+        ]
+      }
+    }
+  ],
+  "tags": [
+    "general_knowledge",
+    "routing"
+  ]
+}

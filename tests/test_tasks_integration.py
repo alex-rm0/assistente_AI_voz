@@ -80,7 +80,11 @@ def test_conversation_lists_today_tasks(tmp_path: Path) -> None:
 
     result = engine.respond("O que tenho para fazer hoje?")
 
-    assert "terminar o relatorio" in result
+    # The structured-memory path now normalizes the spelling before speaking
+    # it back ("relatorio" -> "relatório"), per the raw/canonical
+    # normalization requirement — the DB keeps the original, the spoken
+    # answer never does.
+    assert "terminar o relatório" in result
 
 
 def test_conversation_creates_task_from_natural_language(tmp_path: Path) -> None:
