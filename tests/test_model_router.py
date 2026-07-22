@@ -123,7 +123,7 @@ def test_automatic_complex_request_uses_claude_only_when_authorized(tmp_path: Pa
 
     assert decision.provider == "anthropic"
     assert decision.paid_call is True
-    assert decision.reason_code in {"complex_request", "professional_writing", "structured_summary"}
+    assert decision.reason_code in {"complex_request", "professional_writing", "structured_summary", "complex_planning"}
 
 
 def test_automatic_professional_email_uses_claude_when_authorized(tmp_path: Path) -> None:
@@ -152,6 +152,42 @@ def test_automatic_structured_summary_uses_claude_when_authorized(tmp_path: Path
 
     assert decision.provider == "anthropic"
     assert decision.reason_code == "structured_summary"
+
+
+def test_structured_summary_reason_wins_over_long_prompt(tmp_path: Path) -> None:
+    env = {"ANTHROPIC_API_KEY": "secret", PAID_CALL_CONFIRMATION_ENV: "true"}
+    decision = _router("automatic", claude_enabled=True, env=env, budget=ModelUsageBudget(tmp_path / "usage.json")).decide(
+        ModelRoutingInput(
+            source="RESPONSE_COMPOSER",
+            user_message="Resume este texto em quatro pontos claros: " + ("conteúdo " * 600),
+            prompt_chars=5000,
+            user_message_chars=120,
+            context_chars=4880,
+            constraint_count=2,
+        )
+    )
+
+    assert decision.provider == "anthropic"
+    assert decision.reason_code == "structured_summary"
+
+
+def test_short_message_with_large_internal_prompt_does_not_become_long_prompt(tmp_path: Path) -> None:
+    env = {"ANTHROPIC_API_KEY": "secret", PAID_CALL_CONFIRMATION_ENV: "true"}
+    decision = _router("automatic", claude_enabled=True, env=env, budget=ModelUsageBudget(tmp_path / "usage.json")).decide(
+        ModelRoutingInput(
+            source="RESPONSE_COMPOSER",
+            user_message="Há quanto tempo estamos a trabalhar no projeto Echo?",
+            prompt_chars=58,
+            user_message_chars=58,
+            context_chars=0,
+            constraint_count=0,
+        )
+    )
+
+    assert decision.provider == "ollama"
+    assert decision.reason_code == "low_complexity"
+    assert decision.routing_user_message_chars == 58
+    assert decision.routing_context_chars == 0
 
 
 def test_automatic_short_summary_without_structure_stays_local(tmp_path: Path) -> None:
@@ -268,6 +304,25 @@ def test_routed_llm_automatic_complex_calls_anthropic_when_authorized(tmp_path: 
     assert len(anthropic.calls) == 1
     assert llm.chat_call_tokens[0]["provider"] == "anthropic"
     assert llm.chat_call_tokens[0]["estimated_cost_usd"] > 0
+
+
+def test_routed_llm_routes_on_original_composer_message_not_system_prompt(tmp_path: Path) -> None:
+    ollama = FakeProvider("ollama", "llama3.1:8b")
+    anthropic = FakeProvider("anthropic", "claude-haiku-4-5-20251001")
+    env = {"ANTHROPIC_API_KEY": "secret", PAID_CALL_CONFIRMATION_ENV: "true"}
+    llm = RoutedLLM(
+        providers={"ollama": ollama, "anthropic": anthropic},
+        router=_router("automatic", claude_enabled=True, env=env, budget=ModelUsageBudget(tmp_path / "usage.json")),
+        system_prompt="sistema " * 1000,
+    )
+
+    prompt = "Mensagem do Alexandre:\nHá quanto tempo estamos a trabalhar no projeto Echo?\n\nIntenção:\nconversa"
+    llm.chat(prompt, history=[], source="RESPONSE_COMPOSER")
+
+    assert anthropic.calls == []
+    assert len(ollama.calls) == 1
+    assert llm.settings.model_routing_reason_code == "low_complexity"
+    assert llm.settings.routing_user_message_chars == len("Há quanto tempo estamos a trabalhar no projeto Echo?")
 
 
 def test_routed_llm_claude_mode_surfaces_missing_key_without_ollama_fallback() -> None:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -54,6 +55,9 @@ class ModelRoutingInput:
     source: str
     user_message: str
     prompt_chars: int = 0
+    user_message_chars: int = 0
+    context_chars: int = 0
+    constraint_count: int = 0
     has_tools: bool = False
     has_context: bool = False
     explicit_provider: str = ""
@@ -72,6 +76,9 @@ class ModelRoutingDecision:
     budget_after_usd: float = 0.0
     fallback_reason: str = ""
     override_source: str = ""
+    routing_user_message_chars: int = 0
+    routing_context_chars: int = 0
+    routing_constraint_count: int = 0
 
 
 class ModelUsageBudget:
@@ -168,6 +175,7 @@ class ModelRouter:
 
     def decide(self, routing_input: ModelRoutingInput) -> ModelRoutingDecision:
         mode = self.config.mode
+        routing_input = _with_routing_metrics(routing_input)
         if routing_input.explicit_provider:
             provider = routing_input.explicit_provider
             model = routing_input.explicit_model or (self.anthropic_model if provider == "anthropic" else self.ollama_model)
@@ -179,10 +187,22 @@ class ModelRouter:
                 reason="Provider escolhido explicitamente.",
                 paid_call=provider == "anthropic",
                 override_source="cli_provider",
+                routing_user_message_chars=routing_input.user_message_chars,
+                routing_context_chars=routing_input.context_chars,
+                routing_constraint_count=routing_input.constraint_count,
             )
 
         if mode == "local":
-            return ModelRoutingDecision(mode=mode, provider="ollama", model=self.ollama_model, reason_code="local_mode", reason="Modo local.")
+            return ModelRoutingDecision(
+                mode=mode,
+                provider="ollama",
+                model=self.ollama_model,
+                reason_code="local_mode",
+                reason="Modo local.",
+                routing_user_message_chars=routing_input.user_message_chars,
+                routing_context_chars=routing_input.context_chars,
+                routing_constraint_count=routing_input.constraint_count,
+            )
         if mode == "claude":
             return ModelRoutingDecision(
                 mode=mode,
@@ -192,27 +212,37 @@ class ModelRouter:
                 reason="Modo Claude escolhido explicitamente.",
                 paid_call=True,
                 override_source=self.config.mode_source,
+                routing_user_message_chars=routing_input.user_message_chars,
+                routing_context_chars=routing_input.context_chars,
+                routing_constraint_count=routing_input.constraint_count,
             )
         return self._automatic_decision(routing_input)
 
     def _automatic_decision(self, routing_input: ModelRoutingInput) -> ModelRoutingDecision:
         source = str(routing_input.source or "").upper()
         if source in NO_PAID_CALL_SOURCES:
-            return self._ollama("automatic", "source_kept_local", f"A origem {source} fica no modelo local.")
+            return self._ollama("automatic", "source_kept_local", f"A origem {source} fica no modelo local.", routing_input=routing_input)
         if not self.config.automatic.claude_enabled:
-            return self._ollama("automatic", "automatic_claude_disabled", "Claude automatico esta desligado.")
+            return self._ollama("automatic", "automatic_claude_disabled", "Claude automatico esta desligado.", routing_input=routing_input)
         if not self.env.get("ANTHROPIC_API_KEY", "").strip():
-            return self._ollama("automatic", "missing_api_key", "Sem ANTHROPIC_API_KEY; fica no modelo local.", "missing_api_key")
+            return self._ollama(
+                "automatic",
+                "missing_api_key",
+                "Sem ANTHROPIC_API_KEY; fica no modelo local.",
+                "missing_api_key",
+                routing_input=routing_input,
+            )
         if self.env.get(PAID_CALL_CONFIRMATION_ENV, "").strip().lower() != "true":
             return self._ollama(
                 "automatic",
                 "paid_calls_not_confirmed",
                 f"Sem {PAID_CALL_CONFIRMATION_ENV}=true; fica no modelo local.",
                 "paid_calls_not_confirmed",
+                routing_input=routing_input,
             )
         complexity_reason = _complexity_reason_for_claude(routing_input)
         if not complexity_reason:
-            return self._ollama("automatic", "low_complexity", "Pedido simples; o modelo local e suficiente.")
+            return self._ollama("automatic", "low_complexity", "Pedido simples; o modelo local e suficiente.", routing_input=routing_input)
 
         estimated_cost = _estimate_prompt_cost_usd(routing_input.prompt_chars)
         before = 0.0
@@ -224,7 +254,15 @@ class ModelRouter:
                 self.config.automatic.max_single_call_estimated_usd,
             )
             if not allowed:
-                return self._ollama("automatic", reason, "Orcamento automatico impede chamada paga.", reason, before, after)
+                return self._ollama(
+                    "automatic",
+                    reason,
+                    "Orcamento automatico impede chamada paga.",
+                    reason,
+                    before,
+                    after,
+                    routing_input=routing_input,
+                )
         return ModelRoutingDecision(
             mode="automatic",
             provider="anthropic",
@@ -234,6 +272,9 @@ class ModelRouter:
             paid_call=True,
             budget_before_usd=before,
             budget_after_usd=after,
+            routing_user_message_chars=routing_input.user_message_chars,
+            routing_context_chars=routing_input.context_chars,
+            routing_constraint_count=routing_input.constraint_count,
         )
 
     def _ollama(
@@ -244,6 +285,7 @@ class ModelRouter:
         fallback_reason: str = "",
         before: float = 0.0,
         after: float = 0.0,
+        routing_input: ModelRoutingInput | None = None,
     ) -> ModelRoutingDecision:
         return ModelRoutingDecision(
             mode=mode,
@@ -254,6 +296,9 @@ class ModelRouter:
             budget_before_usd=before,
             budget_after_usd=after,
             fallback_reason=fallback_reason,
+            routing_user_message_chars=routing_input.user_message_chars if routing_input else 0,
+            routing_context_chars=routing_input.context_chars if routing_input else 0,
+            routing_constraint_count=routing_input.constraint_count if routing_input else 0,
         )
 
 
@@ -294,11 +339,15 @@ class RoutedLLM(ProviderBackedLLM):
         messages.append({"role": "user", "content": user_message})
         source_name = str(source or self._next_call_source or "OTHER").strip() or "OTHER"
         self._next_call_source = ""
+        routing_message, routing_context_chars = _extract_routing_user_message(user_message, history or [])
         decision = self.router.decide(
             ModelRoutingInput(
                 source=source_name,
-                user_message=user_message,
-                prompt_chars=sum(len(str(item.get("content") or "")) for item in messages),
+                user_message=routing_message,
+                prompt_chars=len(routing_message) + routing_context_chars,
+                user_message_chars=len(routing_message),
+                context_chars=routing_context_chars,
+                constraint_count=_count_constraints(routing_message),
                 explicit_provider=self.explicit_provider,
             )
         )
@@ -338,6 +387,9 @@ class RoutedLLM(ProviderBackedLLM):
             model_routing_budget_after_usd=decision.budget_after_usd if decision else 0.0,
             model_routing_fallback_reason=decision.fallback_reason if decision else "",
             model_routing_override_source=decision.override_source if decision else "",
+            routing_user_message_chars=decision.routing_user_message_chars if decision else 0,
+            routing_context_chars=decision.routing_context_chars if decision else 0,
+            routing_constraint_count=decision.routing_constraint_count if decision else 0,
         )
 
 
@@ -356,6 +408,9 @@ class _RoutedSettings:
     model_routing_budget_after_usd: float = 0.0
     model_routing_fallback_reason: str = ""
     model_routing_override_source: str = ""
+    routing_user_message_chars: int = 0
+    routing_context_chars: int = 0
+    routing_constraint_count: int = 0
 
 
 def resolve_model_routing_config(
@@ -396,12 +451,16 @@ def _first_non_empty(*candidates: tuple[Any, str]) -> tuple[str, str]:
 
 def _complexity_reason_for_claude(routing_input: ModelRoutingInput) -> str:
     text = str(routing_input.user_message or "").lower()
-    if routing_input.prompt_chars >= 3500:
-        return "long_prompt"
     if _looks_like_professional_long_writing(text):
         return "professional_writing"
     if _looks_like_structured_summary(text):
         return "structured_summary"
+    if _looks_like_complex_planning(text):
+        return "complex_planning"
+    if _looks_like_technical_explanation(text):
+        return "technical_explanation"
+    if routing_input.prompt_chars >= 3500:
+        return "long_prompt"
     complex_markers = (
         "texto longo",
         "reescreve",
@@ -424,6 +483,58 @@ def _complexity_reason_for_claude(routing_input: ModelRoutingInput) -> str:
     return ""
 
 
+def _with_routing_metrics(routing_input: ModelRoutingInput) -> ModelRoutingInput:
+    user_chars = routing_input.user_message_chars or len(str(routing_input.user_message or ""))
+    context_chars = max(0, int(routing_input.context_chars or 0))
+    constraints = routing_input.constraint_count or _count_constraints(routing_input.user_message)
+    prompt_chars = routing_input.prompt_chars or (user_chars + context_chars)
+    return ModelRoutingInput(
+        source=routing_input.source,
+        user_message=routing_input.user_message,
+        prompt_chars=prompt_chars,
+        user_message_chars=user_chars,
+        context_chars=context_chars,
+        constraint_count=constraints,
+        has_tools=routing_input.has_tools,
+        has_context=routing_input.has_context,
+        explicit_provider=routing_input.explicit_provider,
+        explicit_model=routing_input.explicit_model,
+    )
+
+
+def _extract_routing_user_message(user_message: str, history: list[dict[str, str]]) -> tuple[str, int]:
+    text = str(user_message or "")
+    match = re.search(r"Mensagem do Alexandre:\s*(.*?)\s*\n\nInten", text, flags=re.IGNORECASE | re.DOTALL)
+    routing_message = match.group(1).strip() if match else text.strip()
+    context_chars = sum(len(str(item.get("content") or "")) for item in history)
+    for heading in ("Contexto relevante:", "Factos relevantes:", "Próximo objetivo da conversa:", "Proximo objetivo da conversa:"):
+        index = text.find(heading)
+        if index >= 0:
+            context_chars += max(0, len(text) - index)
+            break
+    return routing_message, context_chars
+
+
+def _count_constraints(text: str) -> int:
+    normalized = str(text or "").lower()
+    markers = (
+        "curta",
+        "curto",
+        "detalhado",
+        "detalhada",
+        "quatro pontos",
+        "cinco pontos",
+        "tres pontos",
+        "três pontos",
+        "portugues de portugal",
+        "português de portugal",
+        "sem ",
+        "com ",
+        "em pontos",
+    )
+    return sum(1 for marker in markers if marker in normalized)
+
+
 def _looks_like_professional_long_writing(text: str) -> bool:
     writing = any(marker in text for marker in ("escreve", "redige", "cria", "prepara"))
     professional = any(marker in text for marker in ("email", "e-mail", "profissional", "relatorio", "relatório"))
@@ -438,6 +549,18 @@ def _looks_like_structured_summary(text: str) -> bool:
     has_count = any(marker in text for marker in (" tres ", " três ", " quatro ", " cinco ", " 3 ", " 4 ", " 5 "))
     has_source_text = ":" in text or len(text.split()) >= 35
     return has_structure and (has_count or has_source_text)
+
+
+def _looks_like_complex_planning(text: str) -> bool:
+    planning = any(marker in text for marker in ("planeia", "planear", "plano", "organiza"))
+    detailed = any(marker in text for marker in ("detalhado", "passo a passo", "semanal", "dias", "orcamento", "orçamento"))
+    return planning and detailed
+
+
+def _looks_like_technical_explanation(text: str) -> bool:
+    explanation = any(marker in text for marker in ("explica", "explica-me", "explicacao", "explicação"))
+    technical = any(marker in text for marker in ("python", "erro", "codigo", "código", "api", "git", "assíncrono", "assincrono"))
+    return explanation and technical
 
 
 def _estimate_prompt_cost_usd(prompt_chars: int) -> float:

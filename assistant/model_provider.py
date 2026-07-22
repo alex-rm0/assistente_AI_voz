@@ -310,7 +310,7 @@ class ProviderBackedLLM:
             '{"tool": null, "arguments": {}, "reason": "motivo curto"}\n\n'
             f"Ferramentas disponiveis:\n{tools_description}\n"
         )
-        raw_response = self.chat(user_message, history=[], system_prompt=system_prompt, response_format="json")
+        raw_response = self.chat(user_message, history=[], system_prompt=system_prompt, response_format="json", source="TOOL_SELECTOR")
         try:
             decision = json.loads(raw_response)
         except json.JSONDecodeError:

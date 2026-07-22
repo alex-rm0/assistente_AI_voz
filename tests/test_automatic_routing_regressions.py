@@ -39,6 +39,8 @@ class FakeProvider:
 class MemoryStub:
     def __init__(self) -> None:
         self.preferences: dict[str, str] = {}
+        self.context_text = ""
+        self.search_results: list[dict] = []
 
     def get_preference(self, key: str, default: str = "") -> str:
         return self.preferences.get(key, default)
@@ -47,7 +49,10 @@ class MemoryStub:
         self.preferences[key] = value
 
     def context_for(self, query: str, limit: int = 5) -> str:
-        return ""
+        return self.context_text
+
+    def search(self, query: str, limit: int = 5):
+        return self.search_results[:limit]
 
     def pending_tasks(self, *args, **kwargs) -> str:
         return ""
@@ -195,3 +200,91 @@ def test_pending_intent_subject_followup_recovers_email_context(tmp_path: Path) 
     assert "Assunto:" in response
     assert "Echo" in response
     assert engine._pending_user_intent is None
+
+
+def test_project_duration_question_triggers_grounded_recall_from_history(tmp_path: Path) -> None:
+    engine, llm, ollama, anthropic = make_engine(tmp_path, mode="automatic")
+    engine.memory.append_pair("Há três meses começámos o projeto Echo.", "Fico com isso como contexto.")
+
+    response = engine.respond("Há quanto tempo estamos a trabalhar no projeto Echo?")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert "ha tres meses" in response.lower() or "há tres meses" in response.lower() or "há três meses" in response.lower()
+    assert telemetry["selected_path"] == "MEMORY_RECALL"
+    assert telemetry["memory_recall_detected"] is True
+    assert "CONVERSATION_HISTORY" in telemetry["grounding_sources"]
+    assert telemetry["history_context_used"] is True
+    assert telemetry["llm_calls"] == 0
+
+
+def test_project_duration_question_without_memory_does_not_invent(tmp_path: Path) -> None:
+    engine, llm, ollama, anthropic = make_engine(tmp_path, mode="automatic")
+
+    response = engine.respond("Há quanto tempo estamos a trabalhar no projeto Echo?")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert "não tenho dados suficientes" in response.lower()
+    assert "cinco meses" not in response.lower()
+    assert telemetry["selected_path"] == "MEMORY_RECALL"
+    assert telemetry["llm_calls"] == 0
+
+
+def test_conversation_history_provenance_is_reported_when_context_enters_prompt(tmp_path: Path) -> None:
+    engine, llm, ollama, anthropic = make_engine(tmp_path, mode="local", ollama_replies=["Ao longo dos últimos cinco meses, trabalhámos no Echo."])
+    engine.memory.append_pair("Estamos a trabalhar no projeto Echo há cinco meses.", "Certo.")
+
+    response = engine.respond("Escreve uma frase curta sobre o projeto.")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert "cinco meses" in response
+    assert "CONVERSATION_HISTORY" in telemetry["grounding_sources"]
+    assert telemetry["history_context_used"] is True
+    assert telemetry["history_context_turn_ids"]
+
+
+def test_structured_summary_direct_path_uses_one_llm_call_and_not_task_management(tmp_path: Path) -> None:
+    engine, llm, ollama, anthropic = make_engine(
+        tmp_path,
+        env={"ANTHROPIC_API_KEY": "secret", "ECHO_ALLOW_PAID_MODEL_CALLS": "true"},
+        anthropic_replies=["1. A biblioteca alargou o horário.\n2. A medida apoia os exames.\n3. A adesão será avaliada.\n4. A equipa decide depois."],
+    )
+
+    response = engine.respond(
+        "Resume este texto em quatro pontos claros: A biblioteca alargou o horário durante exames e vai avaliar a medida."
+    )
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert "biblioteca" in response.lower()
+    assert telemetry["selected_path"] == "TEXT_SUMMARIZATION"
+    assert telemetry["agent_route_reason"] == ""
+    assert telemetry["model_routing_reason_code"] == "structured_summary"
+    assert telemetry["llm_calls"] == 1
+    assert [item["component"] for item in telemetry["llm_call_details"]] == ["RESPONSE_COMPOSER"]
+    assert all(item["component"] != "OTHER" for item in telemetry["llm_call_details"])
+    assert anthropic.calls
+    assert ollama.calls == []
+
+
+def test_four_tasks_request_still_routes_to_task_management(tmp_path: Path) -> None:
+    engine, llm, ollama, anthropic = make_engine(tmp_path, mode="local")
+
+    engine.respond("Cria quatro tarefas para o projeto Echo.")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["selected_path"] != "TEXT_SUMMARIZATION"
+
+
+def test_unsupported_historical_duration_from_llm_is_blocked_without_source(tmp_path: Path) -> None:
+    engine, llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="local",
+        ollama_replies=["Ao longo dos últimos cinco meses, tens trabalhado no projeto Echo."],
+    )
+
+    response = engine.respond("Escreve uma frase curta sobre o projeto Echo.")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert "não tenho memória suficiente" in response.lower()
+    assert telemetry["response_source"] == "RESPONSE_COMPOSER"
+    assert telemetry["final_response"] == response
+    assert telemetry["unsupported_memory_claim_detected"] is True

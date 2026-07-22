@@ -469,6 +469,28 @@ class AssistantEngine:
                 self._perf_log("resposta total", request_started_at, time.perf_counter())
                 return memory_recall_response
 
+            project_history_response = self._try_project_history_recall(user_message)
+            if project_history_response is not None:
+                project_history_response = self._complete_turn(
+                    user_message,
+                    project_history_response,
+                    "MEMORY_RECALL_DETERMINISTIC",
+                    selected_path="MEMORY_RECALL",
+                )
+                self._perf_log("resposta total", request_started_at, time.perf_counter())
+                return project_history_response
+
+        text_transformation_response = self._try_text_transformation_request(user_message)
+        if text_transformation_response is not None:
+            text_transformation_response = self._complete_turn(
+                user_message,
+                text_transformation_response,
+                "RESPONSE_COMPOSER",
+                selected_path="TEXT_SUMMARIZATION",
+            )
+            self._perf_log("resposta total", request_started_at, time.perf_counter())
+            return text_transformation_response
+
         direct_phrase_response = self._try_direct_short_phrase_request(user_message)
         if direct_phrase_response is not None:
             direct_phrase_response = self._complete_turn(
@@ -1393,6 +1415,15 @@ class AssistantEngine:
                 self._last_response_blocked = True
                 self._record_memory_grounding(False, [], True, memory_claim_reason)
 
+        if final_response_source in {"RESPONSE_COMPOSER", "AGENT_DIRECT", "COMPOSER_REGENERATED"}:
+            sources = list(self._turn_trace.get("grounding_sources") or []) if self._turn_trace is not None else []
+            history_claim_reason = _detect_ungrounded_historical_duration_claim(final_response, sources)
+            if history_claim_reason:
+                final_response = "Não tenho memória suficiente para confirmar essa duração."
+                final_response_source = "MEMORY_CLAIM_BLOCKED"
+                self._last_response_blocked = True
+                self._record_memory_grounding(False, [], True, history_claim_reason)
+
         if final_response_source in {"RESPONSE_COMPOSER", "AGENT_DIRECT", "COMPOSER_REGENERATED"} and not tools_used:
             activity_claim_reason = _detect_ungrounded_activity_claim(final_response)
             if activity_claim_reason:
@@ -1497,6 +1528,9 @@ class AssistantEngine:
         print(f"model_routing_budget_after_usd={self._turn_trace.get('model_routing_budget_after_usd')}")
         print(f"model_routing_fallback_reason={self._turn_trace.get('model_routing_fallback_reason')}")
         print(f"model_routing_override_source={self._turn_trace.get('model_routing_override_source')}")
+        print(f"routing_user_message_chars={self._turn_trace.get('routing_user_message_chars')}")
+        print(f"routing_context_chars={self._turn_trace.get('routing_context_chars')}")
+        print(f"routing_constraint_count={self._turn_trace.get('routing_constraint_count')}")
         print(f"provider_error_type={self._turn_trace.get('provider_error_type')}")
         print(f"fallback_used={self._turn_trace.get('fallback_used')}")
         print(f"response_before_voice_critic={self._turn_trace.get('response_before_voice_critic')}")
@@ -1586,6 +1620,11 @@ class AssistantEngine:
             "model_routing_budget_after_usd": self._turn_trace.get("model_routing_budget_after_usd"),
             "model_routing_fallback_reason": self._turn_trace.get("model_routing_fallback_reason"),
             "model_routing_override_source": self._turn_trace.get("model_routing_override_source"),
+            "routing_user_message_chars": self._turn_trace.get("routing_user_message_chars"),
+            "routing_context_chars": self._turn_trace.get("routing_context_chars"),
+            "routing_constraint_count": self._turn_trace.get("routing_constraint_count"),
+            "history_context_used": bool(self._turn_trace.get("history_context_used")),
+            "history_context_turn_ids": self._turn_trace.get("history_context_turn_ids") or [],
             "provider_error_type": self._turn_trace.get("provider_error_type"),
             "fallback_used": self._turn_trace.get("fallback_used"),
             "llm_calls": llm_calls,
@@ -1647,6 +1686,8 @@ class AssistantEngine:
             history.pop()
         clean: list[dict[str, str]] = []
         recent = history[-limit:]
+        recent_start = max(0, len(history) - len(recent))
+        used_turn_ids: list[int] = []
         for index, message in enumerate(recent):
             role = message.get("role")
             content = message.get("content")
@@ -1658,6 +1699,14 @@ class AssistantEngine:
                     continue
             if role in {"user", "assistant"} and isinstance(content, str) and content.strip():
                 clean.append({"role": role, "content": content})
+                used_turn_ids.append(recent_start + index)
+        if clean and self._turn_trace is not None:
+            self._turn_trace["history_context_used"] = True
+            self._turn_trace["history_context_turn_ids"] = used_turn_ids
+            sources = list(self._turn_trace.get("grounding_sources") or [])
+            if "CONVERSATION_HISTORY" not in sources:
+                sources.append("CONVERSATION_HISTORY")
+            self._turn_trace["grounding_sources"] = sources
         return clean
 
     def _remember_pair(self, user_message: str, response: str) -> None:
@@ -2107,6 +2156,91 @@ class AssistantEngine:
             },
         )
         return retrieval.final_answer
+
+    def _try_project_history_recall(self, user_message: str) -> str | None:
+        normalized = _normalize_text(user_message)
+        if not _looks_like_project_history_question(normalized):
+            return None
+        explicit_project = _extract_project_name_for_history(user_message)
+        project = explicit_project or "projeto"
+        project_norm = _normalize_text(project)
+        history = self._recent_conversation_history(user_message, limit=40)
+        history_matches = [
+            index
+            for index, item in enumerate(history)
+            if project_norm and project_norm in _normalize_text(str(item.get("content") or ""))
+        ]
+
+        persistent_matches: list[str] = []
+        context_for = getattr(self.long_term_memory, "context_for", None)
+        if callable(context_for):
+            context_text = str(context_for(user_message, limit=5) or "").strip()
+            if context_text:
+                persistent_matches.append(context_text)
+        search = getattr(self.long_term_memory, "search", None)
+        if callable(search):
+            try:
+                for item in search(user_message, limit=5) or []:
+                    text = _memory_item_text(item)
+                    if text:
+                        persistent_matches.append(text)
+            except TypeError:
+                pass
+
+        sources: list[str] = []
+        if history_matches:
+            sources.append("CONVERSATION_HISTORY")
+        if persistent_matches:
+            sources.append("PERSISTENT_MEMORY")
+
+        if self._turn_trace is not None:
+            self._turn_trace["memory_recall_detected"] = True
+            self._turn_trace["memory_query"] = user_message
+            self._turn_trace["history_matches"] = len(history_matches)
+            self._turn_trace["persistent_memory_matches"] = len(persistent_matches)
+            self._turn_trace["selected_memory_ids"] = []
+            self._turn_trace["grounding_sources"] = sources
+            self._turn_trace["response_grounded"] = bool(sources)
+            if history_matches:
+                self._turn_trace["history_context_used"] = True
+                self._turn_trace["history_context_turn_ids"] = history_matches
+
+        evidence_text = " ".join(str(history[index].get("content") or "") for index in history_matches)
+        if persistent_matches:
+            evidence_text = f"{evidence_text} {' '.join(persistent_matches)}".strip()
+        if not explicit_project:
+            project = _extract_project_name_for_history(evidence_text) or project
+        duration = _extract_duration_from_evidence(evidence_text)
+        if duration:
+            if "quando comecamos" in normalized or "quando começamos" in normalized:
+                return f"Comecamos o {project} {duration}."
+            return f"Pelo que tenho no histórico, estamos a trabalhar no {project} {duration}."
+        if sources:
+            return (
+                f"Encontrei contexto sobre o {project}, mas não tenho uma data de início suficientemente clara "
+                "para dizer há quanto tempo estamos a trabalhar nele."
+            )
+        return (
+            f"Não tenho dados suficientes na memória para dizer há quanto tempo estamos a trabalhar no {project}."
+        )
+
+    def _try_text_transformation_request(self, user_message: str) -> str | None:
+        if not _looks_like_complete_text_summary_request(user_message):
+            return None
+        return self.response_composer.compose(
+            ComposerRequest(
+                intent="TEXT_SUMMARIZATION",
+                user_message=user_message,
+                history=self._recent_conversation_history(user_message),
+                fallback="Posso resumir, mas preciso que me deixes o texto completo.",
+                intent_instruction=(
+                    "O pedido é uma transformação de texto completa. "
+                    "Resume diretamente o texto pedido. Não trates 'pontos' como tarefas. "
+                    "Não faças perguntas de esclarecimento se o texto estiver presente."
+                ),
+                language_instruction=self._language_instruction(),
+            )
+        )
 
     def _refresh_memory_recall_continuity(self, topic: str, retrieval) -> None:
         """Keeps a short follow-up window open after a grounded recall.
@@ -3151,6 +3285,9 @@ def _model_routing_telemetry(llm: object) -> dict[str, object]:
         "model_routing_budget_after_usd": float(getattr(settings, "model_routing_budget_after_usd", 0.0) or 0.0),
         "model_routing_fallback_reason": str(getattr(settings, "model_routing_fallback_reason", "") or ""),
         "model_routing_override_source": str(getattr(settings, "model_routing_override_source", "") or ""),
+        "routing_user_message_chars": int(getattr(settings, "routing_user_message_chars", 0) or 0),
+        "routing_context_chars": int(getattr(settings, "routing_context_chars", 0) or 0),
+        "routing_constraint_count": int(getattr(settings, "routing_constraint_count", 0) or 0),
     }
 
 
@@ -3274,6 +3411,22 @@ def _detect_ungrounded_activity_claim(response: str) -> str:
     for marker in _UNGROUNDED_ACTIVITY_CLAIM_MARKERS:
         if _normalize_text(marker) in normalized:
             return marker
+    return ""
+
+
+def _detect_ungrounded_historical_duration_claim(response: str, grounding_sources: list[str]) -> str:
+    if grounding_sources:
+        return ""
+    normalized = _normalize_text(response)
+    patterns = (
+        r"\bao longo dos ultimos\s+(?:\w+\s+)?(?:dias|semanas|meses|anos)\b",
+        r"\bha\s+(?:\w+\s+)?(?:dias|semanas|meses|anos)\b",
+        r"\bdesde\s+(?:janeiro|fevereiro|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro|\d{4})\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, normalized)
+        if match:
+            return match.group(0)
     return ""
 
 
@@ -4234,6 +4387,86 @@ def _writing_request_kind(message: str) -> str:
         marker in text for marker in ("texto", "pontos", "topicos", "tópicos", ":")
     ):
         return "summary"
+    return ""
+
+
+def _looks_like_complete_text_summary_request(message: str) -> bool:
+    text = _normalize_text(message).strip(" .,!?:;")
+    if not re.search(r"\b(?:resume|sintetiza|transforma)\b", text):
+        return False
+    if not any(marker in text for marker in ("texto", "pontos", "topicos", "tÃ³picos", "ideias principais", ":")):
+        return False
+    if re.search(r"\b(?:cria|adiciona|marca|cancela|adia)\b", text) and re.search(r"\b(?:tarefa|tarefas|lembrete)\b", text):
+        return False
+    return ":" in str(message or "") or len(text.split()) >= 10
+
+
+def _looks_like_project_history_question(normalized_message: str) -> bool:
+    text = normalized_message.strip(" .,!?:;")
+    temporal = any(
+        marker in text
+        for marker in (
+            "ha quanto tempo",
+            "desde quando",
+            "quando comecamos",
+            "quando começamos",
+            "o que fizemos anteriormente",
+            "progresso recente",
+            "ultimos dias",
+            "ultimas semanas",
+            "ultimos meses",
+        )
+    )
+    project_marker = "projeto" in text or "echo" in text or "assistenteia" in text or "assistente ia" in text
+    return temporal and project_marker
+
+
+def _extract_project_name_for_history(message: str) -> str:
+    text = str(message or "")
+    match = re.search(r"\bprojeto\s+([A-Za-z0-9_.-]+)", text, flags=re.IGNORECASE)
+    if match:
+        return f"projeto {match.group(1)}"
+    normalized = _normalize_text(text)
+    if "echo" in normalized:
+        return "projeto Echo"
+    if "assistenteia" in normalized or "assistente ia" in normalized:
+        return "projeto AssistenteIA"
+    return ""
+
+
+def _memory_item_text(item) -> str:
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        for key in ("content", "description", "summary", "text"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        return ""
+    for attr in ("content", "description", "summary", "text"):
+        value = getattr(item, attr, None)
+        if isinstance(value, str) and value.strip():
+            return value
+    summary = getattr(item, "summary", None)
+    if callable(summary):
+        try:
+            value = summary()
+        except Exception:
+            return ""
+        return str(value or "").strip()
+    return ""
+
+
+def _extract_duration_from_evidence(text: str) -> str:
+    normalized = _normalize_text(text)
+    patterns = (
+        r"\b(ha\s+(?:\w+\s+)?(?:dia|dias|semana|semanas|mes|meses|ano|anos))\b",
+        r"\b(desde\s+(?:janeiro|fevereiro|marco|março|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro|\d{1,2}/\d{1,2}/\d{2,4}|\d{4}))\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, normalized)
+        if match:
+            return match.group(1)
     return ""
 
 
