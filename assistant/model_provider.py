@@ -244,6 +244,10 @@ class ProviderBackedLLM:
         self.last_response: ModelResponse | None = None
         self.responses: list[ModelResponse] = []
         self._call_sources: list[str] = []
+        self._next_call_source = ""
+
+    def mark_next_call_source(self, source: str) -> None:
+        self._next_call_source = str(source or "").strip()
 
     def chat(
         self,
@@ -256,10 +260,12 @@ class ProviderBackedLLM:
         messages = [{"role": "system", "content": system_prompt or self.system_prompt}]
         messages.extend(history or [])
         messages.append({"role": "user", "content": user_message})
+        source_name = str(source or self._next_call_source or "OTHER").strip() or "OTHER"
+        self._next_call_source = ""
         result = self.provider.chat(messages, response_format=response_format)
         self.last_response = result
         self.responses.append(result)
-        self._call_sources.append(str(source or "OTHER"))
+        self._call_sources.append(source_name)
         return result.text
 
     @property

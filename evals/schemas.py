@@ -196,6 +196,7 @@ class TurnResult:
     model_routing_budget_after_usd: float = 0.0
     model_routing_fallback_reason: str = ""
     model_routing_override_source: str = ""
+    llm_call_details: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return dict(self.__dict__)

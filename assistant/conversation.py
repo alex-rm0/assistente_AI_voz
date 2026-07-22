@@ -143,6 +143,7 @@ class AssistantEngine:
         self._active_operation_topic = ""
         self._active_operation_id = ""
         self._active_operation_ttl = 0
+        self._pending_user_intent: dict[str, str] | None = None
         self._conversation_segment_start = 0
         self.presence = presence_manager or PresenceManager()
         self.context_observer = context_observer
@@ -297,6 +298,16 @@ class AssistantEngine:
                 self._active_operation_type = ""
                 self._active_operation_topic = ""
                 self._active_operation_id = ""
+        pending_intent_response = self._try_pending_user_intent(user_message)
+        if pending_intent_response is not None:
+            pending_intent_response = self._complete_turn(
+                user_message,
+                pending_intent_response,
+                "RESPONSE_COMPOSER",
+                selected_path="GENERAL_CONVERSATION",
+            )
+            self._perf_log("resposta total", request_started_at, time.perf_counter())
+            return pending_intent_response
         # An explicit write command ("Regista que...") is re-extracted from
         # its own stripped content in _try_memory_write_command below, so the
         # passive path is skipped here to avoid writing the same fact twice
@@ -630,6 +641,7 @@ class AssistantEngine:
                     facts=self._facts_with_cognitive_reasoning([]),
                     context=recurring_context,
                     fallback="Diz-me um pouco melhor o que tens em mente.",
+                    intent_instruction=_intent_instruction_for_user_message(user_message),
                     language_instruction=self._language_instruction(),
                 )
             )
@@ -1335,6 +1347,19 @@ class AssistantEngine:
                 else:
                     final_response = self.response_composer.local_safe_fallback(user_message, original_response)
                     final_response_source = "LOCAL_SAFE_FALLBACK"
+            if source == "RESPONSE_COMPOSER" and _writing_request_kind(user_message) and _looks_like_help_offer(final_response):
+                regeneration_reason = "writing_request_help_offer"
+                regenerated = self.response_composer.regenerate(user_message, history, regeneration_reason)
+                response_regenerated = True
+                composer_call_count += 1
+                if regenerated and not _looks_like_help_offer(regenerated):
+                    final_response = regenerated
+                    final_response_source = "COMPOSER_REGENERATED"
+                else:
+                    fallback = _local_writing_fallback(user_message)
+                    if fallback:
+                        final_response = fallback
+                        final_response_source = "LOCAL_SAFE_FALLBACK"
 
         claim_reason = _detect_unsupported_tool_claim(final_response, tools_used)
         if claim_reason:
@@ -1378,6 +1403,7 @@ class AssistantEngine:
                     self._turn_trace["response_grounded"] = False
                     self._turn_trace["grounding_sources"] = []
 
+        self._update_pending_user_intent(user_message, final_response, final_response_source, technical, tool_confirmation)
         self._response_debug(
             source=source,
             voice_reviewed=bool(critic_trace and critic_trace.final_response_changed),
@@ -1446,6 +1472,12 @@ class AssistantEngine:
             return
         llm_start = int(self._turn_trace.get("llm_start") or 0)
         llm_calls = max(0, self._llm_chat_count() - llm_start)
+        sources_start = int(self._turn_trace.get("llm_sources_start") or 0)
+        all_sources = list(getattr(self.llm, "chat_call_sources", ()))
+        all_token_records = list(getattr(self.llm, "chat_call_tokens", ()) or [])
+        turn_token_records = all_token_records[sources_start:]
+        turn_sources = all_sources[sources_start:]
+        llm_call_details = _llm_call_details(turn_sources, turn_token_records)
         print("\n[TURN TRACE]")
         print(f"user_message={self._turn_trace.get('user_message')}")
         print(f"selected_path={selected_path}")
@@ -1526,14 +1558,11 @@ class AssistantEngine:
         print(f"exception_type={self._turn_trace.get('exception_type')}")
         print(f"exception_message={self._turn_trace.get('exception_message')}")
         print(f"llm_calls={llm_calls}")
+        print(f"llm_call_details={llm_call_details}")
         print(f"tools_used={list(tools_used)}")
         print(f"final_response={final_response}")
         print("[/TURN TRACE]\n")
 
-        sources_start = int(self._turn_trace.get("llm_sources_start") or 0)
-        all_sources = list(getattr(self.llm, "chat_call_sources", ()))
-        all_token_records = list(getattr(self.llm, "chat_call_tokens", ()) or [])
-        turn_token_records = all_token_records[sources_start:]
         input_tokens = _sum_optional_ints(record.get("input_tokens") for record in turn_token_records if isinstance(record, dict))
         output_tokens = _sum_optional_ints(record.get("output_tokens") for record in turn_token_records if isinstance(record, dict))
         estimated_cost_usd = sum(
@@ -1564,7 +1593,8 @@ class AssistantEngine:
             "output_tokens": output_tokens,
             "estimated_cost_usd": estimated_cost_usd,
             "llm_call_tokens": turn_token_records,
-            "llm_call_sources": all_sources[sources_start:],
+            "llm_call_sources": turn_sources,
+            "llm_call_details": llm_call_details,
             "tools_used": list(tools_used),
             "memory_recall_detected": bool(self._turn_trace.get("memory_recall_detected")),
             "selected_memory_ids": self._turn_trace.get("selected_memory_ids") or [],
@@ -2217,6 +2247,54 @@ class AssistantEngine:
             self._turn_trace["memory_verbalization_valid"] = False
             self._turn_trace["memory_verbalization_rejection_reason"] = unsupported_reason
 
+    def _try_pending_user_intent(self, user_message: str) -> str | None:
+        pending = self._pending_user_intent
+        if not pending:
+            return None
+        if not _is_pending_intent_followup(user_message, pending):
+            pending["ttl"] = str(max(0, int(pending.get("ttl", "1")) - 1))
+            if pending.get("ttl") == "0":
+                self._pending_user_intent = None
+            return None
+
+        original = pending.get("message", "")
+        kind = pending.get("kind", "writing")
+        self._pending_user_intent = None
+        return self.response_composer.compose(
+            ComposerRequest(
+                intent=f"{kind}_execution",
+                user_message=original,
+                history=self._recent_conversation_history(user_message),
+                fallback="Diz-me o texto ou o objetivo concreto e eu escrevo contigo.",
+                intent_instruction=(
+                    "O Alexandre confirmou uma intenção pendente. "
+                    "Executa agora o pedido original diretamente. "
+                    "Não perguntes se quer ajuda e não reinicies a conversa."
+                ),
+                language_instruction=self._language_instruction(),
+            )
+        )
+
+    def _update_pending_user_intent(
+        self,
+        user_message: str,
+        final_response: str,
+        final_response_source: str,
+        technical: bool,
+        tool_confirmation: bool,
+    ) -> None:
+        if technical or tool_confirmation:
+            return
+        if final_response_source not in {"RESPONSE_COMPOSER", "AGENT_DIRECT", "COMPOSER_REGENERATED"}:
+            return
+        kind = _writing_request_kind(user_message)
+        if not kind:
+            return
+        if not _looks_like_help_offer(final_response):
+            self._pending_user_intent = None
+            return
+        self._pending_user_intent = {"kind": kind, "message": user_message.strip(), "ttl": "3"}
+
     def _try_long_term_memory_command(self, user_message: str) -> str | None:
         lowered = _normalize_text(user_message.strip())
         if lowered.startswith("lembra-te que"):
@@ -2468,9 +2546,14 @@ class AssistantEngine:
         if any(
             phrase in text
             for phrase in (
-                "em que estado",
-                "estado atual",
+                "em que estado estas",
+                "em que estado estas tu",
+                "em que estado esta o echo",
+                "em que estado esta o assistente",
                 "estado de presenca",
+                "estado da presenca",
+                "estado do assistente",
+                "estado do echo",
                 "que modo",
                 "em que modo",
                 "modo atual",
@@ -3069,6 +3152,24 @@ def _model_routing_telemetry(llm: object) -> dict[str, object]:
         "model_routing_fallback_reason": str(getattr(settings, "model_routing_fallback_reason", "") or ""),
         "model_routing_override_source": str(getattr(settings, "model_routing_override_source", "") or ""),
     }
+
+
+def _llm_call_details(sources: list[str], token_records: list[dict]) -> list[dict[str, object]]:
+    details: list[dict[str, object]] = []
+    for index, record in enumerate(token_records):
+        if not isinstance(record, dict):
+            continue
+        details.append(
+            {
+                "component": sources[index] if index < len(sources) else "OTHER",
+                "provider": str(record.get("provider") or ""),
+                "model": str(record.get("model") or ""),
+                "input_tokens": record.get("input_tokens"),
+                "output_tokens": record.get("output_tokens"),
+                "estimated_cost_usd": float(record.get("estimated_cost_usd") or 0.0),
+            }
+        )
+    return details
 
 
 def _sum_optional_ints(values) -> int | None:
@@ -4117,3 +4218,74 @@ def _looks_like_planning_followup(message: str) -> bool:
             "mudando de alojamento",
         )
     )
+
+
+def _writing_request_kind(message: str) -> str:
+    text = _normalize_text(message).strip(" .,!?:;")
+    if not text:
+        return ""
+    if re.search(r"\b(?:escreve|redige|prepara|cria)\b", text) and any(
+        marker in text for marker in ("email", "e-mail", "mensagem", "texto", "carta")
+    ):
+        return "professional_writing" if "profissional" in text or "email" in text or "e-mail" in text else "writing"
+    if re.search(r"\b(?:reescreve|reformula|melhora)\b", text):
+        return "rewrite"
+    if re.search(r"\b(?:resume|sintetiza|transforma)\b", text) and any(
+        marker in text for marker in ("texto", "pontos", "topicos", "tópicos", ":")
+    ):
+        return "summary"
+    return ""
+
+
+def _intent_instruction_for_user_message(message: str) -> str:
+    kind = _writing_request_kind(message)
+    if not kind:
+        return ""
+    return (
+        "Se o pedido do Alexandre for completo e imperativo, executa a tarefa diretamente. "
+        "Para pedidos como escrever email, reescrever texto ou resumir texto, não respondas com "
+        "'posso ajudar', 'queres que escreva' ou outra oferta de ajuda."
+    )
+
+
+def _looks_like_help_offer(response: str) -> bool:
+    text = _normalize_text(response).strip(" .,!?:;")
+    offer_markers = (
+        "posso ajudar",
+        "posso ajudar-te",
+        "queres que escreva",
+        "queres que redija",
+        "queres que faca",
+        "queres que faça",
+        "se preferires posso",
+        "posso escrever",
+        "posso redigir",
+    )
+    return any(marker in text for marker in offer_markers)
+
+
+def _local_writing_fallback(message: str) -> str:
+    text = _normalize_text(message)
+    if "email" in text or "e-mail" in text:
+        return (
+            "Assunto: Estado atual do projeto Echo\n\n"
+            "Olá,\n\n"
+            "Escrevo para partilhar o estado atual do projeto Echo, os progressos realizados e os próximos passos previstos.\n\n"
+            "Com os melhores cumprimentos,\n"
+            "Alexandre"
+        )
+    return ""
+
+
+def _is_pending_intent_followup(message: str, pending: dict[str, str]) -> bool:
+    text = _normalize_text(message).strip(" .,!?:;")
+    if text in {"sim", "s", "ok", "okay", "claro", "pode ser", "forca", "força", "avanca", "avança"}:
+        return True
+    kind = pending.get("kind", "")
+    if kind in {"professional_writing", "writing"} and text in {"do email", "email", "o email", "desse email"}:
+        return True
+    if kind == "summary" and text in {"do resumo", "resumo", "desse texto", "do texto"}:
+        return True
+    if kind == "rewrite" and text in {"da reescrita", "reescreve", "do texto", "desse texto"}:
+        return True
+    return False

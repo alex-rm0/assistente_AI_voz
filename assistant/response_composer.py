@@ -114,10 +114,16 @@ class ResponseComposer:
 
     def regenerate(self, user_message: str, history: list[dict[str, str]] | None, reason: str) -> str:
         """One extra LLM call to correct a response with a severe semantic conflict."""
+        instruction = (
+            "A resposta anterior ofereceu ajuda em vez de executar um pedido de escrita completo.\n"
+            "Executa agora o pedido diretamente. Não perguntes se o Alexandre quer ajuda."
+            if reason == "writing_request_help_offer"
+            else _REGENERATION_INSTRUCTION
+        )
         try:
             _mark_llm_source(self.llm, "RESPONSE_COMPOSER_REGENERATION")
             reply = self.llm.chat(
-                f"{_REGENERATION_INSTRUCTION}\n\nMensagem do Alexandre:\n{user_message.strip()}\n\n"
+                f"{instruction}\n\nMensagem do Alexandre:\n{user_message.strip()}\n\n"
                 f"Motivo da correção: {reason}",
                 history=history or [],
                 system_prompt=_SYSTEM_PROMPT,

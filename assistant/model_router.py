@@ -210,7 +210,8 @@ class ModelRouter:
                 f"Sem {PAID_CALL_CONFIRMATION_ENV}=true; fica no modelo local.",
                 "paid_calls_not_confirmed",
             )
-        if not _looks_complex_enough_for_claude(routing_input):
+        complexity_reason = _complexity_reason_for_claude(routing_input)
+        if not complexity_reason:
             return self._ollama("automatic", "low_complexity", "Pedido simples; o modelo local e suficiente.")
 
         estimated_cost = _estimate_prompt_cost_usd(routing_input.prompt_chars)
@@ -228,8 +229,8 @@ class ModelRouter:
             mode="automatic",
             provider="anthropic",
             model=self.anthropic_model,
-            reason_code="complex_paid_allowed",
-            reason="Pedido complexo e chamada paga explicitamente autorizada dentro do orcamento.",
+            reason_code=complexity_reason,
+            reason="Pedido elegivel para Claude e chamada paga explicitamente autorizada dentro do orcamento.",
             paid_call=True,
             budget_before_usd=before,
             budget_after_usd=after,
@@ -275,6 +276,10 @@ class RoutedLLM(ProviderBackedLLM):
         self.explicit_provider = explicit_provider
         self.last_routing_decision: ModelRoutingDecision | None = None
         self.routing_decisions: list[ModelRoutingDecision] = []
+        self._next_call_source = ""
+
+    def mark_next_call_source(self, source: str) -> None:
+        self._next_call_source = str(source or "").strip()
 
     def chat(
         self,
@@ -287,7 +292,8 @@ class RoutedLLM(ProviderBackedLLM):
         messages = [{"role": "system", "content": system_prompt or self.system_prompt}]
         messages.extend(history or [])
         messages.append({"role": "user", "content": user_message})
-        source_name = str(source or "OTHER")
+        source_name = str(source or self._next_call_source or "OTHER").strip() or "OTHER"
+        self._next_call_source = ""
         decision = self.router.decide(
             ModelRoutingInput(
                 source=source_name,
@@ -388,10 +394,14 @@ def _first_non_empty(*candidates: tuple[Any, str]) -> tuple[str, str]:
     return "", "default"
 
 
-def _looks_complex_enough_for_claude(routing_input: ModelRoutingInput) -> bool:
+def _complexity_reason_for_claude(routing_input: ModelRoutingInput) -> str:
     text = str(routing_input.user_message or "").lower()
     if routing_input.prompt_chars >= 3500:
-        return True
+        return "long_prompt"
+    if _looks_like_professional_long_writing(text):
+        return "professional_writing"
+    if _looks_like_structured_summary(text):
+        return "structured_summary"
     complex_markers = (
         "texto longo",
         "reescreve",
@@ -409,7 +419,25 @@ def _looks_complex_enough_for_claude(routing_input: ModelRoutingInput) -> bool:
         "passo a passo",
         "continuidade",
     )
-    return any(marker in text for marker in complex_markers)
+    if any(marker in text for marker in complex_markers):
+        return "complex_request"
+    return ""
+
+
+def _looks_like_professional_long_writing(text: str) -> bool:
+    writing = any(marker in text for marker in ("escreve", "redige", "cria", "prepara"))
+    professional = any(marker in text for marker in ("email", "e-mail", "profissional", "relatorio", "relatório"))
+    detailed = any(marker in text for marker in ("detalhado", "estado atual", "progressos", "proximos passos", "próximos passos"))
+    return writing and professional and detailed
+
+
+def _looks_like_structured_summary(text: str) -> bool:
+    if not any(marker in text for marker in ("resume", "resumo", "sintetiza")):
+        return False
+    has_structure = any(marker in text for marker in ("pontos", "topicos", "tópicos", "ideias principais", "bullet"))
+    has_count = any(marker in text for marker in (" tres ", " três ", " quatro ", " cinco ", " 3 ", " 4 ", " 5 "))
+    has_source_text = ":" in text or len(text.split()) >= 35
+    return has_structure and (has_count or has_source_text)
 
 
 def _estimate_prompt_cost_usd(prompt_chars: int) -> float:

@@ -91,6 +91,7 @@ def run_case(case: EvalCase, run: EvalRun, config: ProviderConfig) -> CaseEvalua
             model_source=telemetry.get("model_source") or config.model_source,
             llm_calls=int(telemetry.get("llm_calls") or 0),
             llm_call_sources=list(telemetry.get("llm_call_sources") or []),
+            llm_call_details=list(telemetry.get("llm_call_details") or []),
             input_tokens=telemetry.get("input_tokens"),
             output_tokens=telemetry.get("output_tokens"),
             estimated_cost_usd=float(telemetry.get("estimated_cost_usd") or 0.0),

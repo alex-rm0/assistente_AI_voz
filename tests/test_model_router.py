@@ -123,7 +123,45 @@ def test_automatic_complex_request_uses_claude_only_when_authorized(tmp_path: Pa
 
     assert decision.provider == "anthropic"
     assert decision.paid_call is True
-    assert decision.reason_code == "complex_paid_allowed"
+    assert decision.reason_code in {"complex_request", "professional_writing", "structured_summary"}
+
+
+def test_automatic_professional_email_uses_claude_when_authorized(tmp_path: Path) -> None:
+    env = {"ANTHROPIC_API_KEY": "secret", PAID_CALL_CONFIRMATION_ENV: "true"}
+    decision = _router("automatic", claude_enabled=True, env=env, budget=ModelUsageBudget(tmp_path / "usage.json")).decide(
+        ModelRoutingInput(
+            source="RESPONSE_COMPOSER",
+            user_message="Escreve um email profissional detalhado a explicar o estado atual do projeto Echo, os progressos realizados e os próximos passos.",
+            prompt_chars=1500,
+        )
+    )
+
+    assert decision.provider == "anthropic"
+    assert decision.reason_code == "professional_writing"
+
+
+def test_automatic_structured_summary_uses_claude_when_authorized(tmp_path: Path) -> None:
+    env = {"ANTHROPIC_API_KEY": "secret", PAID_CALL_CONFIRMATION_ENV: "true"}
+    decision = _router("automatic", claude_enabled=True, env=env, budget=ModelUsageBudget(tmp_path / "usage.json")).decide(
+        ModelRoutingInput(
+            source="RESPONSE_COMPOSER",
+            user_message="Resume este texto em quatro pontos claros: A biblioteca alargou o horário durante exames e vai avaliar a medida.",
+            prompt_chars=1200,
+        )
+    )
+
+    assert decision.provider == "anthropic"
+    assert decision.reason_code == "structured_summary"
+
+
+def test_automatic_short_summary_without_structure_stays_local(tmp_path: Path) -> None:
+    env = {"ANTHROPIC_API_KEY": "secret", PAID_CALL_CONFIRMATION_ENV: "true"}
+    decision = _router("automatic", claude_enabled=True, env=env, budget=ModelUsageBudget(tmp_path / "usage.json")).decide(
+        ModelRoutingInput(source="RESPONSE_COMPOSER", user_message="Resume isto.", prompt_chars=600)
+    )
+
+    assert decision.provider == "ollama"
+    assert decision.reason_code == "low_complexity"
 
 
 def test_automatic_without_api_key_falls_back_to_local_without_paid_call(tmp_path: Path) -> None:
