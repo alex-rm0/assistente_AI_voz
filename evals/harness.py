@@ -33,6 +33,7 @@ class ProviderConfig:
     provider: str = "ollama"
     model: str = ""
     base_url: str = "http://127.0.0.1:11434"
+    model_source: str = "provider:ollama"
 
 
 def build_llm(config: ProviderConfig):

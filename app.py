@@ -25,6 +25,7 @@ import assistant.tools  # noqa: F401
 
 BASE_DIR = Path(__file__).resolve().parent
 SETTINGS_PATH = BASE_DIR / "config" / "settings.json"
+DEFAULT_OLLAMA_MODEL = "llama3.1:8b"
 
 
 def load_settings() -> dict[str, Any]:
@@ -32,11 +33,37 @@ def load_settings() -> dict[str, Any]:
         return json.load(file)
 
 
+def resolve_ollama_model(
+    *,
+    cli_model: str | None = None,
+    env: dict[str, str] | None = None,
+    settings: dict[str, Any] | None = None,
+    default_model: str = DEFAULT_OLLAMA_MODEL,
+) -> tuple[str, str]:
+    """Resolve the Ollama model once, with explicit priority and source."""
+    environment = env if env is not None else os.environ
+    config = settings or {}
+    ollama_config = config.get("ollama", {})
+    settings_model = ollama_config.get("model") if isinstance(ollama_config, dict) else None
+    candidates = (
+        (cli_model, "cli"),
+        (environment.get("ECHO_MODEL_NAME"), "ECHO_MODEL_NAME"),
+        (environment.get("OLLAMA_MODEL"), "OLLAMA_MODEL"),
+        (settings_model, "settings.json"),
+        (default_model, "default"),
+    )
+    for value, source in candidates:
+        model = str(value or "").strip()
+        if model:
+            return model, source
+    return default_model, "default"
+
+
 def main() -> int:
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication
 
-    from assistant.llm import OLLAMA_MODEL, OllamaClient, OllamaSettings
+    from assistant.llm import OllamaClient, OllamaSettings
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     if hasattr(sys.stderr, "reconfigure"):
@@ -44,6 +71,7 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description="Echo desktop app")
     parser.add_argument("--ui", choices=("classic", "echo-os"), default="classic")
+    parser.add_argument("--model", default="", help="Ollama model name for this run")
     args, qt_args = parser.parse_known_args()
 
     settings = load_settings()
@@ -120,22 +148,15 @@ def main() -> int:
     observer_interval_ms = int(observer_config.get("interval_seconds", 15)) * 1000
 
     ollama_config = settings.get("ollama", {})
-    model = os.environ.get("OLLAMA_MODEL")
-    if not model:
-        legacy_composer = os.environ.get("OLLAMA_COMPOSER_MODEL")
-        legacy_critic = os.environ.get("OLLAMA_VOICE_CRITIC_MODEL")
-        if legacy_composer or legacy_critic:
-            print(
-                "[OLLAMA CONFIG] aviso: OLLAMA_COMPOSER_MODEL/OLLAMA_VOICE_CRITIC_MODEL estao "
-                "obsoletas e o Echo volta a usar um unico modelo; define OLLAMA_MODEL em vez disso."
-            )
-        model = legacy_composer or OLLAMA_MODEL
+    model, model_source = resolve_ollama_model(cli_model=args.model, settings=settings)
     print("[OLLAMA CONFIG]")
     print(f"model={model}")
+    print(f"model_source={model_source}")
 
     ollama_settings = OllamaSettings(
         base_url=ollama_config.get("base_url", "http://127.0.0.1:11434"),
         model=model,
+        model_source=model_source,
         timeout_seconds=int(ollama_config.get("timeout_seconds", 120)),
         debug_performance=debug_performance,
         debug_ollama_payload=debug_ollama_payload,

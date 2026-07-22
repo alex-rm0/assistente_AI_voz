@@ -26,6 +26,7 @@ def _make_case_eval(case_id: str, category: str, passed: bool) -> CaseEvaluation
         selected_path="SOCIAL_PATH",
         response_source="SOCIAL_FAST_PATH",
         model="llama3.1:8b",
+        model_source="provider:ollama",
         llm_calls=0,
         llm_call_sources=[],
         tools_used=[],
@@ -69,6 +70,7 @@ def test_write_run_creates_run_dir_and_copies_to_latest(tmp_path: Path, monkeypa
         suite="fixed",
         provider="ollama",
         model="llama3.1:8b",
+        model_source="provider:ollama",
         categories=[],
         included_generated=False,
         repeat=1,
@@ -84,6 +86,7 @@ def test_write_run_creates_run_dir_and_copies_to_latest(tmp_path: Path, monkeypa
     assert (results_store.LATEST_DIR / "metadata.json").exists()
     assert result.metadata["passed"] == 1
     assert result.metadata["baseline"] is False
+    assert result.metadata["model_source"] == "provider:ollama"
 
 
 def test_rebuild_index_lists_runs_newest_first(tmp_path: Path, monkeypatch) -> None:
@@ -95,6 +98,7 @@ def test_rebuild_index_lists_runs_newest_first(tmp_path: Path, monkeypatch) -> N
             suite="fixed",
             provider="ollama",
             model="llama3.1:8b",
+            model_source="provider:ollama",
             categories=[],
             included_generated=False,
             repeat=1,
@@ -123,6 +127,7 @@ def test_retention_keeps_newest_n_per_group_and_never_deletes_baseline(tmp_path:
             suite="fixed",
             provider="ollama",
             model="llama3.1:8b",
+            model_source="provider:ollama",
             categories=[],
             included_generated=False,
             repeat=1,

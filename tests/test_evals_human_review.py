@@ -11,6 +11,7 @@ def _result(final_response: str, **kwargs) -> TurnResult:
         selected_path="",
         response_source="",
         model=None,
+        model_source=None,
         llm_calls=0,
         llm_call_sources=[],
         tools_used=[],

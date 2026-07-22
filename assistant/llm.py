@@ -21,6 +21,7 @@ OLLAMA_MODEL = "llama3.1:8b"
 class OllamaSettings:
     base_url: str
     model: str
+    model_source: str = "unknown"
     timeout_seconds: int = 120
     debug_performance: bool = False
     debug_ollama_payload: bool = False
@@ -265,6 +266,7 @@ class OllamaClient:
         print(f"timestamp={datetime.now().isoformat(timespec='seconds')}")
         print(f"source={source}")
         print(f"model={self.settings.model}")
+        print(f"model_source={self.settings.model_source}")
         print(f"response_format={response_format}")
         print("\n--- system prompt completo ---")
         print(system_prompt)

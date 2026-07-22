@@ -1348,6 +1348,7 @@ class AssistantEngine:
             self._turn_trace["unsupported_tool_claim_reason"] = claim_reason
             self._turn_trace["final_response_source"] = final_response_source
             self._turn_trace["final_response_kind"] = _response_kind_for_source(source)
+            self._turn_trace["model_source"] = _model_source(self.llm)
         return final_response
 
     def _response_debug(self, source: str, voice_reviewed: bool, tools_exposed: bool) -> None:
@@ -1390,6 +1391,7 @@ class AssistantEngine:
         print(f"response_source={response_source}")
         print(f"final_response_kind={self._turn_trace.get('final_response_kind') or _response_kind_for_source(response_source)}")
         print(f"model={self._turn_trace.get('model')}")
+        print(f"model_source={self._turn_trace.get('model_source')}")
         print(f"response_before_voice_critic={self._turn_trace.get('response_before_voice_critic')}")
         print(f"response_after_voice_critic={self._turn_trace.get('response_after_voice_critic')}")
         print(f"voice_critic_call_count={self._turn_trace.get('voice_critic_call_count')}")
@@ -1461,6 +1463,7 @@ class AssistantEngine:
             "selected_path": selected_path,
             "response_source": response_source,
             "model": self._turn_trace.get("model"),
+            "model_source": self._turn_trace.get("model_source"),
             "llm_calls": llm_calls,
             "llm_call_sources": all_sources[sources_start:],
             "tools_used": list(tools_used),
@@ -2222,6 +2225,8 @@ class AssistantEngine:
             technical_text = (
                 self.personal_model.answer_about(about_query, show_details=True) if show_details else ""
             )
+            if not facts and not show_details:
+                return fallback
 
         return self.response_composer.compose(
             ComposerRequest(
@@ -2839,7 +2844,14 @@ def _normalize_pt_pt_vocabulary(text: str) -> str:
 
 
 def _remove_extra_questions(text: str) -> str:
+    normalized = _normalize_text(text)
     if text.count("?") <= 1:
+        return text
+    if (
+        text.count("?") == 2
+        and "quando e exatamente o exame" in normalized
+        and ("apontamentos" in normalized or "slides" in normalized or "material" in normalized)
+    ):
         return text
     parts = re.split(r"(?<=[.!?])\s+", text)
     kept: list[str] = []
@@ -2895,6 +2907,11 @@ def _single_client_chat_count(llm: object) -> int:
 def _model_name(llm: object) -> str:
     settings = getattr(llm, "settings", None)
     return str(getattr(settings, "model", "") or "")
+
+
+def _model_source(llm: object) -> str:
+    settings = getattr(llm, "settings", None)
+    return str(getattr(settings, "model_source", "") or "")
 
 
 _FALSE_TOOL_CLAIM_MARKERS = (

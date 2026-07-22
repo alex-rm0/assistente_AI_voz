@@ -1,4 +1,5 @@
 .venv/
+.venv.broken-msstore-*/
 __pycache__/
 .pytest_cache/
 *.pyc
@@ -11,4 +12,4 @@ evals/results/latest/
 evals/results/comparisons/
 evals/results/legacy/
 evals/results/index.md
-# baselines/ is deliberately NOT ignored — those runs are explicitly kept.
+# baselines/ is deliberately NOT ignored; those runs are explicitly kept.

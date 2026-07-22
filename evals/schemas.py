@@ -127,6 +127,7 @@ class TurnResult:
     selected_path: str
     response_source: str
     model: str | None
+    model_source: str | None
     llm_calls: int
     llm_call_sources: list[str]
     tools_used: list[str]
@@ -191,6 +192,7 @@ class CaseEvaluation:
     passed: bool
     provider: str = ""
     model: str = ""
+    model_source: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -201,6 +203,7 @@ class CaseEvaluation:
             "generated": self.case.generated,
             "provider": self.provider,
             "model": self.model,
+            "model_source": self.model_source,
             "passed": self.passed,
             "turns": [t.to_dict() for t in self.turn_evaluations],
         }

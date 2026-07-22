@@ -70,6 +70,7 @@ def run_case(case: EvalCase, run: EvalRun, config: ProviderConfig) -> CaseEvalua
             selected_path=telemetry.get("selected_path") or "",
             response_source=telemetry.get("response_source") or "",
             model=telemetry.get("model"),
+            model_source=telemetry.get("model_source") or config.model_source,
             llm_calls=int(telemetry.get("llm_calls") or 0),
             llm_call_sources=list(telemetry.get("llm_call_sources") or []),
             tools_used=list(telemetry.get("tools_used") or []),
@@ -110,6 +111,7 @@ def run_case(case: EvalCase, run: EvalRun, config: ProviderConfig) -> CaseEvalua
         passed=all_passed,
         provider=config.provider,
         model=config.model,
+        model_source=config.model_source,
     )
 
 
@@ -128,6 +130,11 @@ def _run_all_cases(cases: list[EvalCase], run: EvalRun, config: ProviderConfig, 
 
 
 def main(argv: list[str] | None = None) -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
+
     parser = argparse.ArgumentParser(description="Echo evals runner")
     parser.add_argument("--category", default=None)
     parser.add_argument("--case", default=None, help="run a single case by id")
@@ -166,6 +173,7 @@ def main(argv: list[str] | None = None) -> int:
 
         resolved_model = OLLAMA_MODEL
     config = ProviderConfig(provider=args.provider, model=resolved_model)
+    config.model_source = f"provider:{config.provider}"
     command_used = "python -m evals.run_evals " + " ".join(argv if argv is not None else sys.argv[1:])
     suite = results_store.suite_label(args.category, args.case, args.include_generated)
     categories = [args.category] if args.category else []
@@ -189,6 +197,7 @@ def main(argv: list[str] | None = None) -> int:
                 suite=suite,
                 provider=config.provider,
                 model=config.model,
+                model_source=config.model_source,
                 categories=categories,
                 included_generated=args.include_generated,
                 repeat=args.repeat,

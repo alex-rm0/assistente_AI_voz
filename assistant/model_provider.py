@@ -229,9 +229,10 @@ class ProviderBackedLLM:
         # AssistantEngine._model_name() reads llm.settings.model for the
         # "model" telemetry field — this mirrors OllamaClient's shape just
         # enough for that one read, without pretending to be OllamaClient.
-        return _CompatSettings(model=getattr(self.provider, "model", ""))
+        return _CompatSettings(model=getattr(self.provider, "model", ""), model_source=f"provider:{self.provider.name}")
 
 
 @dataclass
 class _CompatSettings:
     model: str
+    model_source: str = "provider"
