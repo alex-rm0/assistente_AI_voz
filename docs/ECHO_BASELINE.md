@@ -1,10 +1,10 @@
 # Echo Baseline
 
 Data de actualização: 2026-07-22  
-Commit actual: `3f6cca7`  
+Commit actual: `a9629d03a1af577c5b44a248d407da6b650ec4e2`  
 Provider operacional actual: `ollama`
 
-Este documento regista o estado da baseline da Fase 0. Nesta tarefa foi corrigido o ambiente Python e a resolução do modelo, mas ainda não foi criada uma baseline oficial marcada porque existem alterações de código e documentação por commitar.
+Este documento regista o estado da baseline da Fase 0. Nesta tarefa foi corrigido o ambiente Python, a resolução do modelo e a escolha operacional do modelo predefinido.
 
 ## 1. Ambiente Python
 
@@ -75,11 +75,17 @@ Ou correr comandos directamente com:
 
 ## 2. Resolução Do Modelo
 
-Antes desta correcção:
+Antes da correcção de resolução do modelo:
 
 - `config/settings.json` tinha `gemma3:12b`;
 - o runtime usava `llama3.1:8b` por causa da constante/default em `assistant/llm.py`;
 - `settings["ollama"]["model"]` não era respeitado por `app.py`.
+
+Depois da promoção da Fase 0 foi reposta a decisão operacional anterior:
+
+- modelo predefinido operacional: `llama3.1:8b`;
+- origem: `settings.json`;
+- razão: `gemma3:12b` estava em `settings.json` por configuração antiga, não por decisão estratégica de trocar de modelo.
 
 Agora existe uma função única:
 
@@ -97,7 +103,7 @@ Validação actual:
 
 | Entrada | Resultado |
 |---|---|
-| sem env e sem CLI | `('gemma3:12b', 'settings.json')` |
+| sem env e sem CLI | `('llama3.1:8b', 'settings.json')` |
 | `ECHO_MODEL_NAME=llama3.1:8b` | `('llama3.1:8b', 'ECHO_MODEL_NAME')` |
 | `--model cli-model` | `('cli-model', 'cli')` |
 
@@ -160,7 +166,35 @@ Cobrem:
 
 Essa baseline continua útil como referência histórica, mas não é uma baseline limpa.
 
-Baseline oficial da Fase 0:
+Baseline operacional oficial da Fase 0:
+
+| Campo | Valor |
+|---|---|
+| Provider | `ollama` |
+| Modelo | `llama3.1:8b` |
+| Model source | `provider:ollama` |
+| Testes | `497 passed` |
+| Casos fixed+generated | `51` |
+| Passaram | `51` |
+| Falharam | `0` |
+| Excepções | `0` |
+| Git dirty | `false` |
+| Baseline | `true` |
+
+Execução complementar `real_conversation` da baseline operacional:
+
+| Campo | Valor |
+|---|---|
+| Provider | `ollama` |
+| Modelo | `llama3.1:8b` |
+| Model source | `provider:ollama` |
+| Casos | `10` |
+| Passaram | `10` |
+| Falharam | `0` |
+| Excepções | `0` |
+| Git dirty | `false` |
+
+Baseline Gemma anterior:
 
 | Campo | Valor |
 |---|---|
@@ -179,7 +213,9 @@ Baseline oficial da Fase 0:
 | Latência média | `444.98 ms` |
 | Pasta local | `evals/results/baselines/2026-07-22_14-03-12__fixed-generated__ollama__gemma3-12b__r1` |
 
-Execução complementar `real_conversation`:
+Esta baseline Gemma é uma experiência válida e deve ser preservada para comparação futura, mas não representa o modelo operacional predefinido.
+
+Execução complementar `real_conversation` da experiência Gemma:
 
 | Campo | Valor |
 |---|---|
@@ -194,21 +230,21 @@ Execução complementar `real_conversation`:
 
 A execução `real_conversation` ficou com `git_dirty=true` porque a baseline local acabada de gerar ficou presente em `evals/results/baselines/`. Essa pasta é um artefacto local gerado e passou a estar ignorada no Git.
 
-Comandos usados para criar a baseline oficial:
+Comandos para criar a baseline operacional oficial:
 
 ```powershell
 .\.venv\Scripts\python.exe -m compileall app.py assistant ui prototype_web_ui evals tests
 .\.venv\Scripts\python.exe -m pytest
-.\.venv\Scripts\python.exe -m evals.run_evals --include-generated --mark-baseline --model gemma3:12b
-.\.venv\Scripts\python.exe -m evals.run_evals --category real_conversation --model gemma3:12b
+.\.venv\Scripts\python.exe -m evals.run_evals --include-generated --mark-baseline --model llama3.1:8b
+.\.venv\Scripts\python.exe -m evals.run_evals --category real_conversation --model llama3.1:8b
 ```
 
-Critérios cumpridos na baseline oficial:
+Critérios a cumprir na baseline operacional oficial:
 
 - working tree limpa antes do run marcado;
 - `git_dirty=false` no metadata da baseline;
 - provider `ollama`;
-- modelo `gemma3:12b`;
+- modelo `llama3.1:8b`;
 - `model_source=provider:ollama`;
 - resultados completos: `51/51`.
 
