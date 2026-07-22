@@ -1,0 +1,29 @@
+{
+  "id": "model_quality_technical_explanation_003",
+  "category": "model_quality",
+  "description": "Explicação técnica simples sem excesso de monólogo.",
+  "turns": [
+    {
+      "user": "Explica-me em poucas palavras a diferença entre uma função síncrona e uma função assíncrona em Python.",
+      "expected": {
+        "response_not_empty": true,
+        "must_contain_each_any": [
+          ["síncrona", "sincrona"],
+          ["assíncrona", "assincrona"],
+          ["bloqueia", "aguarda", "espera", "trava"],
+          ["continua", "segundo plano", "outras tarefas", "sem bloquear"]
+        ],
+        "must_not_contain": ["você", "arquivo", "tela"],
+        "max_words": 120,
+        "max_questions": 1,
+        "llm_calls_min": 1,
+        "llm_calls_max": 1,
+        "require_provider_match": true,
+        "require_model_match": true,
+        "forbid_fallback": true,
+        "forbid_deterministic_response": true
+      }
+    }
+  ],
+  "tags": ["model_quality", "technical"]
+}

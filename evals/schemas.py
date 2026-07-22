@@ -27,15 +27,26 @@ class TurnExpectation:
     forbidden_tools: tuple[str, ...] = ()
     expected_memory_ids: tuple[str, ...] = ()
     memory_write_action: Any = _UNSET
+    expected_provider: str | None = None
+    expected_model: str | None = None
+    require_provider_match: bool = False
+    require_model_match: bool = False
+    forbid_fallback: bool = False
+    forbid_deterministic_response: bool = False
+    forbidden_response_sources: tuple[str, ...] = ()
     must_contain: tuple[str, ...] = ()
     must_contain_any: tuple[str, ...] = ()
+    must_contain_each_any: tuple[tuple[str, ...], ...] = ()
     must_not_contain: tuple[str, ...] = ()
     response_not_empty: bool | None = None
     response_grounded: bool | None = None
     max_words: int | None = None
+    min_words: int | None = None
+    min_bullet_points: int | None = None
     max_latency_ms: float | None = None
     expected_exception: str | None = None
     max_questions: int | None = None
+    max_outer_questions: int | None = None
     forbid_brazilian_portuguese: bool = True
     forbid_unsupported_tool_claim: bool = True
     forbid_unsupported_memory_claim: bool = True
@@ -62,15 +73,26 @@ class TurnExpectation:
             forbidden_tools=tuple(data.get("forbidden_tools", ())),
             expected_memory_ids=tuple(str(v) for v in data.get("expected_memory_ids", ())),
             memory_write_action=memory_write_action,
+            expected_provider=data.get("expected_provider"),
+            expected_model=data.get("expected_model"),
+            require_provider_match=data.get("require_provider_match", False),
+            require_model_match=data.get("require_model_match", False),
+            forbid_fallback=data.get("forbid_fallback", False),
+            forbid_deterministic_response=data.get("forbid_deterministic_response", False),
+            forbidden_response_sources=tuple(data.get("forbidden_response_sources", ())),
             must_contain=tuple(data.get("must_contain", ())),
             must_contain_any=tuple(data.get("must_contain_any", ())),
+            must_contain_each_any=tuple(tuple(group) for group in data.get("must_contain_each_any", ())),
             must_not_contain=tuple(data.get("must_not_contain", ())),
             response_not_empty=data.get("response_not_empty"),
             response_grounded=data.get("response_grounded"),
             max_words=data.get("max_words"),
+            min_words=data.get("min_words"),
+            min_bullet_points=data.get("min_bullet_points"),
             max_latency_ms=data.get("max_latency_ms"),
             expected_exception=data.get("expected_exception"),
             max_questions=data.get("max_questions"),
+            max_outer_questions=data.get("max_outer_questions"),
             forbid_brazilian_portuguese=data.get("forbid_brazilian_portuguese", True),
             forbid_unsupported_tool_claim=data.get("forbid_unsupported_tool_claim", True),
             forbid_unsupported_memory_claim=data.get("forbid_unsupported_memory_claim", True),
@@ -153,6 +175,9 @@ class TurnResult:
     output_tokens: int | None = None
     estimated_cost_usd: float = 0.0
     provider: str = ""
+    requested_provider: str = ""
+    requested_model: str = ""
+    fallback_used: bool = False
 
     def to_dict(self) -> dict:
         return dict(self.__dict__)

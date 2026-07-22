@@ -323,7 +323,7 @@ def test_dangerous_requests_are_blocked_without_execution_or_llm(tmp_path: Path)
 
         response = engine.respond(message)
 
-        assert "Nao posso" in response
+        assert "Não posso" in response
         assert runner.opened_urls == []
         assert not engine.agent.has_pending_confirmation()
         assert_no_model_or_semantic_memory_calls(llm, memory)

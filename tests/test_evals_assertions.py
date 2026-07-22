@@ -21,6 +21,9 @@ def _result(text: str) -> TurnResult:
         latency_ms=1.0,
         exception_type=None,
         exception_message=None,
+        provider="ollama",
+        requested_provider="ollama",
+        requested_model="llama3.1:8b",
     )
 
 
@@ -34,6 +37,14 @@ def test_max_words_fails_for_long_response() -> None:
     outcomes = run_turn_assertions(TurnExpectation(max_words=3), _result("Podes rever isto, por favor?"))
 
     failed = [outcome for outcome in outcomes if outcome.name == "max_words"]
+    assert failed
+    assert failed[0].passed is False
+
+
+def test_min_words_fails_for_too_short_response() -> None:
+    outcomes = run_turn_assertions(TurnExpectation(min_words=6), _result("Sim, claro."))
+
+    failed = [outcome for outcome in outcomes if outcome.name == "min_words"]
     assert failed
     assert failed[0].passed is False
 
@@ -155,3 +166,47 @@ def test_meeting_request_can_still_ask_for_missing_time_context() -> None:
     outcomes = run_turn_assertions(TurnExpectation(forbid_unnecessary_question_when_sufficient=True), result)
 
     assert all(outcome.passed for outcome in outcomes)
+
+
+def test_model_quality_case_fails_when_llm_is_not_called() -> None:
+    result = _result("Resposta local.")
+    result.llm_calls = 0
+
+    outcomes = run_turn_assertions(TurnExpectation(llm_calls_min=1, llm_calls_max=1), result)
+
+    failed = [outcome for outcome in outcomes if outcome.name in {"llm_calls_min", "llm_calls_max"} and not outcome.passed]
+    assert failed
+
+
+def test_provider_mismatch_fails() -> None:
+    result = _result("Resposta.")
+    result.provider = "ollama"
+    result.requested_provider = "anthropic"
+
+    outcomes = run_turn_assertions(TurnExpectation(require_provider_match=True), result)
+
+    failed = [outcome for outcome in outcomes if outcome.name == "provider_matches_request"]
+    assert failed
+    assert failed[0].passed is False
+
+
+def test_fallback_fails_when_forbidden() -> None:
+    result = _result("Fallback.")
+    result.fallback_used = True
+
+    outcomes = run_turn_assertions(TurnExpectation(forbid_fallback=True), result)
+
+    failed = [outcome for outcome in outcomes if outcome.name == "no_fallback"]
+    assert failed
+    assert failed[0].passed is False
+
+
+def test_deterministic_response_fails_for_model_quality_case() -> None:
+    result = _result("Resposta deterministica.")
+    result.response_source = "DETERMINISTIC_HELP"
+
+    outcomes = run_turn_assertions(TurnExpectation(forbid_deterministic_response=True), result)
+
+    failed = [outcome for outcome in outcomes if outcome.name == "no_deterministic_response"]
+    assert failed
+    assert failed[0].passed is False

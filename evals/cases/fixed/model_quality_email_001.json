@@ -1,0 +1,25 @@
+{
+  "id": "model_quality_email_001",
+  "category": "model_quality",
+  "description": "Escrita de email profissional curto em português europeu.",
+  "turns": [
+    {
+      "user": "Escreve um email profissional curto a pedir ao professor para rever o meu relatório amanhã.",
+      "expected": {
+        "response_not_empty": true,
+        "must_contain_any": ["professor", "relatório", "amanhã"],
+        "must_not_contain": ["você", "revisar", "arquivo", "tela"],
+        "min_words": 20,
+        "max_words": 120,
+        "max_outer_questions": 0,
+        "llm_calls_min": 1,
+        "llm_calls_max": 1,
+        "require_provider_match": true,
+        "require_model_match": true,
+        "forbid_fallback": true,
+        "forbid_deterministic_response": true
+      }
+    }
+  ],
+  "tags": ["model_quality", "writing", "ptpt"]
+}

@@ -1,0 +1,35 @@
+{
+    "id":  "system_behavior_ptpt_direct_phrase_001",
+    "category":  "system_behavior",
+    "description":  "Pedido de frase curta deve devolver uma frase utilizavel, sem pergunta de esclarecimento.",
+    "turns":  [
+                  {
+                      "user":  "Ajuda-me a escrever uma frase curta para pedir uma revisao.",
+                      "expected":  {
+                                       "response_not_empty":  true,
+                                       "must_contain":  [
+                                                            "por favor"
+                                                        ],
+                                       "max_words":  25,
+                                       "max_questions":  0,
+                                       "must_not_contain":  [
+                                                                "voce",
+                                                                "arquivo",
+                                                                "tela",
+                                                                "acessar",
+                                                                "aplicativo",
+                                                                "que tipo",
+                                                                "queres que",
+                                                                "podes dizer"
+                                                            ],
+                                       "llm_calls_max":  2,
+                                       "forbid_unnecessary_question_when_sufficient":  true
+                                   }
+                  }
+              ],
+    "tags":  [
+                 "pt-PT",
+                 "subset",
+                 "system_behavior"
+             ]
+}

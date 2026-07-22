@@ -155,6 +155,63 @@ def run_turn_assertions(expected: TurnExpectation, result: TurnResult) -> list[A
         missing = [m for m in expected.expected_memory_ids if m not in got]
         check("expected_memory_ids", not missing, f"em falta={missing} obtidos={result.selected_memory_ids}")
 
+    if expected.expected_provider is not None:
+        check(
+            "expected_provider",
+            result.provider == expected.expected_provider,
+            f"esperado={expected.expected_provider} obtido={result.provider}",
+        )
+
+    if expected.expected_model is not None:
+        check(
+            "expected_model",
+            result.model == expected.expected_model,
+            f"esperado={expected.expected_model} obtido={result.model}",
+        )
+
+    if expected.require_provider_match:
+        check(
+            "provider_matches_request",
+            result.provider == result.requested_provider,
+            f"pedido={result.requested_provider} obtido={result.provider}",
+        )
+
+    if expected.require_model_match:
+        check(
+            "model_matches_request",
+            result.model == result.requested_model,
+            f"pedido={result.requested_model} obtido={result.model}",
+        )
+
+    if expected.forbid_fallback:
+        check("no_fallback", not result.fallback_used, f"fallback_used={result.fallback_used}")
+
+    if expected.forbidden_response_sources:
+        check(
+            "forbidden_response_sources",
+            result.response_source not in expected.forbidden_response_sources,
+            f"obtido={result.response_source} proibidos={list(expected.forbidden_response_sources)}",
+        )
+
+    if expected.forbid_deterministic_response:
+        deterministic_sources = {
+            "DIRECT_SHORT_RESPONSE",
+            "DETERMINISTIC_HELP",
+            "FAST_ROUTE",
+            "TOOL_RESULT",
+            "TOOL_CONFIRMATION",
+            "MEMORY_RECALL_DETERMINISTIC",
+            "MEMORY_WRITE_DETERMINISTIC",
+            "MEMORY_COMMAND",
+            "SESSION_COMMAND",
+            "ERROR",
+        }
+        check(
+            "no_deterministic_response",
+            result.response_source not in deterministic_sources,
+            f"response_source={result.response_source}",
+        )
+
     if expected.checks_memory_write_action:
         check(
             "memory_write_action",
@@ -190,6 +247,15 @@ def run_turn_assertions(expected: TurnExpectation, result: TurnResult) -> list[A
             f"esperado_um_de={list(expected.must_contain_any)} resposta={result.final_response}",
         )
 
+    for index, group in enumerate(expected.must_contain_each_any):
+        normalized_response = _normalize(result.final_response)
+        found = [phrase for phrase in group if _normalize(phrase) in normalized_response]
+        check(
+            f"must_contain_each_any:{index}",
+            bool(found),
+            f"esperado_um_de={list(group)} resposta={result.final_response}",
+        )
+
     for phrase in expected.must_not_contain:
         check(
             f"must_not_contain:{phrase}",
@@ -222,12 +288,36 @@ def run_turn_assertions(expected: TurnExpectation, result: TurnResult) -> list[A
             f"limite={expected.max_words} obtido={word_count}",
         )
 
+    if expected.min_words is not None:
+        word_count = len(re.findall(r"\b[\wÀ-ÿ'-]+\b", result.final_response, flags=re.UNICODE))
+        check(
+            "min_words",
+            word_count >= expected.min_words,
+            f"limite={expected.min_words} obtido={word_count}",
+        )
+
+    if expected.min_bullet_points is not None:
+        bullet_count = _count_bullet_points(result.final_response)
+        check(
+            "min_bullet_points",
+            bullet_count >= expected.min_bullet_points,
+            f"limite={expected.min_bullet_points} obtido={bullet_count}",
+        )
+
     if expected.max_questions is not None:
         question_count = result.final_response.count("?")
         check(
             "max_questions",
             question_count <= expected.max_questions,
             f"limite={expected.max_questions} obtido={question_count}",
+        )
+
+    if expected.max_outer_questions is not None:
+        question_count = _count_outer_questions(result.final_response)
+        check(
+            "max_outer_questions",
+            question_count <= expected.max_outer_questions,
+            f"limite={expected.max_outer_questions} obtido={question_count}",
         )
 
     if expected.forbid_unnecessary_question_when_sufficient:
@@ -296,6 +386,60 @@ def request_has_sufficient_info(user_message: str) -> bool:
             )
         )
     return False
+
+
+def _count_bullet_points(text: str) -> int:
+    count = 0
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if re.match(r"^(?:[-*•]|\d+[.)])\s+\S", stripped):
+            count += 1
+    return count
+
+
+def _count_outer_questions(text: str) -> int:
+    """Count questions outside quoted/generated content blocks.
+
+    This lets an eval for "write an email" allow a question mark inside the
+    email itself, while still catching assistant-side follow-up questions such
+    as "Queres que ajuste?" after the requested text.
+    """
+
+    if _looks_like_standalone_email(text or ""):
+        return 0
+
+    cleaned = re.sub(r'"[^"]*"', "", text or "", flags=re.DOTALL)
+    cleaned = re.sub(r"“[^”]*”", "", cleaned, flags=re.DOTALL)
+    cleaned = re.sub(r"```.*?```", "", cleaned, flags=re.DOTALL)
+    return cleaned.count("?")
+
+
+def _looks_like_standalone_email(text: str) -> bool:
+    compact = " ".join((text or "").strip().split())
+    if not compact:
+        return False
+    normalized = _normalize(compact)
+    email_starters = (
+        "assunto:",
+        "exmo.",
+        "exma.",
+        "caro professor",
+        "cara professora",
+        "prezado professor",
+        "prezada professora",
+        "bom dia professor",
+        "boa tarde professor",
+    )
+    if not normalized.startswith(email_starters):
+        return False
+    assistant_followups = (
+        "queres que",
+        "posso ajustar",
+        "se quiseres",
+        "fica assim",
+        "aqui vai",
+    )
+    return not any(marker in normalized for marker in assistant_followups)
 
 
 def _looks_like_denial_of_computer_access(text: str) -> bool:

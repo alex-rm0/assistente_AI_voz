@@ -1,0 +1,24 @@
+{
+    "id":  "system_behavior_task_summary_008",
+    "category":  "system_behavior",
+    "description":  "Tarefas devem ser apresentadas de forma natural.",
+    "turns":  [
+                  {
+                      "user":  "Adiciona uma tarefa para rever o projecto Echo amanha.",
+                      "expected":  {
+                                       "response_not_empty":  true,
+                                       "must_not_contain":  [
+                                                                "estado:",
+                                                                "prioridade:",
+                                                                "data:",
+                                                                "SQLite"
+                                                            ],
+                                       "llm_calls_max":  1
+                                   }
+                  }
+              ],
+    "tags":  [
+                 "tasks",
+                 "system_behavior"
+             ]
+}

@@ -1,0 +1,29 @@
+{
+  "id": "model_quality_emotional_support_004",
+  "category": "model_quality",
+  "description": "Resposta emocional curta, humana e sem discurso motivacional genérico.",
+  "turns": [
+    {
+      "user": "Escreve uma resposta curta e humana para alguém que diz: \"Hoje sinto-me bloqueado, cansado e com medo de não conseguir acompanhar o ritmo.\"",
+      "expected": {
+        "response_not_empty": true,
+        "must_contain_each_any": [
+          ["percebo", "faz sentido", "normal", "entendo", "imagino", "compreendo", "não é fácil", "sentimento válido"],
+          ["bloqueado", "cansado", "medo", "ritmo", "difícil", "acumulam", "pressão"],
+          ["um passo", "pequeno passo", "parar um pouco", "respirar", "começar por", "dizer-me mais", "preocupar", "fala comigo", "queres falar", "o que está a acontecer", "vir em primeiro lugar"]
+        ],
+        "must_not_contain": ["oportunidade para mostrar", "não é nada", "exagero", "você", "usuário"],
+        "max_words": 80,
+        "max_questions": 1,
+        "llm_calls_min": 1,
+        "llm_calls_max": 1,
+        "require_provider_match": true,
+        "require_model_match": true,
+        "forbid_fallback": true,
+        "forbid_deterministic_response": true,
+        "forbid_memory_write": true
+      }
+    }
+  ],
+  "tags": ["model_quality", "emotion"]
+}

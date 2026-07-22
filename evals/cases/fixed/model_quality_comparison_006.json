@@ -1,0 +1,28 @@
+{
+  "id": "model_quality_comparison_006",
+  "category": "model_quality",
+  "description": "Comparação clara entre modelo local e modelo cloud sem fugir para outro tema.",
+  "turns": [
+    {
+      "user": "Compara de forma curta usar um modelo local no computador e usar um modelo cloud para escrever textos.",
+      "expected": {
+        "response_not_empty": true,
+        "must_contain_each_any": [
+          ["local", "computador"],
+          ["cloud", "nuvem"],
+          ["privacidade", "offline", "custo", "latência", "qualidade", "seguro", "internet"]
+        ],
+        "must_not_contain": ["você", "acessar", "usuário", "exame", "estudo", "data"],
+        "max_words": 140,
+        "max_questions": 1,
+        "llm_calls_min": 1,
+        "llm_calls_max": 1,
+        "require_provider_match": true,
+        "require_model_match": true,
+        "forbid_fallback": true,
+        "forbid_deterministic_response": true
+      }
+    }
+  ],
+  "tags": ["model_quality", "comparison"]
+}

@@ -25,8 +25,8 @@ SEARCH_ENGINES = {
     "youtube": ("YouTube", "https://www.youtube.com/results?search_query={query}"),
 }
 SAFE_URL_REFUSAL = (
-    "Nao posso abrir esse destino por seguranca. "
-    "So aceito URLs http/https seguros ou atalhos configurados."
+    "Não posso abrir esse destino por segurança. "
+    "Só aceito URLs http/https seguros ou atalhos configurados."
 )
 
 

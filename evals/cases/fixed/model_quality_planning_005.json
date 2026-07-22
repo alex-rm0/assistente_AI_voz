@@ -1,0 +1,28 @@
+{
+  "id": "model_quality_planning_005",
+  "category": "model_quality",
+  "description": "Planeamento útil sem tentar resolver tudo numa resposta.",
+  "turns": [
+    {
+      "user": "Propõe uma primeira versão de um plano de estudo de uma semana para Estratégias Algorítmicas. Se faltar a data do exame, assume uma semana genérica e diz isso.",
+      "expected": {
+        "response_not_empty": true,
+        "must_contain_each_any": [
+          ["semana", "7 dias", "sete dias", "segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo"],
+          ["Estratégias Algorítmicas", "algoritmos"],
+          ["exercícios", "revisão", "rever", "revê", "prática", "práticos", "slides", "blocos", "sessão", "sessões", "pausas", "simula", "manhã", "tarde", "noite", "fim do dia", "depois do trabalho"]
+        ],
+        "must_not_contain": ["você", "tela", "arquivo"],
+        "max_words": 120,
+        "max_questions": 2,
+        "llm_calls_min": 1,
+        "llm_calls_max": 1,
+        "require_provider_match": true,
+        "require_model_match": true,
+        "forbid_fallback": true,
+        "forbid_deterministic_response": true
+      }
+    }
+  ],
+  "tags": ["model_quality", "planning"]
+}

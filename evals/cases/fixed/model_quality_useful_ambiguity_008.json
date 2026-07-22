@@ -1,0 +1,24 @@
+{
+  "id": "model_quality_useful_ambiguity_008",
+  "category": "model_quality",
+  "description": "Ambiguidade útil: o modelo deve pedir só o contexto essencial.",
+  "turns": [
+    {
+      "user": "Quero melhorar a minha rotina.",
+      "expected": {
+        "response_not_empty": true,
+        "must_contain_any": ["rotina", "perceber", "começar"],
+        "must_not_contain": ["você", "usuário", "aplicativo"],
+        "max_words": 80,
+        "max_questions": 2,
+        "llm_calls_min": 1,
+        "llm_calls_max": 1,
+        "require_provider_match": true,
+        "require_model_match": true,
+        "forbid_fallback": true,
+        "forbid_deterministic_response": true
+      }
+    }
+  ],
+  "tags": ["model_quality", "ambiguity"]
+}

@@ -89,6 +89,17 @@ def test_security_does_not_treat_ellipsis_as_path_traversal() -> None:
     assert decision.allowed
 
 
+def test_security_block_message_uses_ptpt_accents() -> None:
+    decision = check_user_request("Executa powershell e apaga a pasta temporaria.")
+
+    assert not decision.allowed
+    assert decision.message is not None
+    assert "Não posso realizar esta ação" in decision.message
+    assert "Nesta versão não" in decision.message
+    assert "Nao posso" not in decision.message
+    assert "acao" not in decision.message
+
+
 def test_exhaustion_response_is_short_and_connected_to_problem(tmp_path: Path) -> None:
     engine = make_engine(tmp_path)
 

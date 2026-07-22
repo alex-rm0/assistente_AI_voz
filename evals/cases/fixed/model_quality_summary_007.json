@@ -1,0 +1,25 @@
+{
+  "id": "model_quality_summary_007",
+  "category": "model_quality",
+  "description": "Resumo fiel de texto fornecido pelo utilizador.",
+  "turns": [
+    {
+      "user": "Transforma o texto abaixo em quatro ideias principais, mantendo os factos essenciais: A biblioteca municipal decidiu prolongar o horário de abertura durante a época de exames. A medida surgiu depois de vários estudantes terem pedido mais tempo de estudo ao fim da tarde. Além das salas habituais, vão estar disponíveis duas salas silenciosas, uma zona para trabalho em grupo e um pequeno balcão de apoio para impressão de documentos. A equipa da biblioteca explicou que a experiência será avaliada ao fim de um mês, tendo em conta a adesão dos estudantes, os custos de funcionamento e o impacto no serviço normal. Se os resultados forem positivos, o horário alargado poderá voltar a ser aplicado noutras épocas de maior procura.",
+      "expected": {
+        "response_not_empty": true,
+        "must_contain_any": ["biblioteca", "exames", "estudantes", "horário", "salas"],
+        "must_not_contain": ["você", "arquivo", "tela"],
+        "max_words": 120,
+        "max_questions": 0,
+        "min_bullet_points": 4,
+        "llm_calls_min": 1,
+        "llm_calls_max": 1,
+        "require_provider_match": true,
+        "require_model_match": true,
+        "forbid_fallback": true,
+        "forbid_deterministic_response": true
+      }
+    }
+  ],
+  "tags": ["model_quality", "summary"]
+}

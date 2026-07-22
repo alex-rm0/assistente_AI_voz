@@ -14,16 +14,16 @@ from typing import Any
 
 
 DEFAULT_SUBSET = [
-    "model_comparison_ptpt_002",
-    "model_comparison_exam_emotion_003",
-    "model_comparison_travel_preferences_004",
-    "model_comparison_code_error_006",
-    "model_comparison_context_honesty_010",
-    "model_comparison_memory_recall_007",
-    "model_comparison_session_continuity_014",
-    "model_comparison_personal_model_011",
-    "model_comparison_task_summary_012",
-    "model_comparison_tool_security_013",
+    "model_quality_email_001",
+    "model_quality_rewrite_ptpt_002",
+    "model_quality_technical_explanation_003",
+    "model_quality_emotional_support_004",
+    "model_quality_planning_005",
+    "model_quality_comparison_006",
+    "model_quality_summary_007",
+    "model_quality_useful_ambiguity_008",
+    "model_quality_multiturn_continuity_009",
+    "model_quality_honesty_limits_010",
 ]
 
 PTPT_VIOLATION_MARKERS = (
@@ -89,6 +89,8 @@ def render_side_by_side(left: dict[str, Any], right: dict[str, Any], subset: lis
     left_cases = _index_cases(left)
     right_cases = _index_cases(right)
     _validate_same_cases(left_cases, right_cases, subset)
+    _validate_same_inputs(left, right, subset)
+    _validate_model_quality_llm_calls(left_cases, right_cases, subset)
     left_label = _label(left)
     right_label = _label(right)
     lines = [
@@ -278,7 +280,7 @@ def _index_cases(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
     for case in report.get("cases", []):
         turns = case.get("turns") or []
         if turns:
-            indexed[str(case.get("id"))] = turns[0]
+            indexed[str(case.get("id"))] = turns[-1]
     return indexed
 
 
@@ -293,6 +295,50 @@ def _validate_same_cases(left_cases: dict[str, dict[str, Any]], right_cases: dic
             "Os relatórios não contêm exactamente os mesmos casos esperados. "
             f"missing_left={missing_left}; missing_right={missing_right}; "
             f"extras_left={extras_left}; extras_right={extras_right}."
+        )
+
+
+def _validate_same_inputs(left: dict[str, Any], right: dict[str, Any], subset: list[str]) -> None:
+    left_inputs = _case_inputs(left)
+    right_inputs = _case_inputs(right)
+    mismatches = []
+    for case_id in subset:
+        if left_inputs.get(case_id) != right_inputs.get(case_id):
+            mismatches.append(
+                f"{case_id}: left={left_inputs.get(case_id)!r}; right={right_inputs.get(case_id)!r}"
+            )
+    if mismatches:
+        raise ValueError("Os relatórios não usaram exactamente os mesmos inputs. " + "; ".join(mismatches))
+
+
+def _case_inputs(report: dict[str, Any]) -> dict[str, list[str]]:
+    indexed: dict[str, list[str]] = {}
+    for case in report.get("cases", []):
+        indexed[str(case.get("id"))] = [str(turn.get("user_message") or "") for turn in case.get("turns") or []]
+    return indexed
+
+
+def _validate_model_quality_llm_calls(
+    left_cases: dict[str, dict[str, Any]], right_cases: dict[str, dict[str, Any]], subset: list[str]
+) -> None:
+    if not any(case_id.startswith("model_quality_") for case_id in subset):
+        return
+
+    failures: list[str] = []
+    for label, cases in (("left", left_cases), ("right", right_cases)):
+        for case_id in subset:
+            if not case_id.startswith("model_quality_"):
+                continue
+            row = cases.get(case_id)
+            result = (row or {}).get("result") or {}
+            llm_calls = int(result.get("llm_calls") or 0)
+            if llm_calls != 1:
+                failures.append(f"{label}:{case_id}:llm_calls={llm_calls}")
+
+    if failures:
+        raise ValueError(
+            "A comparação model_quality exige exactamente uma chamada LLM por caso. "
+            + "; ".join(failures)
         )
 
 

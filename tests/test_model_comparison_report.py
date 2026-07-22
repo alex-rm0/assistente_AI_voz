@@ -3,6 +3,8 @@ from __future__ import annotations
 import pytest
 
 from evals.compare_model_reports import DEFAULT_SUBSET, render_side_by_side
+from evals.report import render_markdown, summarize
+from evals.schemas import CaseEvaluation, EvalCase, TurnCase, TurnEvaluation, TurnResult
 
 
 def _report(
@@ -88,7 +90,7 @@ def test_comparison_report_fails_when_expected_cases_are_missing() -> None:
     left = _report("ollama", "llama3.1:8b", passed=True, latency_ms=500, cost=0.0, assertions=[])
     right = _report("anthropic", "claude-haiku-4-5-20251001", passed=True, latency_ms=900, cost=0.001, assertions=[])
 
-    with pytest.raises(ValueError, match="missing_left=.*model_comparison_exam_emotion_003"):
+    with pytest.raises(ValueError, match="missing_left=.*model_quality_email_001"):
         render_side_by_side(left, right, DEFAULT_SUBSET)
 
 
@@ -116,7 +118,7 @@ def test_default_comparison_subset_has_ten_cases_and_renders_twenty_rows() -> No
 
     assert len(DEFAULT_SUBSET) == 10
     assert "- Casos comparados: 10" in markdown
-    assert markdown.count("| model_comparison_") == 20
+    assert markdown.count("| model_quality_") == 20
 
 
 def test_ptpt_report_flags_revisar_and_okay() -> None:
@@ -159,3 +161,84 @@ def test_pipeline_failure_is_shown_separately_from_model_failure() -> None:
     assert "nenhuma | memory_write_action" in markdown
     assert "| falhas do modelo | 0 | 0 |" in markdown
     assert "| falhas partilhadas do pipeline | 1 |  |" in markdown
+
+
+def test_model_quality_comparison_fails_when_llm_calls_are_zero() -> None:
+    left = _report(
+        "ollama",
+        "llama3.1:8b",
+        passed=True,
+        latency_ms=500,
+        cost=0.0,
+        assertions=[],
+        case_ids=["model_quality_email_001"],
+    )
+    right = _report(
+        "anthropic",
+        "claude-haiku-4-5-20251001",
+        passed=True,
+        latency_ms=900,
+        cost=0.001,
+        assertions=[],
+        case_ids=["model_quality_email_001"],
+    )
+    left["cases"][0]["turns"][0]["result"]["llm_calls"] = 0
+
+    with pytest.raises(ValueError, match="model_quality exige exactamente uma chamada LLM"):
+        render_side_by_side(left, right, ["model_quality_email_001"])
+
+
+def _case_eval(category: str, case_id: str) -> CaseEvaluation:
+    result = TurnResult(
+        user_message="x",
+        final_response="Resposta.",
+        selected_path="GENERAL_CONVERSATION",
+        response_source="RESPONSE_COMPOSER",
+        model="llama3.1:8b",
+        model_source="settings.json",
+        llm_calls=1,
+        llm_call_sources=["RESPONSE_COMPOSER"],
+        tools_used=[],
+        selected_memory_ids=[],
+        memory_write_action=None,
+        grounding_sources=[],
+        latency_ms=10.0,
+        exception_type=None,
+        exception_message=None,
+        provider="ollama",
+        requested_provider="ollama",
+        requested_model="llama3.1:8b",
+    )
+    turn_eval = TurnEvaluation(
+        turn_index=0,
+        user_message="x",
+        result=result,
+        assertions=[],
+        passed=True,
+    )
+    return CaseEvaluation(
+        case=EvalCase(id=case_id, category=category, description="", turns=(TurnCase(user="x"),)),
+        turn_evaluations=[turn_eval],
+        passed=True,
+        provider="ollama",
+        model="llama3.1:8b",
+        model_source="settings.json",
+    )
+
+
+def test_system_behavior_report_does_not_use_model_quality_diagnostics() -> None:
+    evaluations = [_case_eval("system_behavior", "system_behavior_context_honesty_005")]
+    markdown = render_markdown("run", summarize(evaluations, "ollama", "llama3.1:8b"), evaluations)
+
+    assert "## Diagnóstico system_behavior" in markdown
+    assert "## Diagnóstico model_quality" not in markdown
+    assert "`llm_calls=0` pode ser o comportamento correto" in markdown
+
+
+def test_model_quality_report_does_not_use_system_behavior_diagnostics() -> None:
+    evaluations = [_case_eval("model_quality", "model_quality_email_001")]
+    markdown = render_markdown("run", summarize(evaluations, "ollama", "llama3.1:8b"), evaluations)
+
+    assert "## Diagnóstico model_quality" in markdown
+    assert "## Diagnóstico system_behavior" not in markdown
+    assert "Cada caso deve exigir `llm_calls=1`" in markdown

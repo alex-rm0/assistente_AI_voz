@@ -1,0 +1,39 @@
+{
+  "id": "system_behavior_session_continuity_007",
+  "category": "system_behavior",
+  "description": "Continuidade com conversa anterior deve usar o contexto recente.",
+  "turns": [
+    {
+      "user": "Estamos a corrigir o sistema de memoria do Echo.",
+      "expected": {
+        "response_not_empty": true,
+        "llm_calls_max": 1
+      }
+    },
+    {
+      "user": "Ja corrigimos a escrita passiva, falta o recall.",
+      "expected": {
+        "response_not_empty": true,
+        "llm_calls_max": 1
+      }
+    },
+    {
+      "user": "Resume onde ficamos.",
+      "expected": {
+        "response_not_empty": true,
+          "must_contain": ["memória", "escrita passiva", "recall"],
+        "must_not_contain": [
+          "nao tenho contexto",
+          "não tenho contexto",
+          "ainda nao tenho contexto",
+          "ainda não tenho contexto",
+          "interface",
+          "anthropic",
+          "claude"
+        ],
+        "llm_calls_max": 0
+      }
+    }
+  ],
+  "tags": ["session", "system_behavior"]
+}

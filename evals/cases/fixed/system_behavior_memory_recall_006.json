@@ -1,0 +1,33 @@
+{
+    "id":  "system_behavior_memory_recall_006",
+    "category":  "system_behavior",
+    "description":  "Consulta de memoria explicita deve usar memoria quando existir.",
+    "setup":  [
+                  {
+                      "fact_type":  "academic_event",
+                      "fields":  {
+                                     "discipline":  "Estrategias Algoritmicas",
+                                     "status":  "upcoming",
+                                     "date_reference":  "para a semana"
+                                 },
+                      "confidence":  0.9
+                  }
+              ],
+    "turns":  [
+                  {
+                      "user":  "Confirma na memoria qual e o exame que vou ter para a semana.",
+                      "expected":  {
+                                       "response_not_empty":  true,
+                                       "must_contain":  [
+                                                            "Estrategias Algoritmicas"
+                                                        ],
+                                       "llm_calls_max":  1,
+                                       "response_grounded":  true
+                                   }
+                  }
+              ],
+    "tags":  [
+                 "memory",
+                 "system_behavior"
+             ]
+}

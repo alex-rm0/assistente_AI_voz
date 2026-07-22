@@ -150,6 +150,7 @@ def _pct(passed: int, total: int) -> str:
 
 def render_markdown(run_id: str, summary: dict, case_evaluations: list[CaseEvaluation]) -> str:
     lines: list[str] = []
+    categories = {case_eval.case.category for case_eval in case_evaluations}
     lines.append("# Echo Evaluation Report")
     lines.append("")
     lines.append(f"- Run: {run_id}")
@@ -175,6 +176,41 @@ def render_markdown(run_id: str, summary: dict, case_evaluations: list[CaseEvalu
     for category, counts in sorted(summary["by_category"].items()):
         lines.append(f"| {category} | {counts['passed']} | {counts['total']} | {_pct(counts['passed'], counts['total'])} |")
     lines.append("")
+
+    lines.append("## Prompts executados")
+    lines.append("")
+    for case_eval in case_evaluations:
+        lines.append(f"### {case_eval.case.id}")
+        lines.append("")
+        for turn in case_eval.turn_evaluations:
+            previous = [t.user_message for t in case_eval.turn_evaluations[: turn.turn_index]]
+            lines.append(f"- Turno {turn.turn_index}: {turn.user_message!r}")
+            lines.append(f"  - turnos anteriores no caso: {previous!r}")
+            if not turn.passed:
+                failed = [assertion.name for assertion in turn.assertions if not assertion.passed]
+                result = turn.result
+                lines.append(f"  - resposta: {(result.final_response if result else '')!r}")
+                lines.append(f"  - assertions falhadas: {failed!r}")
+        lines.append("")
+
+    if categories == {"system_behavior"}:
+        lines.extend(
+            [
+                "## Diagnóstico system_behavior",
+                "",
+                "Esta suite valida o comportamento do sistema: routing, memória, continuidade, ferramentas, segurança, grounding e respostas determinísticas. `llm_calls=0` pode ser o comportamento correto nestes casos.",
+                "",
+            ]
+        )
+    elif categories == {"model_quality"}:
+        lines.extend(
+            [
+                "## Diagnóstico model_quality",
+                "",
+                "Esta suite compara qualidade de modelo: resposta gerada pelo provider pedido, latência, tokens, custo, português europeu, concisão, cumprimento da tarefa e revisão humana. Cada caso deve exigir `llm_calls=1`.",
+                "",
+            ]
+        )
 
     if summary["by_classification"]:
         lines.append("## Falhas por classificação")

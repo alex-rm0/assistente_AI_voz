@@ -47,8 +47,8 @@ def check_user_request(message: str) -> SecurityDecision:
             allowed=False,
             action=blocked_action,
             message=(
-                f"Nao posso realizar esta acao: {blocked_action}. "
-                "Nesta versao nao apago, movo, executo comandos nem acedo fora da workspace."
+                f"Não posso realizar esta ação: {blocked_action}. "
+                "Nesta versão não apago, movo, executo comandos nem acedo fora da workspace."
             ),
         )
 

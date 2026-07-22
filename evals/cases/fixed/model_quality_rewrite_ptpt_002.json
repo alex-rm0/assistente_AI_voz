@@ -1,0 +1,24 @@
+{
+  "id": "model_quality_rewrite_ptpt_002",
+  "category": "model_quality",
+  "description": "Reescrita em português europeu natural, curta e sem marcas brasileiras.",
+  "turns": [
+    {
+      "user": "Reescreve esta frase para soar natural, profissional e adequada a um email académico: \"Eu vou acessar os arquivos na tela e revisar tudo depois.\"",
+      "expected": {
+        "response_not_empty": true,
+        "must_contain_any": ["aceder", "ficheiros", "ecrã", "rever"],
+        "must_not_contain": ["acessar", "arquivos", "tela", "revisar", "você", "Okay"],
+        "max_words": 70,
+        "max_questions": 0,
+        "llm_calls_min": 1,
+        "llm_calls_max": 1,
+        "require_provider_match": true,
+        "require_model_match": true,
+        "forbid_fallback": true,
+        "forbid_deterministic_response": true
+      }
+    }
+  ],
+  "tags": ["model_quality", "rewrite", "ptpt"]
+}
