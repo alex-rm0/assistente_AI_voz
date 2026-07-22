@@ -160,29 +160,57 @@ Cobrem:
 
 Essa baseline continua útil como referência histórica, mas não é uma baseline limpa.
 
-Não foi criada nova baseline oficial nesta tarefa porque houve alterações de código e documentação. O passo correcto é:
+Baseline oficial da Fase 0:
 
-1. rever diff;
-2. autorizar commit;
-3. criar commit;
-4. correr baseline marcada no commit limpo.
+| Campo | Valor |
+|---|---|
+| Commit | `a9629d03a1af577c5b44a248d407da6b650ec4e2` |
+| Run | `2026-07-22_14-03-12__fixed-generated__ollama__gemma3-12b__r1` |
+| Provider | `ollama` |
+| Modelo | `gemma3:12b` |
+| Model source | `provider:ollama` |
+| Testes | `497 passed` |
+| Casos fixed+generated | `51` |
+| Passaram | `51` |
+| Falharam | `0` |
+| Excepções | `0` |
+| Git dirty | `false` |
+| Baseline | `true` |
+| Latência média | `444.98 ms` |
+| Pasta local | `evals/results/baselines/2026-07-22_14-03-12__fixed-generated__ollama__gemma3-12b__r1` |
 
-Comandos para promover baseline depois do commit:
+Execução complementar `real_conversation`:
+
+| Campo | Valor |
+|---|---|
+| Run | `2026-07-22_14-03-36__category-real-conversation__ollama__gemma3-12b__r1` |
+| Provider | `ollama` |
+| Modelo | `gemma3:12b` |
+| Model source | `provider:ollama` |
+| Casos | `10` |
+| Passaram | `10` |
+| Falharam | `0` |
+| Excepções | `0` |
+
+A execução `real_conversation` ficou com `git_dirty=true` porque a baseline local acabada de gerar ficou presente em `evals/results/baselines/`. Essa pasta é um artefacto local gerado e passou a estar ignorada no Git.
+
+Comandos usados para criar a baseline oficial:
 
 ```powershell
 .\.venv\Scripts\python.exe -m compileall app.py assistant ui prototype_web_ui evals tests
 .\.venv\Scripts\python.exe -m pytest
-.\.venv\Scripts\python.exe -m evals.run_evals --include-generated --mark-baseline
-.\.venv\Scripts\python.exe -m evals.run_evals --category real_conversation
+.\.venv\Scripts\python.exe -m evals.run_evals --include-generated --mark-baseline --model gemma3:12b
+.\.venv\Scripts\python.exe -m evals.run_evals --category real_conversation --model gemma3:12b
 ```
 
-Critérios:
+Critérios cumpridos na baseline oficial:
 
-- working tree limpa antes do run;
-- `git_dirty=false` no metadata final;
+- working tree limpa antes do run marcado;
+- `git_dirty=false` no metadata da baseline;
 - provider `ollama`;
-- modelo e `model_source` registados;
-- resultados completos.
+- modelo `gemma3:12b`;
+- `model_source=provider:ollama`;
+- resultados completos: `51/51`.
 
 Smoke executado durante a Fase 0:
 
@@ -205,7 +233,6 @@ Resultado do smoke:
 
 ## 5. Limitações Ainda Aceites
 
-- Não foi criada baseline oficial nova antes de commit.
 - AnthropicProvider não foi implementado.
 - Ruflo não foi integrado.
 - Pesquisa real continua indisponível.
