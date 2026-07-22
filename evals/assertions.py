@@ -169,6 +169,34 @@ def run_turn_assertions(expected: TurnExpectation, result: TurnResult) -> list[A
             f"esperado={expected.expected_model} obtido={result.model}",
         )
 
+    if expected.expected_model_routing_provider is not None:
+        check(
+            "expected_model_routing_provider",
+            result.model_routing_provider == expected.expected_model_routing_provider,
+            f"esperado={expected.expected_model_routing_provider} obtido={result.model_routing_provider}",
+        )
+
+    if expected.expected_model_routing_mode is not None:
+        check(
+            "expected_model_routing_mode",
+            result.model_routing_mode == expected.expected_model_routing_mode,
+            f"esperado={expected.expected_model_routing_mode} obtido={result.model_routing_mode}",
+        )
+
+    if expected.expected_model_routing_reason_code is not None:
+        check(
+            "expected_model_routing_reason_code",
+            result.model_routing_reason_code == expected.expected_model_routing_reason_code,
+            f"esperado={expected.expected_model_routing_reason_code} obtido={result.model_routing_reason_code}",
+        )
+
+    if expected.expected_model_routing_paid_call is not None:
+        check(
+            "expected_model_routing_paid_call",
+            result.model_routing_paid_call is expected.expected_model_routing_paid_call,
+            f"esperado={expected.expected_model_routing_paid_call} obtido={result.model_routing_paid_call}",
+        )
+
     if expected.require_provider_match:
         check(
             "provider_matches_request",

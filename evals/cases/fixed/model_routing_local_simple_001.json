@@ -1,0 +1,18 @@
+{
+  "id": "model_routing_local_simple_001",
+  "category": "model_routing",
+  "description": "Pedido que exige LLM em modo operacional local deve usar Ollama.",
+  "turns": [
+    {
+      "user": "Explica-me em poucas palavras a diferença entre código síncrono e assíncrono.",
+      "expected": {
+        "llm_calls_min": 1,
+        "llm_calls_max": 1,
+        "expected_provider": "ollama",
+        "expected_model_routing_provider": "ollama",
+        "expected_model_routing_paid_call": false,
+        "forbid_fallback": true
+      }
+    }
+  ]
+}

@@ -98,6 +98,16 @@ def run_case(case: EvalCase, run: EvalRun, config: ProviderConfig) -> CaseEvalua
             requested_provider=config.provider,
             requested_model=config.model,
             fallback_used=bool(telemetry.get("fallback_used")),
+            model_routing_mode=str(telemetry.get("model_routing_mode") or ""),
+            model_routing_provider=str(telemetry.get("model_routing_provider") or ""),
+            model_routing_model=str(telemetry.get("model_routing_model") or ""),
+            model_routing_reason_code=str(telemetry.get("model_routing_reason_code") or ""),
+            model_routing_reason=str(telemetry.get("model_routing_reason") or ""),
+            model_routing_paid_call=bool(telemetry.get("model_routing_paid_call")),
+            model_routing_budget_before_usd=float(telemetry.get("model_routing_budget_before_usd") or 0.0),
+            model_routing_budget_after_usd=float(telemetry.get("model_routing_budget_after_usd") or 0.0),
+            model_routing_fallback_reason=str(telemetry.get("model_routing_fallback_reason") or ""),
+            model_routing_override_source=str(telemetry.get("model_routing_override_source") or ""),
             tools_used=list(telemetry.get("tools_used") or []),
             selected_memory_ids=list(telemetry.get("selected_memory_ids") or []),
             memory_write_action=telemetry.get("memory_write_action"),
@@ -166,6 +176,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--case-list", default="", help="run the case ids listed in a text file")
     parser.add_argument("--provider", default="ollama")
     parser.add_argument("--model", default="")
+    parser.add_argument("--model-mode", choices=("local", "claude", "automatic"), default="local")
     parser.add_argument("--include-generated", action="store_true")
     parser.add_argument("--output-dir", default=None, help="override evals/results/ root (advanced/testing use)")
     parser.add_argument("--fail-fast", action="store_true")
@@ -198,7 +209,7 @@ def main(argv: list[str] | None = None) -> int:
         from assistant.model_provider import DEFAULT_ANTHROPIC_MODEL, DEFAULT_OLLAMA_MODEL
 
         resolved_model = DEFAULT_ANTHROPIC_MODEL if args.provider == "anthropic" else DEFAULT_OLLAMA_MODEL
-    config = ProviderConfig(provider=args.provider, model=resolved_model)
+    config = ProviderConfig(provider=args.provider, model=resolved_model, model_mode=args.model_mode)
     config.model_source = f"provider:{config.provider}"
     command_used = "python -m evals.run_evals " + " ".join(argv if argv is not None else sys.argv[1:])
     suite = results_store.suite_label(args.category, args.case, args.include_generated)

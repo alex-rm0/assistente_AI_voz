@@ -10,6 +10,14 @@
     "provider": "ollama",
     "name": "llama3.1:8b"
   },
+  "model_routing": {
+    "mode": "local",
+    "automatic": {
+      "claude_enabled": false,
+      "daily_budget_usd": 0.25,
+      "max_single_call_estimated_usd": 0.05
+    }
+  },
   "ollama": {
     "base_url": "http://127.0.0.1:11434",
     "model": "llama3.1:8b",

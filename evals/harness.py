@@ -32,15 +32,30 @@ class ProviderConfig:
     model: str = ""
     base_url: str = "http://127.0.0.1:11434"
     model_source: str = "provider:ollama"
+    model_mode: str = "local"
 
 
 def build_llm(config: ProviderConfig):
     """Turn a --provider/--model choice into the LLM object used by evals."""
     from assistant.anthropic_provider import AnthropicProvider
     from assistant.model_provider import DEFAULT_ANTHROPIC_MODEL, DEFAULT_OLLAMA_MODEL, OllamaProvider, ProviderBackedLLM
+    from assistant.model_router import ModelRouter, ModelRoutingConfig, RoutedLLM
 
     if config.provider == "ollama":
         provider = OllamaProvider(model=config.model or DEFAULT_OLLAMA_MODEL, base_url=config.base_url)
+        anthropic_provider = AnthropicProvider(model=DEFAULT_ANTHROPIC_MODEL)
+        router = ModelRouter(
+            ModelRoutingConfig(mode=config.model_mode or "local", mode_source="evals"),
+            ollama_model=provider.model,
+            anthropic_model=anthropic_provider.model,
+            env={},
+        )
+        return RoutedLLM(
+            providers={"ollama": provider, "anthropic": anthropic_provider},
+            router=router,
+            system_prompt=get_base_system_prompt(),
+            model_source=config.model_source,
+        )
     elif config.provider == "anthropic":
         provider = AnthropicProvider(model=config.model or DEFAULT_ANTHROPIC_MODEL)
     else:

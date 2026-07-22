@@ -13,11 +13,13 @@ from assistant.context_observer import ContextObserver
 from assistant.long_term_memory import LongTermMemory
 from assistant.memory import ConversationMemory
 from assistant.model_provider import (
+    DEFAULT_ANTHROPIC_MODEL,
     DEFAULT_OLLAMA_MODEL,
     OllamaProvider,
     ProviderBackedLLM,
     resolve_model_provider,
 )
+from assistant.model_router import ModelRouter, ModelUsageBudget, RoutedLLM, resolve_model_routing_config
 from assistant.personal_model import PersonalModel
 from assistant.presence_manager import PresenceManager
 from assistant.prompts import get_base_system_prompt
@@ -72,6 +74,7 @@ def main() -> int:
     parser.add_argument("--ui", choices=("classic", "echo-os"), default="classic")
     parser.add_argument("--provider", choices=("ollama", "anthropic"), default="", help="Model provider for this run")
     parser.add_argument("--model", default="", help="Model name for this run")
+    parser.add_argument("--model-mode", choices=("local", "claude", "automatic"), default="", help="Model routing mode")
     args, qt_args = parser.parse_known_args()
 
     settings = load_settings()
@@ -152,32 +155,69 @@ def main() -> int:
         cli_model=args.model,
         settings=settings,
     )
+    routing_config = resolve_model_routing_config(cli_mode=args.model_mode, settings=settings)
     print("[MODEL CONFIG]")
     print(f"provider={resolved_model.provider}")
     print(f"provider_source={resolved_model.provider_source}")
     print(f"model={resolved_model.model}")
     print(f"model_source={resolved_model.model_source}")
+    print(f"model_routing_mode={routing_config.mode}")
+    print(f"model_routing_mode_source={routing_config.mode_source}")
 
     default_system_prompt = get_base_system_prompt()
-    if resolved_model.provider == "ollama":
-        provider = OllamaProvider(
-            model=resolved_model.model,
-            base_url=resolved_model.base_url,
-            timeout_seconds=resolved_model.timeout_seconds,
+    ollama_config = settings.get("ollama", {}) if isinstance(settings.get("ollama", {}), dict) else {}
+    anthropic_config = settings.get("anthropic", {}) if isinstance(settings.get("anthropic", {}), dict) else {}
+    model_settings = settings.get("model", {}) if isinstance(settings.get("model", {}), dict) else {}
+    cli_model_for_ollama = bool(args.model and (args.provider == "ollama" or (not args.provider and routing_config.mode == "local")))
+    cli_model_for_anthropic = bool(args.model and (args.provider == "anthropic" or (not args.provider and routing_config.mode in {"claude", "automatic"})))
+    ollama_model_name = (
+        args.model
+        if cli_model_for_ollama
+        else resolved_model.model
+        if resolved_model.provider == "ollama"
+        else str(model_settings.get("name") or DEFAULT_OLLAMA_MODEL)
+    )
+    anthropic_model_name = (
+        args.model
+        if cli_model_for_anthropic
+        else resolved_model.model
+        if resolved_model.provider == "anthropic"
+        else str(anthropic_config.get("model") or DEFAULT_ANTHROPIC_MODEL)
+    )
+    ollama_provider = OllamaProvider(
+        model=ollama_model_name,
+        base_url=str(ollama_config.get("base_url") or "http://127.0.0.1:11434"),
+        timeout_seconds=int(ollama_config.get("timeout_seconds", 120)),
+    )
+    anthropic_provider = AnthropicProvider(
+        model=anthropic_model_name,
+        base_url=str(anthropic_config.get("base_url") or "https://api.anthropic.com"),
+        timeout_seconds=int(anthropic_config.get("timeout_seconds", 120)),
+        max_tokens=int(anthropic_config.get("max_tokens", 1024)),
+    )
+    if args.provider:
+        # Explicit provider remains a manual override. No fallback is allowed:
+        # provider configuration errors are surfaced by AssistantEngine.
+        provider = anthropic_provider if resolved_model.provider == "anthropic" else ollama_provider
+        llm = ProviderBackedLLM(
+            provider=provider,
+            system_prompt=default_system_prompt,
+            model_source=resolved_model.model_source,
         )
     else:
-        anthropic_config = settings.get("anthropic", {}) if isinstance(settings.get("anthropic", {}), dict) else {}
-        provider = AnthropicProvider(
-            model=resolved_model.model,
-            base_url=resolved_model.base_url,
-            timeout_seconds=resolved_model.timeout_seconds,
-            max_tokens=int(anthropic_config.get("max_tokens", 1024)),
+        budget = ModelUsageBudget(data_path / "model_routing_usage.json")
+        router = ModelRouter(
+            routing_config,
+            ollama_model=ollama_provider.model,
+            anthropic_model=anthropic_provider.model,
+            budget=budget,
         )
-    llm = ProviderBackedLLM(
-        provider=provider,
-        system_prompt=default_system_prompt,
-        model_source=resolved_model.model_source,
-    )
+        llm = RoutedLLM(
+            providers={"ollama": ollama_provider, "anthropic": anthropic_provider},
+            router=router,
+            system_prompt=default_system_prompt,
+            model_source=resolved_model.model_source,
+        )
     long_term_memory = LongTermMemory(
         data_path=data_path,
         db_file=memory_config.get("long_term_db", "long_term_memory.sqlite"),

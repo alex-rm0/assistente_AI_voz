@@ -1409,6 +1409,7 @@ class AssistantEngine:
             self._turn_trace["final_response_source"] = final_response_source
             self._turn_trace["final_response_kind"] = _response_kind_for_source(source)
             self._turn_trace["model_source"] = _model_source(self.llm)
+            self._turn_trace.update(_model_routing_telemetry(self.llm))
             self._turn_trace.setdefault("fallback_used", final_response_source in {"LOCAL_SAFE_FALLBACK", "FALLBACK"})
         return final_response
 
@@ -1454,6 +1455,16 @@ class AssistantEngine:
         print(f"model={self._turn_trace.get('model')}")
         print(f"model_source={self._turn_trace.get('model_source')}")
         print(f"provider={self._turn_trace.get('provider')}")
+        print(f"model_routing_mode={self._turn_trace.get('model_routing_mode')}")
+        print(f"model_routing_provider={self._turn_trace.get('model_routing_provider')}")
+        print(f"model_routing_model={self._turn_trace.get('model_routing_model')}")
+        print(f"model_routing_reason_code={self._turn_trace.get('model_routing_reason_code')}")
+        print(f"model_routing_reason={self._turn_trace.get('model_routing_reason')}")
+        print(f"model_routing_paid_call={self._turn_trace.get('model_routing_paid_call')}")
+        print(f"model_routing_budget_before_usd={self._turn_trace.get('model_routing_budget_before_usd')}")
+        print(f"model_routing_budget_after_usd={self._turn_trace.get('model_routing_budget_after_usd')}")
+        print(f"model_routing_fallback_reason={self._turn_trace.get('model_routing_fallback_reason')}")
+        print(f"model_routing_override_source={self._turn_trace.get('model_routing_override_source')}")
         print(f"provider_error_type={self._turn_trace.get('provider_error_type')}")
         print(f"fallback_used={self._turn_trace.get('fallback_used')}")
         print(f"response_before_voice_critic={self._turn_trace.get('response_before_voice_critic')}")
@@ -1536,6 +1547,16 @@ class AssistantEngine:
             "model": self._turn_trace.get("model"),
             "model_source": self._turn_trace.get("model_source"),
             "provider": self._turn_trace.get("provider"),
+            "model_routing_mode": self._turn_trace.get("model_routing_mode"),
+            "model_routing_provider": self._turn_trace.get("model_routing_provider"),
+            "model_routing_model": self._turn_trace.get("model_routing_model"),
+            "model_routing_reason_code": self._turn_trace.get("model_routing_reason_code"),
+            "model_routing_reason": self._turn_trace.get("model_routing_reason"),
+            "model_routing_paid_call": self._turn_trace.get("model_routing_paid_call"),
+            "model_routing_budget_before_usd": self._turn_trace.get("model_routing_budget_before_usd"),
+            "model_routing_budget_after_usd": self._turn_trace.get("model_routing_budget_after_usd"),
+            "model_routing_fallback_reason": self._turn_trace.get("model_routing_fallback_reason"),
+            "model_routing_override_source": self._turn_trace.get("model_routing_override_source"),
             "provider_error_type": self._turn_trace.get("provider_error_type"),
             "fallback_used": self._turn_trace.get("fallback_used"),
             "llm_calls": llm_calls,
@@ -3032,6 +3053,22 @@ def _model_source(llm: object) -> str:
 def _provider_name(llm: object) -> str:
     provider = getattr(llm, "provider", None)
     return str(getattr(provider, "name", "") or "")
+
+
+def _model_routing_telemetry(llm: object) -> dict[str, object]:
+    settings = getattr(llm, "settings", None)
+    return {
+        "model_routing_mode": str(getattr(settings, "model_routing_mode", "") or ""),
+        "model_routing_provider": str(getattr(settings, "model_routing_provider", "") or ""),
+        "model_routing_model": str(getattr(settings, "model_routing_model", "") or ""),
+        "model_routing_reason_code": str(getattr(settings, "model_routing_reason_code", "") or ""),
+        "model_routing_reason": str(getattr(settings, "model_routing_reason", "") or ""),
+        "model_routing_paid_call": bool(getattr(settings, "model_routing_paid_call", False)),
+        "model_routing_budget_before_usd": float(getattr(settings, "model_routing_budget_before_usd", 0.0) or 0.0),
+        "model_routing_budget_after_usd": float(getattr(settings, "model_routing_budget_after_usd", 0.0) or 0.0),
+        "model_routing_fallback_reason": str(getattr(settings, "model_routing_fallback_reason", "") or ""),
+        "model_routing_override_source": str(getattr(settings, "model_routing_override_source", "") or ""),
+    }
 
 
 def _sum_optional_ints(values) -> int | None:

@@ -190,6 +190,28 @@ def test_provider_mismatch_fails() -> None:
     assert failed[0].passed is False
 
 
+def test_model_routing_expectations_are_checked() -> None:
+    result = _result("Resposta.")
+    result.model_routing_mode = "automatic"
+    result.model_routing_provider = "ollama"
+    result.model_routing_reason_code = "low_complexity"
+    result.model_routing_paid_call = False
+
+    outcomes = run_turn_assertions(
+        TurnExpectation(
+            expected_model_routing_mode="automatic",
+            expected_model_routing_provider="anthropic",
+            expected_model_routing_reason_code="low_complexity",
+            expected_model_routing_paid_call=False,
+        ),
+        result,
+    )
+
+    failed = [outcome for outcome in outcomes if outcome.name == "expected_model_routing_provider"]
+    assert failed
+    assert failed[0].passed is False
+
+
 def test_fallback_fails_when_forbidden() -> None:
     result = _result("Fallback.")
     result.fallback_used = True

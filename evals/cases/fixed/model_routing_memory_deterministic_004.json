@@ -1,0 +1,27 @@
+{
+  "id": "model_routing_memory_deterministic_004",
+  "category": "model_routing",
+  "description": "Consulta de memória estruturada deve responder por lógica local quando há facto guardado.",
+  "setup": [
+    {
+      "fact_type": "academic_event",
+      "fields": {
+        "discipline": "Estratégias Algorítmicas",
+        "date_reference": "para a semana"
+      },
+      "confidence": 0.95
+    }
+  ],
+  "turns": [
+    {
+      "user": "Confirma na memória qual é o exame que vou ter para a semana.",
+      "expected": {
+        "selected_path": "MEMORY_RECALL",
+        "llm_calls_max": 0,
+        "must_contain_any": ["Estratégias Algorítmicas", "Estrategias Algoritmicas"],
+        "expected_model_routing_paid_call": false,
+        "no_tools_used": true
+      }
+    }
+  ]
+}

@@ -29,6 +29,10 @@ class TurnExpectation:
     memory_write_action: Any = _UNSET
     expected_provider: str | None = None
     expected_model: str | None = None
+    expected_model_routing_provider: str | None = None
+    expected_model_routing_mode: str | None = None
+    expected_model_routing_reason_code: str | None = None
+    expected_model_routing_paid_call: bool | None = None
     require_provider_match: bool = False
     require_model_match: bool = False
     forbid_fallback: bool = False
@@ -75,6 +79,10 @@ class TurnExpectation:
             memory_write_action=memory_write_action,
             expected_provider=data.get("expected_provider"),
             expected_model=data.get("expected_model"),
+            expected_model_routing_provider=data.get("expected_model_routing_provider"),
+            expected_model_routing_mode=data.get("expected_model_routing_mode"),
+            expected_model_routing_reason_code=data.get("expected_model_routing_reason_code"),
+            expected_model_routing_paid_call=data.get("expected_model_routing_paid_call"),
             require_provider_match=data.get("require_provider_match", False),
             require_model_match=data.get("require_model_match", False),
             forbid_fallback=data.get("forbid_fallback", False),
@@ -178,6 +186,16 @@ class TurnResult:
     requested_provider: str = ""
     requested_model: str = ""
     fallback_used: bool = False
+    model_routing_mode: str = ""
+    model_routing_provider: str = ""
+    model_routing_model: str = ""
+    model_routing_reason_code: str = ""
+    model_routing_reason: str = ""
+    model_routing_paid_call: bool = False
+    model_routing_budget_before_usd: float = 0.0
+    model_routing_budget_after_usd: float = 0.0
+    model_routing_fallback_reason: str = ""
+    model_routing_override_source: str = ""
 
     def to_dict(self) -> dict:
         return dict(self.__dict__)

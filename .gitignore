@@ -5,6 +5,7 @@ __pycache__/
 *.pyc
 data/history.json
 data/*.sqlite
+data/model_routing_usage.json
 data/debug/*.wav
 workspace/conversation.json
 evals/results/runs/
@@ -12,6 +13,7 @@ evals/results/latest/
 evals/results/comparisons/
 evals/results/model_comparison*/
 evals/results/model_quality*/
+evals/results/model_routing*/
 evals/results/system_behavior*/
 evals/results/legacy/
 evals/results/index.md

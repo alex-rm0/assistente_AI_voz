@@ -1,0 +1,16 @@
+{
+  "id": "model_routing_fast_path_002",
+  "category": "model_routing",
+  "description": "Comando rápido de URL não deve chamar LLM nem paid routing.",
+  "turns": [
+    {
+      "user": "abre youtube",
+      "expected": {
+        "selected_path": "FAST_ROUTE",
+        "llm_calls_max": 0,
+        "expected_model_routing_paid_call": false,
+        "no_tools_used": false
+      }
+    }
+  ]
+}
