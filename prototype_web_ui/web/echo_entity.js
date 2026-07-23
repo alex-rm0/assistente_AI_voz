@@ -19,6 +19,7 @@
       this.cy = 0;
       this.cxTarget = 0;
       this.cyTarget = 0;
+      this.customCenter = false;
       this.R = 160;
       this.resize();
       this.buildMind();
@@ -137,7 +138,6 @@
 
     setState(state) {
       this.state = state || "idle";
-      this.cxTarget = this.w * 0.5;
       if (this.state === "thinking") {
         this.thinkingFocus = this.nodes[(Math.random() * this.nodes.length) | 0];
         this.nextThinkingSpark = 0;
@@ -148,7 +148,30 @@
       } else if (this.state === "error") {
         this.sparkRandom(1, 0);
       }
+      if (!this.customCenter) {
+        this.cxTarget = this.w * 0.5;
+        this.cyTarget = this.h * 0.5;
+      }
+    }
+
+    setCenter(x, y, immediate = false) {
+      this.customCenter = true;
+      this.cxTarget = Number.isFinite(x) ? x : this.w * 0.5;
+      this.cyTarget = Number.isFinite(y) ? y : this.h * 0.5;
+      if (immediate) {
+        this.cx = this.cxTarget;
+        this.cy = this.cyTarget;
+      }
+    }
+
+    clearCustomCenter() {
+      this.customCenter = false;
+      this.cxTarget = this.w * 0.5;
       this.cyTarget = this.h * 0.5;
+    }
+
+    getCenter() {
+      return { x: this.cxTarget || this.w * 0.5, y: this.cyTarget || this.h * 0.5 };
     }
 
     sparkRandom(count, depth = 1) {

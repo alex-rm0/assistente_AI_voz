@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Echo Web UI Prototype</title>
+  <title>Echo OS Prototype</title>
   <link rel="stylesheet" href="./styles.css">
   <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
   <script defer src="./echo_entity.js"></script>
@@ -12,9 +12,7 @@
 <body>
   <main class="prototype-shell">
     <div id="stageScaler" class="stage-scaler">
-      <section class="stage" aria-label="Echo prototype">
-        <canvas id="mind"></canvas>
-
+      <section class="stage" aria-label="Echo prototype" data-telemetry-panel="closed">
         <svg class="ticks" viewBox="0 0 1300 812" aria-hidden="true">
           <path d="M28 44 h20 M28 44 v20"></path>
           <path d="M1272 44 h-20 M1272 44 v20"></path>
@@ -23,16 +21,117 @@
         </svg>
 
         <header class="topbar">
-          <div class="brand">
+          <div class="topbar-left">
             <span class="wordmark">ECHO</span>
             <span id="statusDot" class="status-dot"></span>
-            <span id="statusLine" class="status-line">ACTIVE · PROTOTYPE</span>
+            <span id="statusLine" class="status-line">ACTIVE</span>
           </div>
-          <span class="context-line">KNOWN 1240 · TOGETHER 15 MO</span>
+          <time id="topbarClock" class="topbar-clock" aria-label="Hora e data atuais">--:-- · -- --- ----</time>
+          <span id="appVersion" class="topbar-version">ECHO OS · v0.4.0</span>
         </header>
 
-        <p id="echoSays" class="echo-says" aria-live="polite"></p>
-        <div id="echoResponse" class="echo-response" aria-live="polite"></div>
+        <div class="echo-main">
+          <canvas
+            id="mind"
+            tabindex="0"
+            aria-label="Entidade Echo. Arrasta para mover, usa as setas para mudar entre zonas de snap ou faz duplo clique para recentrar."
+          ></canvas>
+
+          <p id="echoSays" class="echo-says" aria-live="polite"></p>
+          <div id="echoResponse" class="echo-response" aria-live="polite"></div>
+
+          <button
+            id="telemetryCompact"
+            class="telemetry-compact"
+            type="button"
+            aria-label="Abrir telemetria cognitiva"
+            aria-expanded="false"
+            aria-controls="telemetryPanel"
+          >
+            <span id="telemetryCompactText">LOCAL · LLAMA · 0 COST</span>
+          </button>
+
+          <div id="workspaceHint" class="workspace-hint">
+            <div class="hint-panel">
+              <span class="hint-label">ECHO</span>
+              <strong id="responseTitle">Última resposta</strong>
+              <p id="bridgeReply">A resposta aparece aqui.</p>
+            </div>
+          </div>
+
+          <section class="input-zone" aria-label="Entrada de texto">
+            <form id="echoForm" class="input-pill">
+              <div class="waver" aria-hidden="true">
+                <i></i><i></i><i></i><i></i><i></i>
+              </div>
+              <input id="voiceIn" type="text" autocomplete="off" spellcheck="false" placeholder="talk to Echo, or type...">
+              <button id="clearButton" class="clear-button" type="button">CLEAR ↩</button>
+            </form>
+          </section>
+        </div>
+
+        <aside
+          id="telemetryPanel"
+          class="telemetry-panel"
+          aria-label="Telemetria cognitiva mockada"
+          aria-hidden="true"
+          tabindex="-1"
+        >
+          <div class="telemetry-panel__header" data-workspace-drag-handle="telemetryPanel">
+            <span class="hint-label">COGNITIVE TELEMETRY</span>
+            <button id="closeTelemetry" class="telemetry-close" type="button" aria-label="Fechar telemetria">×</button>
+          </div>
+
+          <section class="telemetry-section" aria-label="Modelo">
+            <div class="telemetry-row">
+              <span>COGNITIVE MODE</span>
+              <strong id="telemetryMode">LOCAL</strong>
+            </div>
+            <div class="telemetry-row">
+              <span>ACTIVE MODEL</span>
+              <strong id="telemetryModel">LLAMA 3.1 8B</strong>
+            </div>
+            <div class="telemetry-row">
+              <span>ROUTING</span>
+              <strong id="telemetryRouting">Local response</strong>
+            </div>
+          </section>
+
+          <section class="telemetry-section" aria-label="Métricas">
+            <div class="telemetry-row">
+              <span>LATENCY</span>
+              <strong id="telemetryLatency">620 ms</strong>
+            </div>
+            <div class="telemetry-row">
+              <span>TOKENS</span>
+              <strong id="telemetryTokens">430 → 72</strong>
+            </div>
+            <div class="telemetry-row">
+              <span>ESTIMATED COST</span>
+              <strong id="telemetryCost">$0</strong>
+            </div>
+            <div class="telemetry-row">
+              <span>DAILY USE</span>
+              <strong id="telemetryDaily">$0.000 / $0.25</strong>
+            </div>
+          </section>
+
+          <section class="telemetry-section telemetry-behaviour" aria-label="Comportamento do modelo">
+            <span>MODEL BEHAVIOUR</span>
+            <div class="telemetry-segments" role="group" aria-label="Modo mockado de modelo">
+              <button type="button" data-telemetry-mode="local">LOCAL</button>
+              <button type="button" data-telemetry-mode="claude">CLAUDE</button>
+              <button type="button" data-telemetry-mode="automatic">AUTOMATIC</button>
+            </div>
+            <p id="telemetryNote">Local response.</p>
+          </section>
+
+          <section class="telemetry-section telemetry-workspace-controls" aria-label="Controlos do workspace">
+            <button id="recenterEcho" type="button">RECENTER ECHO</button>
+            <button id="resetWorkspace" type="button">RESET WORKSPACE</button>
+            <button id="toggleWorkspaceLock" type="button" aria-pressed="false">LOCK POSITION</button>
+          </section>
+        </aside>
 
         <section id="researchWorkspace" class="research-workspace" aria-label="Workspace de pesquisa">
           <div class="research-header">
@@ -44,39 +143,6 @@
           <p id="researchSummary" class="research-summary"></p>
           <div id="researchResults" class="research-results"></div>
         </section>
-
-        <div id="workspaceHint" class="workspace-hint">
-          <div class="hint-panel">
-            <span class="hint-label">ECHO</span>
-            <strong id="responseTitle">Última resposta</strong>
-            <p id="bridgeReply">A resposta aparece aqui.</p>
-          </div>
-        </div>
-
-        <section class="input-zone" aria-label="Entrada de texto">
-          <form id="echoForm" class="input-pill">
-            <div class="waver" aria-hidden="true">
-              <i></i><i></i><i></i><i></i><i></i>
-            </div>
-            <input id="voiceIn" type="text" autocomplete="off" spellcheck="false" placeholder="talk to Echo, or type...">
-            <button id="clearButton" class="clear-button" type="button">CLEAR ↩</button>
-          </form>
-
-          <div id="suggestions" class="suggestions">
-            <span>TRY</span>
-            <button type="button" data-message="Olá">olá</button>
-            <button type="button" data-message="planear férias">planear férias</button>
-            <button type="button" data-message="ship the api">ship the api</button>
-            <button type="button" data-message="onde ficámos?">onde ficámos?</button>
-          </div>
-        </section>
-
-        <aside class="debug-states" aria-label="Estados de protótipo">
-          <button type="button" data-state="idle">1</button>
-          <button type="button" data-state="thinking">2</button>
-          <button type="button" data-state="speaking">3</button>
-          <button type="button" data-state="error">4</button>
-        </aside>
       </section>
     </div>
   </main>

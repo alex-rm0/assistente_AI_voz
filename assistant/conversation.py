@@ -2159,16 +2159,22 @@ class AssistantEngine:
 
     def _try_project_history_recall(self, user_message: str) -> str | None:
         normalized = _normalize_text(user_message)
-        if not _looks_like_project_history_question(normalized):
+        if _looks_like_complete_text_summary_request(user_message):
+            return None
+        writing_kind = _writing_request_kind(user_message)
+        if writing_kind and writing_kind != "summary":
+            return None
+        if not _looks_like_project_recall_question(normalized):
             return None
         explicit_project = _extract_project_name_for_history(user_message)
         project = explicit_project or "projeto"
         project_norm = _normalize_text(project)
+        project_terms = _project_recall_terms(project, user_message) or [project_norm]
         history = self._recent_conversation_history(user_message, limit=40)
         history_matches = [
             index
             for index, item in enumerate(history)
-            if project_norm and project_norm in _normalize_text(str(item.get("content") or ""))
+            if _history_item_matches_project(item, project_terms)
         ]
 
         persistent_matches: list[str] = []
@@ -2210,6 +2216,24 @@ class AssistantEngine:
             evidence_text = f"{evidence_text} {' '.join(persistent_matches)}".strip()
         if not explicit_project:
             project = _extract_project_name_for_history(evidence_text) or project
+        if not _looks_like_project_history_question(normalized):
+            if sources:
+                return self.response_composer.compose(
+                    ComposerRequest(
+                        intent="PROJECT_MEMORY_RECALL",
+                        user_message=user_message,
+                        history=[],
+                        context=_project_recall_context(project, history, history_matches, persistent_matches),
+                        fallback=f"Tenho algum contexto sobre o {project}, mas ainda nÃ£o o suficiente para o resumir bem.",
+                        intent_instruction=(
+                            "O pedido Ã© uma consulta sobre um projeto conhecido. "
+                            "Usa apenas o contexto recuperado. NÃ£o inventes objetivos, datas, progresso ou prÃ³ximos passos. "
+                            "Se o Alexandre pedir quatro pontos, responde em exatamente quatro pontos curtos."
+                        ),
+                        language_instruction=self._language_instruction(),
+                    )
+                )
+            return f"NÃ£o tenho contexto suficiente na memÃ³ria para te resumir o {project} com seguranÃ§a."
         duration = _extract_duration_from_evidence(evidence_text)
         if duration:
             if "quando comecamos" in normalized or "quando começamos" in normalized:
@@ -4419,6 +4443,77 @@ def _looks_like_project_history_question(normalized_message: str) -> bool:
     )
     project_marker = "projeto" in text or "echo" in text or "assistenteia" in text or "assistente ia" in text
     return temporal and project_marker
+
+
+def _looks_like_project_recall_question(normalized_message: str) -> bool:
+    text = normalized_message.strip(" .,!?:;")
+    if _looks_like_project_history_question(text):
+        return True
+    project_marker = "projeto" in text or "projecto" in text or "echo" in text or "assistenteia" in text or "assistente ia" in text
+    if not project_marker:
+        return "quais" in text and "ximos passos" in text
+    if text.startswith("o que "):
+        return True
+    return any(
+        marker in text
+        for marker in (
+            "o que e",
+            "o que Ã©",
+            "o que a©",
+            "resume",
+            "resumo",
+            "objetivos",
+            "objectivos",
+            "em que ponto",
+            "estado do projeto",
+            "estado do projecto",
+            "o que ja fizemos",
+            "o que jÃ¡ fizemos",
+            "o que ja¡ fizemos",
+            "proximos passos",
+            "prÃ³ximos passos",
+            "ximos passos",
+        )
+    )
+
+
+def _project_recall_terms(project: str, user_message: str) -> list[str]:
+    values = {_normalize_text(project)}
+    normalized_message = _normalize_text(user_message)
+    if "echo" in normalized_message or "echo" in values:
+        values.update({"echo", "projeto echo", "projecto echo"})
+    if "assistenteia" in normalized_message or "assistente ia" in normalized_message:
+        values.update({"assistenteia", "assistente ia", "projeto assistenteia", "projecto assistenteia"})
+    return [value for value in values if value]
+
+
+def _history_item_matches_project(item: dict[str, str], project_terms: list[str]) -> bool:
+    content = _normalize_text(str(item.get("content") or ""))
+    return bool(content) and any(term and term in content for term in project_terms)
+
+
+def _project_recall_context(
+    project: str,
+    history: list[dict[str, str]],
+    history_matches: list[int],
+    persistent_matches: list[str],
+) -> str:
+    parts = [f"Projeto consultado: {project}."]
+    if history_matches:
+        lines = []
+        for index in history_matches[-8:]:
+            item = history[index]
+            role = "Alexandre" if item.get("role") == "user" else "Echo"
+            content = str(item.get("content") or "").strip()
+            if content:
+                lines.append(f"- {role}: {content}")
+        if lines:
+            parts.append("HistÃ³rico relevante da conversa:\n" + "\n".join(lines))
+    if persistent_matches:
+        lines = [f"- {text}" for text in persistent_matches[-8:] if str(text).strip()]
+        if lines:
+            parts.append("MemÃ³ria persistente relevante:\n" + "\n".join(lines))
+    return "\n\n".join(parts)
 
 
 def _extract_project_name_for_history(message: str) -> str:

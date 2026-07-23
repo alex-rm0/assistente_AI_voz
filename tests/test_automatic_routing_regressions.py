@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from assistant.conversation import AssistantEngine
 from assistant.memory import ConversationMemory
 from assistant.model_provider import ModelResponse
@@ -227,6 +229,83 @@ def test_project_duration_question_without_memory_does_not_invent(tmp_path: Path
     assert "cinco meses" not in response.lower()
     assert telemetry["selected_path"] == "MEMORY_RECALL"
     assert telemetry["llm_calls"] == 0
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "O que Ã© o projeto Echo?",
+        "Resume o projeto Echo em quatro pontos",
+        "Quais sÃ£o os objetivos do Echo?",
+        "Em que ponto estÃ¡ o projeto Echo?",
+        "O que jÃ¡ fizemos no Echo?",
+        "Quais sÃ£o os prÃ³ximos passos?",
+    ],
+)
+def test_general_project_questions_trigger_grounded_recall_before_llm(tmp_path: Path, prompt: str) -> None:
+    engine, llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="local",
+        ollama_replies=["1. O Echo organiza contexto.\n2. MantÃ©m memÃ³ria.\n3. Ajuda a retomar trabalho.\n4. O prÃ³ximo passo Ã© estabilizar."],
+    )
+    engine.memory.append_pair(
+        "Estamos a trabalhar no projeto Echo, sobretudo em memÃ³ria, routing e interface.",
+        "Certo. Vou manter esse contexto.",
+    )
+    engine.long_term_memory.context_text = "O projeto Echo Ã© um companheiro digital persistente focado em contexto, memÃ³ria e continuidade."
+
+    response = engine.respond(prompt)
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert "Echo" in response
+    assert telemetry["selected_path"] == "MEMORY_RECALL"
+    assert telemetry["memory_recall_detected"] is True
+    assert "CONVERSATION_HISTORY" in telemetry["grounding_sources"]
+    assert "PERSISTENT_MEMORY" in telemetry["grounding_sources"]
+    assert telemetry["history_context_used"] is True
+    assert telemetry["llm_calls"] == 1
+    assert [item["component"] for item in telemetry["llm_call_details"]] == ["RESPONSE_COMPOSER"]
+    assert len(ollama.calls) == 1
+    assert anthropic.calls == []
+
+
+def test_project_recall_without_grounding_does_not_ask_llm_or_invent(tmp_path: Path) -> None:
+    engine, llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="local",
+        ollama_replies=["O Echo Ã© um projeto antigo com vÃ¡rios anos."],
+    )
+
+    response = engine.respond("O que Ã© o projeto Echo?")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert "contexto suficiente" in response.lower()
+    assert telemetry["selected_path"] == "MEMORY_RECALL"
+    assert telemetry["memory_recall_detected"] is True
+    assert telemetry["response_grounded"] is False
+    assert telemetry["grounding_sources"] == []
+    assert telemetry["llm_calls"] == 0
+    assert ollama.calls == []
+    assert anthropic.calls == []
+
+
+def test_text_summary_about_echo_is_not_project_memory_recall(tmp_path: Path) -> None:
+    engine, llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="local",
+        ollama_replies=["1. O Echo acompanha contexto.\n2. Guarda memÃ³ria.\n3. Ajuda a planear.\n4. MantÃ©m continuidade."],
+    )
+    engine.memory.append_pair("O projeto Echo tem memÃ³ria persistente.", "Certo.")
+
+    response = engine.respond(
+        "Resume este texto em quatro pontos: O projeto Echo acompanha contexto, guarda memÃ³ria, ajuda a planear e mantÃ©m continuidade."
+    )
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert "Echo" in response
+    assert telemetry["selected_path"] == "TEXT_SUMMARIZATION"
+    assert telemetry["memory_recall_detected"] is False
+    assert telemetry["llm_calls"] == 1
 
 
 def test_conversation_history_provenance_is_reported_when_context_enters_prompt(tmp_path: Path) -> None:
