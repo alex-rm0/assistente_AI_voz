@@ -5,6 +5,8 @@ import time
 import traceback
 import unicodedata
 import os
+from difflib import SequenceMatcher
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -54,8 +56,10 @@ from assistant.tool_registry import ToolRegistry
 from assistant.tools import (
     cancel_task as cancel_task_tool,
     complete_task as complete_task_tool,
+    create_workspace_file,
     list_pending_tasks as list_pending_tasks_tool,
     postpone_task as postpone_task_tool,
+    read_workspace_file_content,
 )
 from assistant.ui_event_adapter import UIEventAdapter
 from assistant.voice_critic import VoiceCritic, detect_semantic_conflict, detect_subject_swap, has_voice_issue
@@ -110,6 +114,8 @@ class AssistantEngine:
         voice_model: str = "base",
         voice_language: str = "pt",
         voice_critic_llm: OllamaClient | None = None,
+        model_runtime=None,
+        now_provider=None,
     ) -> None:
         self.llm = llm
         self.memory = memory
@@ -144,6 +150,7 @@ class AssistantEngine:
         self._active_operation_id = ""
         self._active_operation_ttl = 0
         self._pending_user_intent: dict[str, str] | None = None
+        self._pending_document_task: dict[str, object] | None = None
         self._conversation_segment_start = 0
         self.presence = presence_manager or PresenceManager()
         self.context_observer = context_observer
@@ -173,6 +180,8 @@ class AssistantEngine:
         self.voice_min_record_seconds = voice_min_record_seconds
         self.voice_model = voice_model
         self.voice_language = voice_language or "pt"
+        self.model_runtime = model_runtime
+        self.now_provider = now_provider or (lambda: datetime.now().astimezone())
         self._ensure_language_preferences()
         if self.session_manager is not None and self.presence.state == PresenceState.ACTIVE_CONVERSATION:
             self.session_manager.start_session()
@@ -204,6 +213,39 @@ class AssistantEngine:
 
     def presence_state(self) -> str:
         return self.presence.state.value
+
+    def _try_system_datetime_command(self, user_message: str) -> str | None:
+        parsed = _parse_system_datetime_question(user_message)
+        if parsed is None:
+            return None
+        now = self.now_provider()
+        if not isinstance(now, datetime):
+            now = datetime.now().astimezone()
+        current = now.astimezone()
+        kind, value = parsed
+        target = current.date()
+        if kind == "time":
+            return f"São {current:%H:%M}."
+        if kind == "tomorrow":
+            target = current.date() + timedelta(days=1)
+            return f"Amanhã é {_format_pt_date(target)}."
+        if kind == "yesterday":
+            target = current.date() - timedelta(days=1)
+            return f"Ontem foi {_format_pt_date(target)}."
+        if kind == "offset":
+            target = current.date() + timedelta(days=int(value or 0))
+            return f"Daqui a {int(value or 0)} dias é {_format_pt_date(target)}."
+        if kind == "weekday_for_date" and isinstance(value, date):
+            return f"{_format_pt_date(value, include_weekday=False).capitalize()} calha a {_weekday_name(value)}."
+        return f"Hoje é {_format_pt_date(target)}."
+
+    def _try_system_status_command(self, user_message: str) -> str | None:
+        if self.model_runtime is None:
+            return None
+        answer = getattr(self.model_runtime, "system_status_answer", None)
+        if not callable(answer):
+            return None
+        return answer(user_message)
 
     def respond(self, user_message: str) -> str:
         """Public entry point: never lets an internal exception reach the UI.
@@ -286,6 +328,26 @@ class AssistantEngine:
         self._begin_turn_trace(user_message)
         self._record_tool_intent_check(user_message)
         self._perf_log("pedido recebido", request_started_at, request_started_at)
+        datetime_response = self._try_system_datetime_command(user_message)
+        if datetime_response:
+            return self._complete_turn(
+                user_message,
+                datetime_response,
+                "LOCAL_DATETIME",
+                technical=True,
+                selected_path="SYSTEM_DATETIME",
+                tools_used=("system_datetime",),
+            )
+        system_status_response = self._try_system_status_command(user_message)
+        if system_status_response:
+            return self._complete_turn(
+                user_message,
+                system_status_response,
+                "SYSTEM_STATUS",
+                technical=True,
+                selected_path="SYSTEM_STATUS",
+                tools_used=("system_status",),
+            )
         # Decremented once per incoming turn, before this turn can refresh it,
         # so a grounded recall keeps a short follow-up window open (e.g.
         # "Qual era a disciplina?" -> "E quando é?") without depending on the
@@ -381,6 +443,20 @@ class AssistantEngine:
             )
             self._perf_log("resposta total", request_started_at, time.perf_counter())
             return research_response
+
+        document_response = self._try_document_task(user_message)
+        if document_response is not None:
+            document_response = self._complete_turn(
+                user_message=user_message,
+                response=document_response,
+                source="DOCUMENT_TASK",
+                remember=True,
+                technical=True,
+                selected_path="DOCUMENT_TASK",
+                tools_used=self._last_fast_tools_used,
+            )
+            self._perf_log("resposta total", request_started_at, time.perf_counter())
+            return document_response
 
         system_state_response = self._try_system_state_tool_query(user_message)
         if system_state_response is not None:
@@ -1084,6 +1160,250 @@ class AssistantEngine:
             self._turn_trace["grounding_sources"] = ["CONTEXT_OBSERVER"]
         return result.response
 
+    def _try_document_task(self, user_message: str) -> str | None:
+        if not self.presence.can_use_tools():
+            return None
+        normalized = _normalize_text(user_message)
+        pending_response = self._try_pending_document_task(user_message, normalized)
+        if pending_response is not None:
+            return pending_response
+        request = _parse_document_task_request(user_message)
+        if not _looks_like_document_task(normalized, request):
+            return None
+
+        self._last_fast_tools_used = ()
+        output_name = request.output_file or ""
+        write_only_content = _extract_inline_file_content(user_message)
+        if output_name and write_only_content:
+            return self._create_workspace_txt(output_name, write_only_content, tools_used=("create_workspace_file",))
+
+        requested_file = request.source_files[0] if request.source_files else ""
+        if not requested_file:
+            if output_name and "write_output" in request.actions and not _needs_source_file(request):
+                self._pending_document_task = {
+                    "requested_output": output_name,
+                    "requested_actions": ["create"],
+                    "current_step": "awaiting_content",
+                }
+                self._last_fast_tools_used = ()
+                return "Claro. Que texto queres guardar nesse ficheiro?"
+            self._pending_document_task = {
+                "requested_output": output_name,
+                "output_format": request.output_format or "",
+                "recipient": request.recipient or "",
+                "requested_actions": request.actions,
+                "instructions": request.instructions,
+                "current_step": "awaiting_source_file",
+                "missing_fields": ["source_file"],
+            }
+            self._last_fast_tools_used = ("workspace_search",)
+            self._record_document_trace(found=False, files_used=[], output_created=False)
+            return "Preciso do nome do ficheiro da workspace que queres usar."
+
+        match = _workspace_search(requested_file, self.workspace_path)
+        if match.blocked:
+            self._last_fast_tools_used = ("workspace_search",)
+            self._record_document_trace(found=False, files_used=[], output_created=False)
+            return "Não posso aceder a caminhos fora da workspace."
+        candidates = list(match.matches)
+        if not candidates:
+            self._pending_document_task = {
+                "requested_output": output_name,
+                "output_format": request.output_format or "",
+                "recipient": request.recipient or "",
+                "requested_actions": request.actions,
+                "instructions": request.instructions,
+                "current_step": "awaiting_source_file",
+                "missing_fields": ["source_file"],
+            }
+            self._last_fast_tools_used = ("workspace_search",)
+            self._record_document_trace(found=False, files_used=[], output_created=False)
+            return f"Não encontrei '{requested_file}' na workspace. Qual é o nome exato do ficheiro?"
+        if len(candidates) > 1:
+            names = "\n".join(f"- {path.name}" for path in candidates[:8])
+            self._pending_document_task = {
+                "requested_output": output_name or "",
+                "output_format": request.output_format or "",
+                "recipient": request.recipient or "",
+                "requested_actions": request.actions,
+                "instructions": request.instructions,
+                "current_step": "awaiting_file_choice",
+                "candidates": [path.name for path in candidates],
+            }
+            self._last_fast_tools_used = ("workspace_search",)
+            self._record_document_trace(found=False, files_used=[], output_created=False)
+            return f"Encontrei mais do que uma possibilidade:\n{names}\n\nQual delas queres usar?"
+
+        source_path = candidates[0]
+        return self._run_document_task_with_file(source_path.relative_to(self.workspace_path.resolve()).as_posix(), request, match.match_type)
+
+    def _try_pending_document_task(self, user_message: str, normalized: str) -> str | None:
+        pending = self._pending_document_task
+        if not pending:
+            return None
+        if _is_negative_confirmation(normalized):
+            self._pending_document_task = None
+            self._last_fast_tools_used = ()
+            return "Está bem, não criei nada."
+        if pending.get("current_step") == "awaiting_content":
+            output = str(pending.get("requested_output") or "")
+            self._pending_document_task = None
+            return self._create_workspace_txt(output, user_message, tools_used=("create_workspace_file",))
+        if pending.get("current_step") == "awaiting_source_file":
+            request = _document_request_from_pending(pending, user_message)
+            source = request.source_files[0] if request.source_files else _extract_workspace_filename(user_message)
+            if not source:
+                return "Preciso mesmo do nome do ficheiro da workspace."
+            match = _workspace_search(source, self.workspace_path)
+            if match.blocked:
+                self._last_fast_tools_used = ("workspace_search",)
+                self._record_document_trace(found=False, files_used=[], output_created=False)
+                return "Não posso aceder a caminhos fora da workspace."
+            if not match.matches:
+                self._last_fast_tools_used = ("workspace_search",)
+                self._record_document_trace(found=False, files_used=[], output_created=False)
+                return f"Não encontrei '{source}' na workspace. Qual é o nome exato do ficheiro?"
+            if len(match.matches) > 1:
+                pending["current_step"] = "awaiting_file_choice"
+                pending["candidates"] = [path.name for path in match.matches]
+                self._pending_document_task = pending
+                names = "\n".join(f"- {path.name}" for path in match.matches[:8])
+                self._last_fast_tools_used = ("workspace_search",)
+                self._record_document_trace(found=False, files_used=[], output_created=False)
+                return f"Encontrei mais do que uma possibilidade:\n{names}\n\nQual delas queres usar?"
+            self._pending_document_task = None
+            return self._run_document_task_with_file(
+                match.matches[0].relative_to(self.workspace_path.resolve()).as_posix(),
+                request,
+                match.match_type,
+            )
+        if pending.get("current_step") == "awaiting_output_name":
+            output = _extract_output_txt_filename(user_message) or _clean_filename_fragment(user_message)
+            if not output:
+                return "Que nome queres dar ao ficheiro .txt?"
+            if not output.lower().endswith(".txt"):
+                output = f"{Path(output).stem or output}.txt"
+            content = str(pending.get("content") or "")
+            tools = tuple(str(item) for item in pending.get("tools_used", ()) if item)
+            self._pending_document_task = None
+            return self._create_workspace_txt(output, content, tools_used=tools + ("create_workspace_file",))
+        if pending.get("current_step") == "awaiting_create_confirmation":
+            if not _is_positive_document_confirmation(normalized):
+                return None
+            output = str(pending.get("requested_output") or "")
+            content = str(pending.get("content") or "")
+            tools = tuple(str(item) for item in pending.get("tools_used", ()) if item)
+            self._pending_document_task = None
+            return self._create_workspace_txt(output, content, tools_used=tools + ("create_workspace_file",))
+        if pending.get("current_step") == "awaiting_file_choice":
+            choice = _choose_candidate_from_message(user_message, [str(item) for item in pending.get("candidates", [])])
+            if not choice:
+                return "Qual dos ficheiros queres usar?"
+            request = _document_request_from_pending(pending, user_message)
+            self._pending_document_task = None
+            return self._run_document_task_with_file(choice, request, "choice")
+        return None
+
+    def _run_document_task_with_file(self, filename: str, request: DocumentTaskRequest, match_type: str = "exact") -> str:
+        read_result = read_workspace_file_content(filename, self.workspace_path)
+        files_used = [
+            {
+                "name": read_result.filename or filename,
+                "type": Path(read_result.filename or filename).suffix.lower().lstrip("."),
+                "read_success": read_result.error is None and bool(read_result.content.strip()),
+                "match_type": match_type,
+            }
+        ]
+        if read_result.error is not None:
+            self._last_fast_tools_used = ("workspace_search", "read_workspace_document")
+            self._record_document_trace(found=False, files_used=files_used, output_created=False)
+            return read_result.error
+        if not read_result.content.strip():
+            self._last_fast_tools_used = ("workspace_search", "read_workspace_document")
+            self._record_document_trace(found=True, files_used=files_used, output_created=False)
+            return f"O ficheiro '{read_result.filename}' está vazio ou não tem texto extraível."
+
+        normalized = _normalize_text(request.instructions)
+        if _asks_to_read_file(normalized) and not _looks_like_summary_or_email(normalized) and not request.output_file:
+            self._last_fast_tools_used = ("workspace_search", "read_workspace_document")
+            self._record_document_trace(found=True, files_used=files_used, output_created=False)
+            return f"Li '{read_result.filename}'.\n\n{_truncate_document_content(read_result.content)}"
+
+        composed = self.response_composer.compose(
+            ComposerRequest(
+                intent="document_task",
+                user_message=_document_composition_prompt(request, read_result.filename, read_result.content),
+                history=[],
+                facts=[
+                    f"Ficheiro lido: {read_result.filename}.",
+                    "Baseia a resposta apenas no conteúdo lido do ficheiro.",
+                    "Não afirmes que pesquisaste na web.",
+                ],
+                fallback="Posso trabalhar esse ficheiro, mas preciso de conteúdo legível para responder bem.",
+                language_instruction=self._language_instruction(),
+            )
+        )
+        self._last_fast_tools_used = ("workspace_search", "read_workspace_document")
+        self._record_document_trace(found=True, files_used=files_used, output_created=False)
+
+        if request.output_file:
+            return self._create_workspace_txt(
+                request.output_file,
+                composed,
+                tools_used=("workspace_search", "read_workspace_document", "create_workspace_file"),
+                files_used=files_used,
+            )
+        if request.output_format == "txt" or "write_output" in request.actions:
+            self._pending_document_task = {
+                "source_file": read_result.filename,
+                "requested_output": "",
+                "output_format": request.output_format or "txt",
+                "recipient": request.recipient or "",
+                "requested_actions": request.actions,
+                "current_step": "awaiting_output_name",
+                "missing_fields": ["output_file"],
+                "content": composed,
+                "tools_used": ("workspace_search", "read_workspace_document"),
+            }
+            return "Preparei o conteúdo. Que nome queres dar ao ficheiro .txt?"
+        return composed
+
+    def _create_workspace_txt(
+        self,
+        filename: str,
+        content: str,
+        *,
+        tools_used: tuple[str, ...],
+        files_used: list[dict[str, object]] | None = None,
+    ) -> str:
+        result = create_workspace_file(filename, content, self.workspace_path)
+        created = result.startswith("Criei o ficheiro")
+        self._last_fast_tools_used = tools_used
+        self._record_document_trace(
+            found=True,
+            files_used=files_used or [],
+            output_created=created,
+            output_file_path=filename if created else "",
+        )
+        return result
+
+    def _record_document_trace(
+        self,
+        *,
+        found: bool,
+        files_used: list[dict[str, object]],
+        output_created: bool,
+        output_file_path: str = "",
+    ) -> None:
+        if self._turn_trace is None:
+            return
+        self._turn_trace["response_grounded"] = bool(found or output_created)
+        self._turn_trace["grounding_sources"] = ["WORKSPACE_FILE"] if found else []
+        self._turn_trace["workspace_file_found"] = bool(found)
+        self._turn_trace["workspace_files_used"] = files_used
+        self._turn_trace["output_file_created"] = bool(output_created)
+        self._turn_trace["output_file_path"] = output_file_path
+
     def _fast_agent_context(self) -> AgentContext:
         return AgentContext(
             system_prompt=self.base_system_prompt,
@@ -1466,7 +1786,11 @@ class AssistantEngine:
             self._turn_trace["final_response_source"] = final_response_source
             self._turn_trace["final_response_kind"] = _response_kind_for_source(source)
             self._turn_trace["model_source"] = _model_source(self.llm)
-            self._turn_trace.update(_model_routing_telemetry(self.llm))
+            llm_start = int(self._turn_trace.get("llm_start") or 0)
+            if self._llm_chat_count() > llm_start:
+                self._turn_trace.update(_model_routing_telemetry(self.llm))
+            else:
+                self._turn_trace.update(_local_turn_model_telemetry(selected_path or source))
             self._turn_trace.setdefault("fallback_used", final_response_source in {"LOCAL_SAFE_FALLBACK", "FALLBACK"})
         return final_response
 
@@ -1482,9 +1806,6 @@ class AssistantEngine:
         )
 
     def _begin_turn_trace(self, user_message: str) -> None:
-        if not self.debug_ollama_payload:
-            self._turn_trace = None
-            return
         self._turn_trace = {
             "user_message": user_message,
             "llm_start": self._llm_chat_count(),
@@ -1499,7 +1820,7 @@ class AssistantEngine:
         tools_used: tuple[str, ...],
         final_response: str,
     ) -> None:
-        if not self.debug_ollama_payload or self._turn_trace is None:
+        if self._turn_trace is None:
             return
         llm_start = int(self._turn_trace.get("llm_start") or 0)
         llm_calls = max(0, self._llm_chat_count() - llm_start)
@@ -1509,93 +1830,8 @@ class AssistantEngine:
         turn_token_records = all_token_records[sources_start:]
         turn_sources = all_sources[sources_start:]
         llm_call_details = _llm_call_details(turn_sources, turn_token_records)
-        print("\n[TURN TRACE]")
-        print(f"user_message={self._turn_trace.get('user_message')}")
-        print(f"selected_path={selected_path}")
-        print(f"memory_route={selected_path if selected_path in ('MEMORY_WRITE', 'MEMORY_RECALL') else 'NONE'}")
-        print(f"response_source={response_source}")
-        print(f"final_response_kind={self._turn_trace.get('final_response_kind') or _response_kind_for_source(response_source)}")
-        print(f"model={self._turn_trace.get('model')}")
-        print(f"model_source={self._turn_trace.get('model_source')}")
-        print(f"provider={self._turn_trace.get('provider')}")
-        print(f"model_routing_mode={self._turn_trace.get('model_routing_mode')}")
-        print(f"model_routing_provider={self._turn_trace.get('model_routing_provider')}")
-        print(f"model_routing_model={self._turn_trace.get('model_routing_model')}")
-        print(f"model_routing_reason_code={self._turn_trace.get('model_routing_reason_code')}")
-        print(f"model_routing_reason={self._turn_trace.get('model_routing_reason')}")
-        print(f"model_routing_paid_call={self._turn_trace.get('model_routing_paid_call')}")
-        print(f"model_routing_budget_before_usd={self._turn_trace.get('model_routing_budget_before_usd')}")
-        print(f"model_routing_budget_after_usd={self._turn_trace.get('model_routing_budget_after_usd')}")
-        print(f"model_routing_fallback_reason={self._turn_trace.get('model_routing_fallback_reason')}")
-        print(f"model_routing_override_source={self._turn_trace.get('model_routing_override_source')}")
-        print(f"routing_user_message_chars={self._turn_trace.get('routing_user_message_chars')}")
-        print(f"routing_context_chars={self._turn_trace.get('routing_context_chars')}")
-        print(f"routing_constraint_count={self._turn_trace.get('routing_constraint_count')}")
-        print(f"provider_error_type={self._turn_trace.get('provider_error_type')}")
-        print(f"fallback_used={self._turn_trace.get('fallback_used')}")
-        print(f"response_before_voice_critic={self._turn_trace.get('response_before_voice_critic')}")
-        print(f"response_after_voice_critic={self._turn_trace.get('response_after_voice_critic')}")
-        print(f"voice_critic_call_count={self._turn_trace.get('voice_critic_call_count')}")
-        print(f"voice_critic_trigger={self._turn_trace.get('voice_critic_trigger')}")
-        print(f"voice_critic_review_changed={self._turn_trace.get('voice_critic_review_changed')}")
-        print(f"voice_critic_review_accepted={self._turn_trace.get('voice_critic_review_accepted')}")
-        print(f"voice_critic_final_response_changed={self._turn_trace.get('voice_critic_final_response_changed')}")
-        print(f"voice_critic_rejection_reason={self._turn_trace.get('voice_critic_rejection_reason')}")
-        print(f"semantic_conflict_detected={self._turn_trace.get('semantic_conflict_detected')}")
-        print(f"semantic_conflict_reason={self._turn_trace.get('semantic_conflict_reason')}")
-        print(f"response_regenerated={self._turn_trace.get('response_regenerated')}")
-        print(f"regeneration_reason={self._turn_trace.get('regeneration_reason')}")
-        print(f"composer_call_count={self._turn_trace.get('composer_call_count')}")
-        print(f"unsupported_tool_claim_detected={self._turn_trace.get('unsupported_tool_claim_detected')}")
-        print(f"unsupported_tool_claim_reason={self._turn_trace.get('unsupported_tool_claim_reason')}")
-        print(f"tool_intent_supported_by_current_message={self._turn_trace.get('tool_intent_supported_by_current_message')}")
-        print(f"tool_intent_evidence_span={self._turn_trace.get('tool_intent_evidence_span')}")
-        print(f"tool_selection_confidence={self._turn_trace.get('tool_selection_confidence')}")
-        print(f"agent_debug_trace={self._turn_trace.get('agent_debug_trace')}")
-        print(f"agent_route_reason={self._turn_trace.get('agent_route_reason')}")
-        print(f"agent_route_evidence_span={self._turn_trace.get('agent_route_evidence_span')}")
-        print(f"agent_route_confidence={self._turn_trace.get('agent_route_confidence')}")
-        print(f"memory_candidate_detected={self._turn_trace.get('memory_candidate_detected')}")
-        print(f"memory_candidate_type={self._turn_trace.get('memory_candidate_type')}")
-        print(f"memory_candidate_fields={self._turn_trace.get('memory_candidate_fields')}")
-        print(f"memory_write_action={self._turn_trace.get('memory_write_action')}")
-        print(f"memory_write_id={self._turn_trace.get('memory_write_id')}")
-        print(f"memory_write_reason={self._turn_trace.get('memory_write_reason')}")
-        print(f"memory_write_origin={self._turn_trace.get('memory_write_origin')}")
-        print(f"memory_write_detected={self._turn_trace.get('memory_write_detected')}")
-        print(f"memory_raw_fields={self._turn_trace.get('memory_raw_fields')}")
-        print(f"memory_canonical_fields={self._turn_trace.get('memory_canonical_fields')}")
-        print(f"memory_normalization_attempted={self._turn_trace.get('memory_normalization_attempted')}")
-        print(f"memory_normalization_mode={self._turn_trace.get('memory_normalization_mode')}")
-        print(f"memory_normalization_status={self._turn_trace.get('memory_normalization_status')}")
-        print(f"memory_normalization_changes={self._turn_trace.get('memory_normalization_changes')}")
-        print(f"memory_normalization_valid={self._turn_trace.get('memory_normalization_valid')}")
-        print(f"memory_normalization_rejection_reason={self._turn_trace.get('memory_normalization_rejection_reason')}")
-        print(f"memory_recall_detected={self._turn_trace.get('memory_recall_detected', False)}")
-        print(f"memory_recall_continuation={self._turn_trace.get('memory_recall_continuation', False)}")
-        print(f"memory_query={self._turn_trace.get('memory_query')}")
-        print(f"history_matches={self._turn_trace.get('history_matches')}")
-        print(f"persistent_memory_matches={self._turn_trace.get('persistent_memory_matches')}")
-        print(f"selected_memory_ids={self._turn_trace.get('selected_memory_ids')}")
-        print(f"memory_confidence={self._turn_trace.get('memory_confidence')}")
-        print(f"memory_answer_attributes={self._turn_trace.get('memory_answer_attributes')}")
-        print(f"memory_verbalization_mode={self._turn_trace.get('memory_verbalization_mode')}")
-        print(f"memory_verbalization_template={self._turn_trace.get('memory_verbalization_template')}")
-        print(f"memory_verbalization_fields={self._turn_trace.get('memory_verbalization_fields')}")
-        print(f"memory_verbalization_valid={self._turn_trace.get('memory_verbalization_valid')}")
-        print(f"memory_verbalization_rejection_reason={self._turn_trace.get('memory_verbalization_rejection_reason')}")
-        print(f"response_grounded={self._turn_trace.get('response_grounded')}")
-        print(f"grounding_sources={self._turn_trace.get('grounding_sources')}")
-        print(f"unsupported_memory_claim_detected={self._turn_trace.get('unsupported_memory_claim_detected')}")
-        print(f"unsupported_memory_claim_reason={self._turn_trace.get('unsupported_memory_claim_reason')}")
-        print(f"final_response_source={self._turn_trace.get('final_response_source')}")
-        print(f"exception_type={self._turn_trace.get('exception_type')}")
-        print(f"exception_message={self._turn_trace.get('exception_message')}")
-        print(f"llm_calls={llm_calls}")
-        print(f"llm_call_details={llm_call_details}")
-        print(f"tools_used={list(tools_used)}")
-        print(f"final_response={final_response}")
-        print("[/TURN TRACE]\n")
+        if self.debug_ollama_payload:
+            self._print_turn_trace(selected_path, response_source, tools_used, final_response, llm_calls, llm_call_details)
 
         input_tokens = _sum_optional_ints(record.get("input_tokens") for record in turn_token_records if isinstance(record, dict))
         output_tokens = _sum_optional_ints(record.get("output_tokens") for record in turn_token_records if isinstance(record, dict))
@@ -1641,6 +1877,10 @@ class AssistantEngine:
             "history_matches": self._turn_trace.get("history_matches"),
             "memory_write_action": self._turn_trace.get("memory_write_action"),
             "grounding_sources": self._turn_trace.get("grounding_sources") or [],
+            "workspace_file_found": self._turn_trace.get("workspace_file_found"),
+            "workspace_files_used": self._turn_trace.get("workspace_files_used") or [],
+            "output_file_created": self._turn_trace.get("output_file_created"),
+            "output_file_path": self._turn_trace.get("output_file_path") or "",
             "response_grounded": self._turn_trace.get("response_grounded"),
             "unsupported_tool_claim_detected": bool(self._turn_trace.get("unsupported_tool_claim_detected")),
             "unsupported_memory_claim_detected": bool(self._turn_trace.get("unsupported_memory_claim_detected")),
@@ -1657,14 +1897,64 @@ class AssistantEngine:
         }
         self._turn_trace = None
 
+    def _print_turn_trace(
+        self,
+        selected_path: str,
+        response_source: str,
+        tools_used: tuple[str, ...],
+        final_response: str,
+        llm_calls: int,
+        llm_call_details: list[dict[str, object]],
+    ) -> None:
+        if self._turn_trace is None:
+            return
+        print("\n[TURN TRACE]")
+        for key in (
+            "user_message",
+            "model",
+            "model_source",
+            "provider",
+            "model_routing_mode",
+            "model_routing_provider",
+            "model_routing_model",
+            "model_routing_reason_code",
+            "model_routing_reason",
+            "model_routing_paid_call",
+            "model_routing_budget_before_usd",
+            "model_routing_budget_after_usd",
+            "model_routing_fallback_reason",
+            "model_routing_override_source",
+            "routing_user_message_chars",
+            "routing_context_chars",
+            "routing_constraint_count",
+            "provider_error_type",
+            "fallback_used",
+            "response_before_voice_critic",
+            "response_after_voice_critic",
+            "composer_call_count",
+            "memory_recall_detected",
+            "response_grounded",
+            "grounding_sources",
+            "exception_type",
+            "exception_message",
+        ):
+            print(f"{key}={self._turn_trace.get(key)}")
+        print(f"selected_path={selected_path}")
+        print(f"memory_route={selected_path if selected_path in ('MEMORY_WRITE', 'MEMORY_RECALL') else 'NONE'}")
+        print(f"response_source={response_source}")
+        print(f"llm_calls={llm_calls}")
+        print(f"llm_call_details={llm_call_details}")
+        print(f"tools_used={list(tools_used)}")
+        print(f"final_response={final_response}")
+        print("[/TURN TRACE]\n")
+
     def get_last_turn_telemetry(self) -> dict | None:
         """Structured telemetry for the most recently completed turn.
 
         A clean test/eval API (see evals/schemas.py TurnResult) so a runner
         never has to parse the human-readable [TURN TRACE] stdout dump.
-        Requires debug_ollama_payload=True (the same flag that populates the
-        stdout trace) since that is what drives every _record_memory_*
-        call site below to actually fill in the underlying data.
+        This is always collected so the Echo OS UI can show real telemetry.
+        DEBUG_OLLAMA_PAYLOAD only controls the verbose terminal dump.
         """
         if self._last_turn_telemetry is None:
             return None
@@ -3315,6 +3605,55 @@ def _model_routing_telemetry(llm: object) -> dict[str, object]:
     }
 
 
+def _local_turn_model_telemetry(selected_path: str) -> dict[str, object]:
+    reason_code = _local_reason_code_for_path(selected_path)
+    return {
+        "model_routing_mode": "local",
+        "model_routing_provider": "local",
+        "model_routing_model": "NONE",
+        "model_routing_reason_code": reason_code,
+        "model_routing_reason": _local_reason_label(reason_code),
+        "model_routing_paid_call": False,
+        "model_routing_budget_before_usd": 0.0,
+        "model_routing_budget_after_usd": 0.0,
+        "model_routing_fallback_reason": "",
+        "model_routing_override_source": "",
+        "routing_user_message_chars": 0,
+        "routing_context_chars": 0,
+        "routing_constraint_count": 0,
+    }
+
+
+def _local_reason_code_for_path(selected_path: str) -> str:
+    mapping = {
+        "SOCIAL_PATH": "social_fast_path",
+        "SYSTEM_DATETIME": "system_datetime",
+        "SYSTEM_STATUS": "system_status",
+        "DOCUMENT_TASK": "local_tool",
+        "TOOL_PATH": "local_tool",
+        "FAST_ROUTE": "fast_route",
+        "MEMORY_COMMAND": "memory_command",
+        "MEMORY_RECALL": "memory_recall",
+        "TASK_COMMAND": "task_command",
+    }
+    return mapping.get(selected_path, "local_deterministic")
+
+
+def _local_reason_label(reason_code: str) -> str:
+    labels = {
+        "social_fast_path": "Social fast path",
+        "system_datetime": "System datetime",
+        "system_status": "System status",
+        "local_tool": "Local tool",
+        "fast_route": "Fast route",
+        "memory_command": "Memory command",
+        "memory_recall": "Memory recall",
+        "task_command": "Task command",
+        "local_deterministic": "Local deterministic response",
+    }
+    return labels.get(reason_code, reason_code.replace("_", " ").title())
+
+
 def _llm_call_details(sources: list[str], token_records: list[dict]) -> list[dict[str, object]]:
     details: list[dict[str, object]] = []
     for index, record in enumerate(token_records):
@@ -3343,6 +3682,514 @@ def _sum_optional_ints(values) -> int | None:
     return total if seen else None
 
 
+DOCUMENT_EXTENSIONS = (".txt", ".md", ".pdf", ".docx")
+
+PT_WEEKDAYS = (
+    "segunda-feira",
+    "terça-feira",
+    "quarta-feira",
+    "quinta-feira",
+    "sexta-feira",
+    "sábado",
+    "domingo",
+)
+PT_MONTHS = (
+    "janeiro",
+    "fevereiro",
+    "março",
+    "abril",
+    "maio",
+    "junho",
+    "julho",
+    "agosto",
+    "setembro",
+    "outubro",
+    "novembro",
+    "dezembro",
+)
+
+
+def _parse_system_datetime_question(message: str) -> tuple[str, object | None] | None:
+    text = _normalize_text(message).strip(" ?!.")
+    if not text:
+        return None
+    non_datetime_intents = (
+        "lembra me",
+        "lembra-me",
+        "adiciona",
+        "tarefa",
+        "tarefas",
+        "adia",
+        "adiei",
+        "regista",
+        "registei",
+        "estivemos",
+        "fizemos",
+        "trabalhar",
+    )
+    if any(marker in text for marker in non_datetime_intents):
+        if not any(
+            phrase in text
+            for phrase in (
+                "que dia",
+                "qual e a data",
+                "qual é a data",
+                "dia da semana",
+                "que horas",
+            )
+        ):
+            return None
+    calendar_words = ("compromisso", "compromissos", "reuniao", "reunião", "agenda", "calendario", "calendário")
+    if any(word in text for word in calendar_words) and not any(word in text for word in ("data", "dia", "horas", "hora")):
+        return None
+    if re.search(r"\b(?:que|quais?)\s+horas?\s+(?:sao|são|e|é)\b", text) or text in {"horas", "hora atual"}:
+        return ("time", None)
+    if ("amanha" in text or "amanhã" in text) and any(phrase in text for phrase in ("data de amanha", "data de amanhã", "que dia", "qual e a data", "qual é a data")):
+        return ("tomorrow", None)
+    if "ontem" in text and any(phrase in text for phrase in ("ontem foi que dia", "que dia foi ontem", "data de ontem")):
+        return ("yesterday", None)
+    offset = re.search(r"\bdaqui\s+a\s+(\d{1,4})\s+dias?\b", text)
+    if offset:
+        return ("offset", int(offset.group(1)))
+    explicit = _extract_explicit_date(message)
+    if explicit is not None and any(word in text for word in ("calha", "dia da semana", "semana")):
+        return ("weekday_for_date", explicit)
+    date_questions = (
+        "que dia e hoje",
+        "que dia é hoje",
+        "qual e a data",
+        "qual é a data",
+        "data de hoje",
+        "dia de hoje",
+        "que dia da semana e hoje",
+        "que dia da semana é hoje",
+    )
+    if any(phrase in text for phrase in date_questions):
+        return ("today", None)
+    return None
+
+
+def _extract_explicit_date(message: str) -> date | None:
+    numeric = re.search(r"\b(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\b", message)
+    if numeric:
+        day = int(numeric.group(1))
+        month = int(numeric.group(2))
+        year = int(numeric.group(3) or datetime.now().year)
+        if year < 100:
+            year += 2000
+        try:
+            return date(year, month, day)
+        except ValueError:
+            return None
+    iso = re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", message)
+    if iso:
+        try:
+            return date(int(iso.group(1)), int(iso.group(2)), int(iso.group(3)))
+        except ValueError:
+            return None
+    return None
+
+
+def _weekday_name(value: date) -> str:
+    return PT_WEEKDAYS[value.weekday()]
+
+
+def _format_pt_date(value: date, *, include_weekday: bool = True) -> str:
+    prefix = f"{_weekday_name(value)}, " if include_weekday else ""
+    return f"{prefix}{value.day} de {PT_MONTHS[value.month - 1]} de {value.year}"
+
+
+@dataclass
+class DocumentTaskRequest:
+    source_files: list[str] = field(default_factory=list)
+    output_file: str | None = None
+    recipient: str | None = None
+    actions: list[str] = field(default_factory=list)
+    output_format: str | None = None
+    instructions: str = ""
+
+
+@dataclass
+class WorkspaceSearchResult:
+    found: bool
+    matches: list[Path] = field(default_factory=list)
+    blocked: bool = False
+    match_type: str = ""
+
+
+def _looks_like_document_task(text: str, request: DocumentTaskRequest | None = None) -> bool:
+    request = request or _parse_document_task_request(text)
+    has_document_name = bool(request.source_files) or any(ext in text for ext in DOCUMENT_EXTENSIONS)
+    has_file_action = bool(request.actions) or _looks_like_read_or_summary(text) or _looks_like_create_file_task(text)
+    return (
+        (has_document_name and has_file_action)
+        or "ficheiro" in text and any(word in text for word in ("resume", "resumo", "ler ", "le ", "lê ", "cria", "guarda"))
+        or _looks_like_create_file_task(text)
+        or "workspace" in text and any(word in text for word in ("notas", "ficheiros", "documentos", "usa"))
+    )
+
+
+def _parse_document_task_request(message: str) -> DocumentTaskRequest:
+    text = str(message or "")
+    normalized = _normalize_text(text)
+    actions = _document_actions(normalized, _looks_like_create_file_task(normalized))
+    output_file = _extract_output_txt_filename(text)
+    output_format = _extract_output_format(normalized)
+    recipient = _extract_recipient(text)
+    source_files = _extract_source_files(text, output_file)
+    if output_file and "write_output" not in actions:
+        actions.append("write_output")
+    if recipient and "compose_email" not in actions and any(word in normalized for word in ("email", "mail")):
+        actions.append("compose_email")
+    return DocumentTaskRequest(
+        source_files=source_files,
+        output_file=output_file or None,
+        recipient=recipient or None,
+        actions=actions,
+        output_format=output_format or None,
+        instructions=text,
+    )
+
+
+def _document_request_from_pending(pending: dict[str, object], message: str) -> DocumentTaskRequest:
+    parsed = _parse_document_task_request(message)
+    source_files = parsed.source_files or ([str(pending.get("source_file"))] if pending.get("source_file") else [])
+    output = parsed.output_file or str(pending.get("requested_output") or "") or None
+    recipient = parsed.recipient or str(pending.get("recipient") or "") or None
+    output_format = parsed.output_format or str(pending.get("output_format") or "") or None
+    actions = [str(item) for item in pending.get("requested_actions", []) if item]
+    for action in parsed.actions:
+        if action not in actions:
+            actions.append(action)
+    instructions = str(pending.get("instructions") or "").strip()
+    if message.strip() and message.strip() not in instructions:
+        instructions = f"{instructions}\n{message}".strip()
+    return DocumentTaskRequest(
+        source_files=source_files,
+        output_file=output,
+        recipient=recipient,
+        actions=actions,
+        output_format=output_format,
+        instructions=instructions or message,
+    )
+
+
+def _looks_like_read_or_summary(text: str) -> bool:
+    return (
+        any(word in text for word in ("resume", "resumo", "resumir", "sintese", "síntese", "email", "mail"))
+        or bool(re.search(r"\b(l[eê]|ler)\b", text))
+        or ("mostra" in text and any(word in text for word in ("conteudo", "conteúdo", "documento", "ficheiro")))
+    )
+
+
+def _looks_like_create_file_task(text: str) -> bool:
+    return any(phrase in text for phrase in ("cria ", "criar ", "guarda em", "guardar em", "grava em", "escreve em", "com este texto"))
+
+
+def _asks_to_read_file(text: str) -> bool:
+    return bool(re.search(r"\b(l[eê]|ler)\b", text)) or any(word in text for word in ("mostra o conteudo", "mostra o conteúdo"))
+
+
+def _looks_like_summary_or_email(text: str) -> bool:
+    return any(word in text for word in ("resume", "resumo", "email", "mail", "mensagem", "sintese", "síntese"))
+
+
+def _looks_like_direct_create_after_document(text: str) -> bool:
+    return _looks_like_create_file_task(text) and any(word in text for word in ("com", "base", "resumo", "email", "mail"))
+
+
+def _document_actions(text: str, has_output: bool) -> list[str]:
+    actions: list[str] = []
+    if _looks_like_read_or_summary(text):
+        actions.extend(["locate_source", "read_source"])
+    if _looks_like_summary_or_email(text):
+        actions.append("summarize")
+    if any(word in text for word in ("email", "mail")):
+        actions.append("compose_email")
+    if has_output or _looks_like_create_file_task(text):
+        actions.append("write_output")
+    return actions
+
+
+def _needs_source_file(request: DocumentTaskRequest) -> bool:
+    return any(action in request.actions for action in ("locate_source", "read_source", "summarize", "compose_email"))
+
+
+def _needs_source_file_from_text(text: str) -> bool:
+    return (
+        _looks_like_summary_or_email(text)
+        or bool(re.search(r"\b(l[eê]|ler)\b", text))
+    )
+
+
+def _extract_output_format(text: str) -> str:
+    if re.search(r"\b(?:ficheiro|formato|documento)\s+txt\b", text) or re.search(r"\btxt\b", text) and _looks_like_create_file_task(text):
+        return "txt"
+    return ""
+
+
+def _extract_recipient(message: str) -> str:
+    match = re.search(r"\b(?:para|à|a)\s+(?:a\s+|o\s+)?([A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ'-]+)", message)
+    if not match:
+        return ""
+    name = match.group(1).strip(" .,;:")
+    if _normalize_text(name) in {"workspace", "pdf", "ficheiro", "documento"}:
+        return ""
+    return name
+
+
+def _extract_source_files(message: str, output_file: str = "") -> list[str]:
+    if _contains_path_traversal(message):
+        return ["../"]
+
+    output_norm = _normalize_text(output_file)
+    sources: list[str] = []
+    for quoted in re.findall(r"[\"“”']([^\"“”']+)[\"“”']", message):
+        candidate = _clean_filename_fragment(quoted)
+        if not candidate:
+            continue
+        if output_norm and _normalize_text(candidate) == output_norm:
+            continue
+        if _is_output_format_token(candidate):
+            continue
+        suffix = Path(candidate).suffix.lower()
+        if suffix in DOCUMENT_EXTENSIONS or _quote_has_source_context(message, quoted):
+            sources.append(candidate)
+
+    for match in re.finditer(r"([^\s,;:\"'“”]+?\.(?:txt|md|pdf|docx))\b", message, flags=re.IGNORECASE):
+        candidate = _clean_filename_fragment(match.group(1))
+        if not candidate or _is_output_format_token(candidate):
+            continue
+        if output_norm and _normalize_text(candidate) == output_norm:
+            continue
+        if candidate not in sources:
+            sources.append(candidate)
+
+    for pattern in (
+        r"\b(?:o\s+)?ficheiro\s+(?:é|e|chama-se|chama se)\s+(.+)$",
+        r"\b(?:o\s+)?documento\s+(?:é|e|chama-se|chama se)\s+(.+)$",
+        r"\bpdf\s+(?:é|e|chama-se|chama se)?\s*(.+)$",
+    ):
+        match = re.search(pattern, message, flags=re.IGNORECASE)
+        if match:
+            candidate = _clean_filename_fragment(match.group(1))
+            if output_file and _normalize_text(output_file) in _normalize_text(candidate):
+                continue
+            if candidate and not _is_output_format_token(candidate) and candidate not in sources:
+                sources.append(candidate)
+
+    return sources[:3]
+
+
+def _quote_has_source_context(message: str, quoted: str) -> bool:
+    index = message.find(quoted)
+    if index < 0:
+        return False
+    window = _normalize_text(message[max(0, index - 80) : index + len(quoted) + 40])
+    return any(word in window for word in ("pdf", "documento", "ficheiro", "notas", "workspace", "reuniao", "reunião"))
+
+
+def _is_output_format_token(value: str) -> bool:
+    normalized = _normalize_text(value).strip(" .")
+    return normalized in {"txt", ".txt", "pdf", ".pdf", "docx", ".docx", "md", ".md"}
+
+
+def _extract_workspace_filename(message: str) -> str:
+    text = str(message or "")
+    if _contains_path_traversal(text):
+        return "../"
+    quoted = re.findall(r"[\"“”']([^\"“”']+\.(?:txt|md|pdf|docx))\b[\"“”']?", text, flags=re.IGNORECASE)
+    if quoted:
+        return quoted[0].strip()
+    match = re.search(r"([^\s,;:\"'“”]+?\.(?:txt|md|pdf|docx))\b", text, flags=re.IGNORECASE)
+    if match:
+        return _clean_filename_fragment(match.group(1))
+    for marker in ("ficheiro", "documento", "pdf", "docx"):
+        pattern = rf"{marker}\s+(.+?)(?:\s+(?:e|para|com|num|numa|em)\s|$)"
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return _clean_filename_fragment(match.group(1))
+    return ""
+
+
+def _extract_output_txt_filename(message: str) -> str:
+    text = str(message or "")
+    if _contains_path_traversal(text):
+        return "../"
+    context_patterns = (
+        r"\b(?:guarda|guardar|grava|gravar|escreve|escrever)\s+em\s+([^\s,;:\"'“”]+?\.txt)\b",
+        r"\b(?:cria|criar)\s+(?:um\s+)?(?:ficheiro\s+)?(?:chamado\s+)?([^\s,;:\"'“”]+?\.txt)\b",
+    )
+    for pattern in context_patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return _clean_filename_fragment(match.group(1))
+    if _extract_inline_file_content(message):
+        match = re.search(r"([^\s,;:\"'“”]+?\.txt)\b", text, flags=re.IGNORECASE)
+        if match:
+            return _clean_filename_fragment(match.group(1))
+    return ""
+
+
+def _extract_inline_file_content(message: str) -> str:
+    patterns = (
+        r"\bcom este texto[:\s]+(.+)$",
+        r"\bcom o texto[:\s]+(.+)$",
+        r"\bconteudo[:\s]+(.+)$",
+        r"\bconteúdo[:\s]+(.+)$",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, message, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
+def _clean_filename_fragment(value: str) -> str:
+    cleaned = str(value or "").strip().strip("\"'“”.,:;")
+    cleaned = re.sub(r"^(resume|resumir|le|lê|ler|cria|criar|guarda|guardar)\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^(o|a|um|uma|em|ficheiro|documento|pdf|docx)\s+", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
+
+
+def _contains_path_traversal(text: str) -> bool:
+    return "../" in text or "..\\" in text
+
+
+def _find_workspace_file_candidates(raw_filename: str, workspace_path: Path) -> dict[str, object]:
+    result = _workspace_search(raw_filename, workspace_path)
+    return {"blocked": result.blocked, "candidates": result.matches}
+
+
+def _workspace_search(raw_filename: str, workspace_path: Path) -> WorkspaceSearchResult:
+    raw_text = str(raw_filename or "").strip().strip("\"'“”")
+    candidate = Path(raw_text)
+    if _is_output_format_token(raw_text):
+        return WorkspaceSearchResult(found=False)
+    root = workspace_path.resolve()
+    if not root.exists():
+        return WorkspaceSearchResult(found=False)
+    if candidate.is_absolute():
+        try:
+            resolved_absolute = candidate.resolve()
+            relative = resolved_absolute.relative_to(root)
+        except (OSError, ValueError):
+            return WorkspaceSearchResult(found=False, blocked=True)
+        if not resolved_absolute.is_file() or resolved_absolute.suffix.lower() not in DOCUMENT_EXTENSIONS:
+            return WorkspaceSearchResult(found=False)
+        return WorkspaceSearchResult(found=True, matches=[resolved_absolute], match_type="absolute")
+    if ".." in candidate.parts:
+        return WorkspaceSearchResult(found=False, blocked=True)
+    try:
+        exact = (root / raw_text).resolve()
+        if exact != root and root not in exact.parents:
+            return WorkspaceSearchResult(found=False, blocked=True)
+    except OSError:
+        return WorkspaceSearchResult(found=False, blocked=True)
+
+    files = [path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in DOCUMENT_EXTENSIONS]
+    exact_matches = [path for path in files if path.name.lower() == candidate.name.lower()]
+    if exact_matches:
+        matches = sorted(exact_matches)
+        return WorkspaceSearchResult(found=bool(matches), matches=matches, match_type="exact")
+    if candidate.suffix:
+        rel_matches = [path for path in files if path.relative_to(root).as_posix().lower() == raw_text.replace("\\", "/").lower()]
+        if rel_matches:
+            matches = sorted(rel_matches)
+            return WorkspaceSearchResult(found=bool(matches), matches=matches, match_type="relative")
+    normalized = _normalize_filename_for_match(candidate.stem or raw_text)
+    matches = []
+    scored_matches: list[tuple[float, Path]] = []
+    for path in files:
+        path_stem = _normalize_filename_for_match(path.stem)
+        if not normalized or not path_stem:
+            continue
+        if path_stem.startswith(normalized) or normalized in path_stem:
+            matches.append(path)
+            continue
+        singular_input = _singularized_tokens(normalized)
+        singular_stem = _singularized_tokens(path_stem)
+        if singular_input and singular_input == singular_stem:
+            scored_matches.append((0.99, path))
+            continue
+        score = SequenceMatcher(None, normalized, path_stem).ratio()
+        token_score = SequenceMatcher(None, singular_input, singular_stem).ratio() if singular_input and singular_stem else 0.0
+        best = max(score, token_score)
+        if best >= 0.82:
+            scored_matches.append((best, path))
+    if matches:
+        matches = sorted(matches)
+        return WorkspaceSearchResult(found=bool(matches), matches=matches, match_type="stem")
+    scored_matches.sort(key=lambda item: item[0], reverse=True)
+    if scored_matches:
+        best_score = scored_matches[0][0]
+        confident = [path for score, path in scored_matches if score >= best_score - 0.03 and score >= 0.82]
+        return WorkspaceSearchResult(found=True, matches=sorted(confident), match_type="fuzzy")
+    matches = sorted(matches)
+    return WorkspaceSearchResult(found=bool(matches), matches=matches)
+
+
+def _normalize_filename_for_match(value: str) -> str:
+    normalized = _normalize_text(value)
+    normalized = re.sub(r"[-_]+", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized.strip()
+
+
+def _singularized_tokens(value: str) -> str:
+    tokens = []
+    for token in _normalize_filename_for_match(value).split():
+        if len(token) > 4 and token.endswith("oes"):
+            token = token[:-3] + "ao"
+        elif len(token) > 3 and token.endswith("s"):
+            token = token[:-1]
+        tokens.append(token)
+    return " ".join(tokens)
+
+
+def _choose_candidate_from_message(message: str, candidates: list[str]) -> str:
+    text = _normalize_text(message)
+    for candidate in candidates:
+        if _normalize_text(candidate) in text or _normalize_text(Path(candidate).stem) in text:
+            return candidate
+    if len(candidates) == 1 and _is_positive_document_confirmation(text):
+        return candidates[0]
+    return ""
+
+
+def _is_positive_document_confirmation(text: str) -> bool:
+    normalized = _normalize_text(text).strip(" .!?")
+    return normalized in {"sim", "s", "ok", "okay", "claro", "podes criar", "cria", "criar", "esse mesmo", "pode ser"}
+
+
+def _is_negative_confirmation(text: str) -> bool:
+    normalized = _normalize_text(text).strip(" .!?")
+    return normalized in {"nao", "não", "n", "cancela", "cancelar", "deixa estar", "esquece"}
+
+
+def _truncate_document_content(content: str, limit: int = 5000) -> str:
+    text = str(content or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "\n\n[Conteúdo truncado para leitura.]"
+
+
+def _document_composition_prompt(request: DocumentTaskRequest, filename: str, content: str) -> str:
+    limited = _truncate_document_content(content, limit=12000)
+    recipient = f"\nDestinatário: {request.recipient}" if request.recipient else ""
+    output = f"\nFormato de saída pedido: {request.output_format}" if request.output_format else ""
+    actions = f"\nAções pedidas: {', '.join(request.actions)}" if request.actions else ""
+    return (
+        f"Pedido do utilizador: {request.instructions}\n"
+        f"{recipient}{output}{actions}\n\n"
+        f"Ficheiro lido da workspace: {filename}\n\n"
+        "Conteúdo extraído:\n"
+        f"{limited}\n\n"
+        "Responde em português de Portugal, usando apenas este conteúdo. "
+        "Se estiveres a escrever um email, inclui assunto e corpo do email."
+    )
+
+
 _FALSE_TOOL_CLAIM_MARKERS = (
     "pesquisei",
     "procurei",
@@ -3358,6 +4205,19 @@ _FALSE_TOOL_CLAIM_MARKERS = (
     "resultados encontrados",
     "terminei a pesquisa",
     "estou a pesquisar",
+    "encontrei o ficheiro",
+    "li o documento",
+    "li o ficheiro",
+    "criei o ficheiro",
+    "guardei no workspace",
+    "guardei na workspace",
+    "copiei o conteudo",
+    "copiei o conteúdo",
+    "calendario esta atualizado",
+    "calendário está atualizado",
+    "consultei o calendario",
+    "consultei o calendário",
+    "vi na agenda",
 )
 
 _FUTURE_PROMISE_MARKERS = (

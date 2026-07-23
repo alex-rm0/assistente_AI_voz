@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Callable
 from typing import Any
 
 import requests
@@ -26,6 +27,7 @@ class AnthropicProvider:
         model: str,
         *,
         api_key: str | None = None,
+        api_key_getter: Callable[[], str | None] | None = None,
         base_url: str = "https://api.anthropic.com",
         timeout_seconds: int = 120,
         max_tokens: int = 1024,
@@ -33,6 +35,7 @@ class AnthropicProvider:
     ) -> None:
         self.model = model
         self.api_key = api_key if api_key is not None else os.environ.get("ANTHROPIC_API_KEY", "")
+        self.api_key_getter = api_key_getter
         self.base_url = base_url
         self.timeout_seconds = timeout_seconds
         self.max_tokens = max_tokens
@@ -56,7 +59,8 @@ class AnthropicProvider:
         temperature: float | None = None,
     ) -> ModelResponse:
         resolved_model = model or self.model
-        if not self.api_key:
+        api_key = str(self.api_key_getter() if self.api_key_getter is not None else self.api_key or "").strip()
+        if not api_key:
             raise ProviderConfigurationError(
                 "O provider Anthropic esta selecionado, mas falta configurar ANTHROPIC_API_KEY.",
                 provider=self.name,
@@ -82,7 +86,7 @@ class AnthropicProvider:
             payload["temperature"] = temperature
 
         headers = {
-            "x-api-key": self.api_key,
+            "x-api-key": api_key,
             "anthropic-version": ANTHROPIC_VERSION,
             "content-type": "application/json",
         }

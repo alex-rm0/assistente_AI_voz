@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 *.pyc
 data/history.json
+data/user_settings.json
 data/*.sqlite
 data/model_routing_usage.json
 data/debug/*.wav

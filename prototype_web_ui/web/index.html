@@ -73,7 +73,7 @@
         <aside
           id="telemetryPanel"
           class="telemetry-panel"
-          aria-label="Telemetria cognitiva mockada"
+          aria-label="Telemetria cognitiva"
           aria-hidden="true"
           tabindex="-1"
         >
@@ -82,7 +82,15 @@
             <button id="closeTelemetry" class="telemetry-close" type="button" aria-label="Fechar telemetria">×</button>
           </div>
 
-          <section class="telemetry-section" aria-label="Modelo">
+          <nav class="telemetry-tabs" aria-label="Secções do painel">
+            <button type="button" class="active" data-panel-section="status">STATUS</button>
+            <button type="button" data-panel-section="models">MODELS</button>
+            <button type="button" data-panel-section="workspace">WORKSPACE</button>
+            <button type="button" data-panel-section="system">SYSTEM</button>
+          </nav>
+
+          <section class="telemetry-panel-section active" data-panel-page="status" aria-label="Status">
+          <section class="telemetry-section" aria-label="Estado runtime">
             <div class="telemetry-row">
               <span>COGNITIVE MODE</span>
               <strong id="telemetryMode">LOCAL</strong>
@@ -95,9 +103,6 @@
               <span>ROUTING</span>
               <strong id="telemetryRouting">Local response</strong>
             </div>
-          </section>
-
-          <section class="telemetry-section" aria-label="Métricas">
             <div class="telemetry-row">
               <span>LATENCY</span>
               <strong id="telemetryLatency">620 ms</strong>
@@ -114,22 +119,119 @@
               <span>DAILY USE</span>
               <strong id="telemetryDaily">$0.000 / $0.25</strong>
             </div>
+            <div class="telemetry-row">
+              <span>SOURCE</span>
+              <strong id="telemetrySource">NONE</strong>
+            </div>
+            <div class="telemetry-row telemetry-fallback-row" hidden>
+              <span>FALLBACK</span>
+              <strong id="telemetryFallback">—</strong>
+            </div>
+          </section>
           </section>
 
+          <section class="telemetry-panel-section" data-panel-page="models" aria-label="Models">
           <section class="telemetry-section telemetry-behaviour" aria-label="Comportamento do modelo">
             <span>MODEL BEHAVIOUR</span>
-            <div class="telemetry-segments" role="group" aria-label="Modo mockado de modelo">
+            <div class="telemetry-segments" role="group" aria-label="Modo de modelo">
               <button type="button" data-telemetry-mode="local">LOCAL</button>
               <button type="button" data-telemetry-mode="claude">CLAUDE</button>
               <button type="button" data-telemetry-mode="automatic">AUTOMATIC</button>
             </div>
             <p id="telemetryNote">Local response.</p>
+            <p id="modelConfigError" class="telemetry-error" hidden></p>
+            <button id="configureClaude" class="telemetry-inline-action" type="button" hidden>CONFIGURE</button>
           </section>
 
+          <section class="telemetry-section telemetry-budget-controls" aria-label="Orçamento de modelo">
+            <div class="telemetry-cloud-toggle">
+              <span>AUTOMATIC CLOUD ROUTING</span>
+              <div class="telemetry-segments" role="group" aria-label="Automatic cloud routing">
+                <button type="button" data-auto-claude="false">OFF</button>
+                <button type="button" data-auto-claude="true">ON</button>
+              </div>
+              <p id="automaticClaudeStatus">Local model only</p>
+            </div>
+            <label>
+              <span>DAILY BUDGET</span>
+              <input id="dailyBudgetUsd" type="number" min="0" max="25" step="0.01" value="0.25">
+            </label>
+            <label>
+              <span>CALL LIMIT</span>
+              <input id="singleCallBudgetUsd" type="number" min="0" max="5" step="0.01" value="0.05">
+            </label>
+            <button id="saveModelBudget" type="button">SAVE</button>
+          </section>
+
+          <section id="anthropicKeyPanel" class="telemetry-section telemetry-secret-controls" aria-label="Anthropic API Key" hidden>
+            <span class="hint-label">ANTHROPIC API KEY</span>
+            <input id="anthropicApiKey" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-...">
+            <div class="telemetry-secret-actions">
+              <button id="testAnthropicKey" type="button">TEST CONNECTION</button>
+              <button id="saveAnthropicKey" type="button">SAVE SECURELY</button>
+              <button id="removeAnthropicKey" type="button">REMOVE KEY</button>
+            </div>
+            <p id="anthropicKeyStatus">API key not configured.</p>
+          </section>
+          </section>
+
+          <section class="telemetry-panel-section" data-panel-page="workspace" aria-label="Workspace">
           <section class="telemetry-section telemetry-workspace-controls" aria-label="Controlos do workspace">
             <button id="recenterEcho" type="button">RECENTER ECHO</button>
             <button id="resetWorkspace" type="button">RESET WORKSPACE</button>
             <button id="toggleWorkspaceLock" type="button" aria-pressed="false">LOCK POSITION</button>
+          </section>
+          <section class="telemetry-section" aria-label="Posição do workspace">
+            <div class="telemetry-row">
+              <span>ECHO SNAP</span>
+              <strong id="echoSnapStatus">CENTER</strong>
+            </div>
+            <div class="telemetry-row">
+              <span>PANEL SNAP</span>
+              <strong id="panelSnapStatus">UPPER-LEFT</strong>
+            </div>
+          </section>
+          </section>
+
+          <section class="telemetry-panel-section" data-panel-page="system" aria-label="System">
+          <section class="telemetry-section" aria-label="Sistema">
+            <div class="telemetry-row">
+              <span>ECHO OS VERSION</span>
+              <strong id="systemVersion">v0.4.0</strong>
+            </div>
+            <div class="telemetry-row">
+              <span>OLLAMA</span>
+              <strong id="systemOllama">UNKNOWN</strong>
+            </div>
+            <div class="telemetry-row">
+              <span>CLAUDE</span>
+              <strong id="systemClaude">NOT CONFIGURED</strong>
+            </div>
+            <div class="telemetry-row">
+              <span>CONTEXT OBSERVER</span>
+              <strong id="systemObserver">UNKNOWN</strong>
+            </div>
+            <div class="telemetry-row">
+              <span>CLI OVERRIDE</span>
+              <strong id="systemCliOverride">NO</strong>
+            </div>
+            <div class="telemetry-row">
+              <span>SETTINGS SOURCE</span>
+              <strong id="systemSettingsSource">settings.json</strong>
+            </div>
+            <div class="telemetry-row">
+              <span>MODEL MODE SOURCE</span>
+              <strong id="systemModelModeSource">default</strong>
+            </div>
+            <div class="telemetry-row">
+              <span>AUTOMATIC CLOUD SOURCE</span>
+              <strong id="systemAutomaticClaudeSource">default</strong>
+            </div>
+            <div class="telemetry-row">
+              <span>API KEY SOURCE</span>
+              <strong id="systemApiKeySource">none</strong>
+            </div>
+          </section>
           </section>
         </aside>
 

@@ -6,3 +6,4 @@ pypdf>=4.0,<5
 openai-whisper>=20231117
 sounddevice>=0.4,<1
 numpy>=1.26,<3
+keyring>=25.0,<26

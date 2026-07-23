@@ -267,10 +267,11 @@ def test_teste_n_raw_user_text_is_stored_but_never_the_answer(tmp_path: Path) ->
 # --- Write-side telemetry ----------------------------------------------------
 
 
-def test_turn_trace_is_disabled_without_debug_flag(tmp_path: Path) -> None:
+def test_turn_trace_is_collected_without_terminal_debug_flag(tmp_path: Path) -> None:
     engine = make_engine(tmp_path)
     engine._begin_turn_trace("Vou ter um exame muito importante para a semana.")
-    assert engine._turn_trace is None
+    assert engine._turn_trace is not None
+    assert engine._turn_trace["user_message"] == "Vou ter um exame muito importante para a semana."
 
 
 def test_write_telemetry_reports_created_then_merged(tmp_path: Path) -> None:

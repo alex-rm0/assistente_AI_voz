@@ -135,6 +135,33 @@ def test_anthropic_requires_api_key_before_network(monkeypatch) -> None:
         provider.chat([{"role": "user", "content": "Ola"}])
 
 
+def test_anthropic_uses_api_key_getter_before_static_value(monkeypatch) -> None:
+    seen: dict = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        seen["api_key"] = headers["x-api-key"]
+        return FakeResponse(
+            {
+                "model": "claude-haiku-4-5-20251001",
+                "content": [{"type": "text", "text": "Resposta"}],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+        )
+
+    monkeypatch.setattr("assistant.anthropic_provider.requests.post", fake_post)
+    provider = AnthropicProvider(
+        model="claude-haiku-4-5-20251001",
+        api_key="old-secret",
+        api_key_getter=lambda: "fresh-secret",
+        allow_paid_calls=True,
+    )
+
+    result = provider.chat([{"role": "user", "content": "Ola"}])
+
+    assert result.text == "Resposta"
+    assert seen["api_key"] == "fresh-secret"
+
+
 def test_anthropic_requires_paid_call_confirmation_before_network(monkeypatch) -> None:
     monkeypatch.delenv(PAID_CALL_CONFIRMATION_ENV, raising=False)
     monkeypatch.setattr("assistant.anthropic_provider.requests.post", lambda *a, **kw: pytest.fail("network called"))

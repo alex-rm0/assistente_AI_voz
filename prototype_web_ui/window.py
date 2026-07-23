@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtWebChannel import QWebChannel
@@ -37,6 +38,8 @@ class EchoOSWindow(QWebEngineView):
         title: str = "Echo",
         clear_conversation: Callable[[], None] | None = None,
         on_close: Callable[[], None] | None = None,
+        get_telemetry: Callable[[], dict | None] | None = None,
+        model_runtime: Any | None = None,
     ) -> None:
         super().__init__()
         self.on_close = on_close
@@ -44,7 +47,13 @@ class EchoOSWindow(QWebEngineView):
         self.resize(1328, 860)
 
         self.setPage(EchoWebPage(self))
-        self.controller = EchoUIController(responder, self, clear_conversation=clear_conversation)
+        self.controller = EchoUIController(
+            responder,
+            self,
+            clear_conversation=clear_conversation,
+            get_telemetry=get_telemetry,
+            model_runtime=model_runtime,
+        )
         print(
             "[Echo UI DEBUG] registered object name=echoController",
             f"controller_id={id(self.controller)}",

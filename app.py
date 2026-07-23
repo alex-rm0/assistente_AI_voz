@@ -19,11 +19,13 @@ from assistant.model_provider import (
     ProviderBackedLLM,
     resolve_model_provider,
 )
-from assistant.model_router import ModelRouter, ModelUsageBudget, RoutedLLM, resolve_model_routing_config
+from assistant.model_router import AutomaticRoutingConfig, ModelRouter, ModelRoutingConfig, ModelUsageBudget, RoutedLLM, resolve_model_routing_config
+from assistant.model_runtime import ModelRuntimeBridge, UserSettingsStore
 from assistant.personal_model import PersonalModel
 from assistant.presence_manager import PresenceManager
 from assistant.prompts import get_base_system_prompt
 from assistant.session_manager import SessionManager
+from assistant.secret_storage import WindowsCredentialManagerSecretStorage, resolve_anthropic_api_key
 from assistant.tool_registry import tool_registry
 from assistant.voice_input import MicrophoneCheckError, check_microphone, check_voice_runtime
 
@@ -133,6 +135,8 @@ def main() -> int:
 
     memory_config = settings.get("memory", {})
     data_path = (BASE_DIR / memory_config.get("data_path", "data")).resolve()
+    user_settings_store = UserSettingsStore(data_path / "user_settings.json")
+    secret_storage = WindowsCredentialManagerSecretStorage()
     memory = ConversationMemory(
         data_path=data_path,
         history_file=memory_config.get("history_file", "history.json"),
@@ -156,6 +160,30 @@ def main() -> int:
         settings=settings,
     )
     routing_config = resolve_model_routing_config(cli_mode=args.model_mode, settings=settings)
+    cli_locked_model_routing = bool(args.provider or args.model_mode)
+    automatic_claude_enabled_source = _settings_automatic_source(settings)
+    if not cli_locked_model_routing and not os.environ.get("ECHO_MODEL_MODE", "").strip():
+        preferences = user_settings_store.preferences()
+        automatic = routing_config.automatic
+        routing_config = ModelRoutingConfig(
+            mode=preferences.model_routing_mode or routing_config.mode,
+            mode_source=preferences.model_routing_mode_source or routing_config.mode_source,
+            automatic=AutomaticRoutingConfig(
+                claude_enabled=(
+                    automatic.claude_enabled
+                    if preferences.automatic_claude_enabled is None
+                    else preferences.automatic_claude_enabled
+                ),
+                daily_budget_usd=preferences.daily_budget_usd if preferences.daily_budget_usd is not None else automatic.daily_budget_usd,
+                max_single_call_estimated_usd=(
+                    preferences.max_single_call_estimated_usd
+                    if preferences.max_single_call_estimated_usd is not None
+                    else automatic.max_single_call_estimated_usd
+                ),
+            ),
+        )
+        if preferences.automatic_claude_enabled_source:
+            automatic_claude_enabled_source = preferences.automatic_claude_enabled_source
     print("[MODEL CONFIG]")
     print(f"provider={resolved_model.provider}")
     print(f"provider_source={resolved_model.provider_source}")
@@ -191,6 +219,7 @@ def main() -> int:
     )
     anthropic_provider = AnthropicProvider(
         model=anthropic_model_name,
+        api_key_getter=lambda: resolve_anthropic_api_key(os.environ, secret_storage)[0],
         base_url=str(anthropic_config.get("base_url") or "https://api.anthropic.com"),
         timeout_seconds=int(anthropic_config.get("timeout_seconds", 120)),
         max_tokens=int(anthropic_config.get("max_tokens", 1024)),
@@ -204,6 +233,8 @@ def main() -> int:
             system_prompt=default_system_prompt,
             model_source=resolved_model.model_source,
         )
+        budget = None
+        router = None
     else:
         budget = ModelUsageBudget(data_path / "model_routing_usage.json")
         router = ModelRouter(
@@ -211,6 +242,7 @@ def main() -> int:
             ollama_model=ollama_provider.model,
             anthropic_model=anthropic_provider.model,
             budget=budget,
+            anthropic_key_available=lambda: bool(resolve_anthropic_api_key(os.environ, secret_storage)[0]),
         )
         llm = RoutedLLM(
             providers={"ollama": ollama_provider, "anthropic": anthropic_provider},
@@ -218,6 +250,19 @@ def main() -> int:
             system_prompt=default_system_prompt,
             model_source=resolved_model.model_source,
         )
+    model_runtime = ModelRuntimeBridge(
+        router=router,
+        budget=budget,
+        store=user_settings_store,
+        cli_locked=cli_locked_model_routing,
+        ollama_model=ollama_provider.model,
+        anthropic_model=anthropic_provider.model,
+        secret_storage=secret_storage,
+        settings_source="settings.json",
+        model_routing_mode_source=routing_config.mode_source,
+        automatic_claude_enabled_source=automatic_claude_enabled_source,
+        context_observer_state="enabled" if observer_enabled else "disabled",
+    )
     long_term_memory = LongTermMemory(
         data_path=data_path,
         db_file=memory_config.get("long_term_db", "long_term_memory.sqlite"),
@@ -268,6 +313,7 @@ def main() -> int:
         voice_min_record_seconds=voice_min_record_seconds,
         voice_model=voice_config.get("model", "base"),
         voice_language=voice_config.get("language", "pt"),
+        model_runtime=model_runtime,
     )
 
     def change_presence(name: str) -> None:
@@ -286,6 +332,8 @@ def main() -> int:
             title=app_name,
             clear_conversation=engine.clear_conversation,
             on_close=engine.close_session,
+            get_telemetry=engine.get_last_turn_telemetry,
+            model_runtime=model_runtime,
         )
     else:
         from ui.main_window import MainWindow
@@ -332,6 +380,11 @@ def main() -> int:
     window.context_observer_timer = observer_timer
     window.show()
     return qt_app.exec()
+
+def _settings_automatic_source(settings: dict[str, Any]) -> str:
+    routing = settings.get("model_routing", {}) if isinstance(settings.get("model_routing", {}), dict) else {}
+    automatic = routing.get("automatic", {}) if isinstance(routing.get("automatic", {}), dict) else {}
+    return "settings.json" if "claude_enabled" in automatic else "default"
 
 
 if __name__ == "__main__":

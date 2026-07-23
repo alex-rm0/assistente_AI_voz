@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -166,12 +167,14 @@ class ModelRouter:
         anthropic_model: str = DEFAULT_ANTHROPIC_MODEL,
         budget: ModelUsageBudget | None = None,
         env: dict[str, str] | None = None,
+        anthropic_key_available: Callable[[], bool] | None = None,
     ) -> None:
         self.config = config
         self.ollama_model = ollama_model
         self.anthropic_model = anthropic_model
         self.budget = budget
         self.env = env if env is not None else os.environ
+        self.anthropic_key_available = anthropic_key_available
 
     def decide(self, routing_input: ModelRoutingInput) -> ModelRoutingDecision:
         mode = self.config.mode
@@ -224,7 +227,7 @@ class ModelRouter:
             return self._ollama("automatic", "source_kept_local", f"A origem {source} fica no modelo local.", routing_input=routing_input)
         if not self.config.automatic.claude_enabled:
             return self._ollama("automatic", "automatic_claude_disabled", "Claude automatico esta desligado.", routing_input=routing_input)
-        if not self.env.get("ANTHROPIC_API_KEY", "").strip():
+        if not self._has_anthropic_key():
             return self._ollama(
                 "automatic",
                 "missing_api_key",
@@ -276,6 +279,11 @@ class ModelRouter:
             routing_context_chars=routing_input.context_chars,
             routing_constraint_count=routing_input.constraint_count,
         )
+
+    def _has_anthropic_key(self) -> bool:
+        if self.anthropic_key_available is not None:
+            return bool(self.anthropic_key_available())
+        return bool(str(self.env.get("ANTHROPIC_API_KEY") or "").strip())
 
     def _ollama(
         self,
@@ -455,6 +463,8 @@ def _complexity_reason_for_claude(routing_input: ModelRoutingInput) -> str:
         return "professional_writing"
     if _looks_like_structured_summary(text):
         return "structured_summary"
+    if _looks_like_document_synthesis(text):
+        return "document_synthesis"
     if _looks_like_complex_planning(text):
         return "complex_planning"
     if _looks_like_technical_explanation(text):
@@ -481,6 +491,18 @@ def _complexity_reason_for_claude(routing_input: ModelRoutingInput) -> str:
     if any(marker in text for marker in complex_markers):
         return "complex_request"
     return ""
+
+
+def _looks_like_document_synthesis(text: str) -> bool:
+    markers = (
+        "ficheiro lido da workspace",
+        "conteudo extraido",
+        "conteúdo extraído",
+        "com base no ficheiro",
+        "escreve um email",
+        "cria um email",
+    )
+    return any(marker in text for marker in markers) and any(word in text for word in ("email", "mail", "resume", "resumo", "sintese", "síntese"))
 
 
 def _with_routing_metrics(routing_input: ModelRoutingInput) -> ModelRoutingInput:

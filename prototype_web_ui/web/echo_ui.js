@@ -7,6 +7,10 @@
   let telemetryMode = "local";
   let telemetryState = "idle_local";
   let telemetryRoutingTimer = null;
+  let telemetryDebugMode = false;
+  let latestRealTelemetry = null;
+  let activeRuntimeState = null;
+  let configurationError = null;
 
   const APP_VERSION = "v0.4.0";
 
@@ -24,7 +28,20 @@
     technical_explanation: "Technical explanation",
     low_complexity: "Local response",
     memory_recall: "Memory recall",
-    tool_result: "Local tool"
+    project_memory_recall: "Project memory",
+    local_mode: "Local mode",
+    claude_mode: "Claude mode",
+    low_complexity: "Local response",
+    automatic_claude_disabled: "Cloud routing disabled",
+    paid_calls_disabled: "Cloud disabled",
+    paid_calls_not_confirmed: "Cloud disabled",
+    missing_api_key: "API key required",
+    daily_budget_exceeded: "Daily budget reached",
+    single_call_limit_exceeded: "Call limit reached",
+    single_call_budget_exceeded: "Call limit reached",
+    budget_state_unavailable: "Budget unavailable",
+    tool_result: "Local tool",
+    local_tool: "Local tool"
   };
 
   const telemetryMocks = {
@@ -149,8 +166,104 @@
       tokens: byId("telemetryTokens"),
       cost: byId("telemetryCost"),
       daily: byId("telemetryDaily"),
-      note: byId("telemetryNote")
+      source: byId("telemetrySource"),
+      fallback: byId("telemetryFallback"),
+      fallbackRow: document.querySelector(".telemetry-fallback-row"),
+      note: byId("telemetryNote"),
+      configError: byId("modelConfigError"),
+      configureClaude: byId("configureClaude"),
+      keyPanel: byId("anthropicKeyPanel"),
+      keyInput: byId("anthropicApiKey"),
+      keyStatus: byId("anthropicKeyStatus"),
+      saveAnthropicKey: byId("saveAnthropicKey"),
+      removeAnthropicKey: byId("removeAnthropicKey"),
+      testAnthropicKey: byId("testAnthropicKey"),
+      autoClaudeButtons: Array.from(document.querySelectorAll("[data-auto-claude]")),
+      automaticClaudeStatus: byId("automaticClaudeStatus"),
+      dailyBudgetUsd: byId("dailyBudgetUsd"),
+      singleCallBudgetUsd: byId("singleCallBudgetUsd"),
+      systemOllama: byId("systemOllama"),
+      systemClaude: byId("systemClaude"),
+      systemObserver: byId("systemObserver"),
+      systemCliOverride: byId("systemCliOverride"),
+      systemSettingsSource: byId("systemSettingsSource"),
+      systemModelModeSource: byId("systemModelModeSource"),
+      systemAutomaticClaudeSource: byId("systemAutomaticClaudeSource"),
+      systemApiKeySource: byId("systemApiKeySource")
     };
+  }
+
+  function buildSystemCommand(intent, parameters = {}) {
+    return JSON.stringify({intent, parameters, source: "ui"});
+  }
+
+  function executeSystemCommand(intent, parameters = {}, callback = applyRealTelemetry) {
+    if (!controller || typeof controller.executeSystemCommand !== "function") return;
+    controller.executeSystemCommand(buildSystemCommand(intent, parameters), (payload) => {
+      if (callback) callback(payload);
+    });
+  }
+
+  function humanReasonLabel(code) {
+    const value = String(code || "").trim();
+    if (!value) return routingLabels.low_complexity;
+    return routingLabels[value] || value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+  }
+
+  function modelLabel(provider, model) {
+    const cleanModel = String(model || "").trim();
+    const cleanProvider = String(provider || "").trim().toLowerCase();
+    if (!cleanModel || cleanModel === "NONE") return "NONE";
+    if (cleanProvider === "anthropic") return cleanModel.includes("haiku") ? "CLAUDE HAIKU" : "CLAUDE";
+    if (cleanProvider === "ollama") return cleanModel.includes("llama") ? "LLAMA 3.1 8B" : cleanModel.toUpperCase();
+    if (cleanProvider === "memory") return "NONE";
+    if (cleanProvider === "local_tool") return "NONE";
+    return cleanModel.toUpperCase();
+  }
+
+  function modeLabel(mode) {
+    const value = String(mode || "local").toLowerCase();
+    if (value === "claude") return "CLAUDE";
+    if (value === "automatic") return "AUTOMATIC";
+    return "LOCAL";
+  }
+
+  function money(value, digits = 4) {
+    const number = Number(value || 0);
+    if (!Number.isFinite(number) || number <= 0) return "$0";
+    return `$${number.toFixed(digits)}`;
+  }
+
+  function latencyLabel(ms) {
+    const value = Number(ms || 0);
+    if (!Number.isFinite(value) || value <= 0) return "—";
+    if (value >= 1000) return `${(value / 1000).toFixed(2)} s`;
+    return `${Math.round(value)} ms`;
+  }
+
+  function compactTelemetryLabel(data) {
+    const state = String(data.state || "").toLowerCase();
+    const provider = String(data.provider || "").toLowerCase();
+    const mode = String(data.mode || "local").toLowerCase();
+    const reason = String(data.reason_code || "").toLowerCase();
+    if (state === "error") return `ERROR · ${humanReasonLabel(data.provider_error_type || reason).toUpperCase()}`;
+    if (reason.includes("memory") || provider === "memory") return `MEMORY · ${latencyLabel(data.latency_ms)} · 0 COST`;
+    if (provider === "local_tool" || reason === "local_tool") return `LOCAL TOOL · ${latencyLabel(data.latency_ms)}`;
+    if (state === "routing_automatic") return "ROUTING REQUEST";
+    if (state === "thinking_cloud" || provider === "anthropic") return `${mode === "automatic" ? "AUTO" : "CLAUDE"} · CLAUDE · ${latencyLabel(data.latency_ms)}`;
+    if (state === "thinking_local") return "ANALYSING LOCALLY";
+    return `${modeLabel(mode)} · LLAMA · ${latencyLabel(data.latency_ms)}`;
+  }
+
+  function parseTelemetryPayload(payload) {
+    if (!payload) return null;
+    if (typeof payload === "object") return payload;
+    try {
+      return JSON.parse(String(payload));
+    } catch (error) {
+      console.error("[Echo UI JS] telemetry JSON invalido", error);
+      return null;
+    }
   }
 
   function updateTelemetryButtons() {
@@ -160,6 +273,7 @@
   }
 
   function applyTelemetryMock(stateName) {
+    if (!telemetryDebugMode) return;
     const name = telemetryMocks[stateName] ? stateName : "idle_local";
     const data = telemetryMocks[name];
     const elements = telemetryElements();
@@ -179,8 +293,139 @@
     if (elements.tokens) elements.tokens.textContent = data.tokens;
     if (elements.cost) elements.cost.textContent = data.cost;
     if (elements.daily) elements.daily.textContent = data.daily;
-    if (elements.note) elements.note.textContent = data.note;
+    if (elements.note) elements.note.textContent = `DEMO · ${data.note}`;
     updateTelemetryButtons();
+  }
+
+  function applyRealTelemetry(payload) {
+    const data = parseTelemetryPayload(payload);
+    if (!data || telemetryDebugMode) return;
+    latestRealTelemetry = data;
+    if (String(data.state || "") === "error") {
+      configurationError = data;
+      renderConfigurationError(data);
+      updateModelConfigState(data);
+      updateSystemFields(data);
+      return;
+    }
+    activeRuntimeState = data;
+    configurationError = null;
+    const elements = telemetryElements();
+    const state = String(data.state || "idle_local");
+    const mode = String(data.mode || "local").toLowerCase();
+    const provider = String(data.provider || "").toLowerCase();
+    const reasonCode = String(data.reason_code || "");
+    const reason = String(data.reason_label || humanReasonLabel(reasonCode));
+
+    telemetryMode = mode === "claude" ? "claude" : mode === "automatic" ? "automatic" : "local";
+    telemetryState = state;
+    if (elements.stage) {
+      elements.stage.dataset.telemetryMode = telemetryMode;
+      elements.stage.dataset.telemetryState = state;
+    }
+    if (elements.compact) elements.compact.classList.add("visible");
+    if (elements.compactText) elements.compactText.textContent = compactTelemetryLabel(data);
+    if (elements.mode) elements.mode.textContent = modeLabel(mode);
+    if (elements.model) elements.model.textContent = Number(data.llm_calls || 0) > 0 ? modelLabel(provider, data.model) : "NONE";
+    if (elements.routing) elements.routing.textContent = reason;
+    if (elements.latency) elements.latency.textContent = latencyLabel(data.latency_ms);
+    if (elements.tokens) {
+      const inputTokens = data.input_tokens;
+      const outputTokens = data.output_tokens;
+      elements.tokens.textContent = inputTokens || outputTokens ? `${inputTokens || 0} → ${outputTokens || 0}` : "—";
+    }
+    if (elements.cost) elements.cost.textContent = money(data.estimated_cost_usd);
+    if (elements.daily) elements.daily.textContent = `${money(data.daily_used_usd, 3)} / ${money(data.daily_budget_usd || 0, 2)}`;
+    if (elements.source) elements.source.textContent = String(data.source || data.response_source || "NONE").toUpperCase();
+    if (elements.fallback && elements.fallbackRow) {
+      const fallback = String(data.fallback_reason || "");
+      elements.fallback.textContent = fallback ? humanReasonLabel(fallback).toUpperCase() : "—";
+      elements.fallbackRow.hidden = !fallback;
+    }
+    if (elements.note) {
+      const fallback = data.fallback_reason ? `Fallback: ${humanReasonLabel(data.fallback_reason)}.` : "";
+      const lock = data.mode_locked ? "Modo bloqueado por CLI." : "";
+      elements.note.textContent = String(data.note || fallback || lock || reason || "");
+    }
+    renderConfigurationError(null);
+    updateSystemFields(data);
+    updateModelConfigState(data);
+    if (elements.dailyBudgetUsd && data.daily_budget_usd !== undefined) elements.dailyBudgetUsd.value = Number(data.daily_budget_usd || 0).toFixed(2);
+    if (elements.singleCallBudgetUsd && data.max_single_call_estimated_usd !== undefined) {
+      elements.singleCallBudgetUsd.value = Number(data.max_single_call_estimated_usd || 0).toFixed(2);
+    }
+    updateTelemetryButtons();
+  }
+
+  function updateModelConfigState(data) {
+    const elements = telemetryElements();
+    const autoEnabled = Boolean(data.automatic_claude_enabled);
+    const keyConfigured = Boolean(data.api_key_configured);
+    const keySource = String(data.api_key_source || "none");
+    const storageAvailable = Boolean(data.secret_storage_available);
+    const paidCallsEnabled = Boolean(data.paid_calls_enabled);
+
+    elements.autoClaudeButtons.forEach((button) => {
+      const enabled = button.dataset.autoClaude === "true";
+      button.classList.toggle("active", enabled === autoEnabled);
+      button.setAttribute("aria-pressed", enabled === autoEnabled ? "true" : "false");
+    });
+
+    if (elements.automaticClaudeStatus) {
+      let label = "Local model only";
+      if (!storageAvailable && keySource !== "environment") label = "SECURE STORAGE UNAVAILABLE";
+      else if (autoEnabled && !keyConfigured) label = "Cloud unavailable — API key required";
+      else if (autoEnabled && keyConfigured && !paidCallsEnabled) label = "Paid calls disabled";
+      else if (autoEnabled && keyConfigured && paidCallsEnabled) label = "Cloud routing available";
+      elements.automaticClaudeStatus.textContent = label;
+    }
+
+    if (elements.keyPanel) elements.keyPanel.hidden = false;
+    if (elements.keyInput) {
+      elements.keyInput.value = "";
+      elements.keyInput.hidden = !storageAvailable || keyConfigured;
+      elements.keyInput.disabled = !storageAvailable || keySource === "environment";
+    }
+    if (elements.saveAnthropicKey) {
+      elements.saveAnthropicKey.hidden = !storageAvailable || keyConfigured || keySource === "environment";
+      elements.saveAnthropicKey.disabled = !storageAvailable || keyConfigured || keySource === "environment";
+    }
+    if (elements.removeAnthropicKey) {
+      elements.removeAnthropicKey.hidden = !storageAvailable || !keyConfigured || keySource === "environment";
+      elements.removeAnthropicKey.disabled = !storageAvailable || !keyConfigured || keySource === "environment";
+    }
+    if (elements.testAnthropicKey) {
+      elements.testAnthropicKey.disabled = !storageAvailable && keySource !== "environment";
+    }
+    if (elements.keyStatus) {
+      if (keySource === "environment") elements.keyStatus.textContent = "CONFIGURED BY ENVIRONMENT";
+      else if (!storageAvailable) elements.keyStatus.textContent = "SECURE STORAGE UNAVAILABLE";
+      else if (keyConfigured) elements.keyStatus.textContent = "CONFIGURED SECURELY";
+      else elements.keyStatus.textContent = "API key not configured.";
+    }
+  }
+
+  function renderConfigurationError(data) {
+    const elements = telemetryElements();
+    const hasError = Boolean(data && data.provider_error_type);
+    if (elements.configError) {
+      elements.configError.hidden = !hasError;
+      elements.configError.textContent = hasError ? String(data.note || humanReasonLabel(data.provider_error_type)).toUpperCase() : "";
+    }
+    if (elements.configureClaude) elements.configureClaude.hidden = !(hasError && String(data.provider_error_type) === "missing_api_key");
+    if (elements.note && hasError) elements.note.textContent = "O modo ativo não foi alterado.";
+  }
+
+  function updateSystemFields(data) {
+    const elements = telemetryElements();
+    if (elements.systemOllama) elements.systemOllama.textContent = "AVAILABLE";
+    if (elements.systemClaude) elements.systemClaude.textContent = data.api_key_configured ? "CONFIGURED" : "NOT CONFIGURED";
+    if (elements.systemObserver) elements.systemObserver.textContent = String(data.context_observer_state || "UNKNOWN").toUpperCase();
+    if (elements.systemCliOverride) elements.systemCliOverride.textContent = data.mode_locked ? "YES" : "NO";
+    if (elements.systemSettingsSource) elements.systemSettingsSource.textContent = String(data.settings_source || "settings.json");
+    if (elements.systemModelModeSource) elements.systemModelModeSource.textContent = String(data.model_routing_mode_source || "default");
+    if (elements.systemAutomaticClaudeSource) elements.systemAutomaticClaudeSource.textContent = String(data.automatic_claude_enabled_source || "default");
+    if (elements.systemApiKeySource) elements.systemApiKeySource.textContent = String(data.api_key_source || "none");
   }
 
   function setTelemetryPanel(open) {
@@ -203,7 +448,20 @@
     }
   }
 
+  function openPanelSection(sectionName) {
+    const section = String(sectionName || "status").toLowerCase();
+    document.querySelectorAll("[data-panel-section]").forEach((button) => {
+      const active = button.dataset.panelSection === section;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    document.querySelectorAll("[data-panel-page]").forEach((page) => {
+      page.classList.toggle("active", page.dataset.panelPage === section);
+    });
+  }
+
   function runAutomaticRoutingMock() {
+    if (!telemetryDebugMode) return;
     window.clearTimeout(telemetryRoutingTimer);
     applyTelemetryMock("routing_automatic");
     telemetryRoutingTimer = window.setTimeout(() => applyTelemetryMock("thinking_cloud"), 650);
@@ -212,6 +470,10 @@
 
   function setTelemetryMode(mode) {
     const value = String(mode || "").trim().toLowerCase();
+    if (!telemetryDebugMode) {
+      executeSystemCommand("set_model_mode", {mode: value});
+      return;
+    }
     if (value === "local") {
       applyTelemetryMock("idle_local");
     } else if (value === "claude") {
@@ -480,10 +742,18 @@
     function applyAllWorkspaceItems(immediate = false) {
       applyWorkspaceItem(state.items.echo, immediate);
       applyWorkspaceItem(state.items.telemetryPanel, immediate);
+      updateWorkspaceStatus();
       if (lockButton) {
         lockButton.setAttribute("aria-pressed", state.locked ? "true" : "false");
         lockButton.textContent = state.locked ? "UNLOCK POSITION" : "LOCK POSITION";
       }
+    }
+
+    function updateWorkspaceStatus() {
+      const echoSnap = byId("echoSnapStatus");
+      const panelSnap = byId("panelSnapStatus");
+      if (echoSnap) echoSnap.textContent = String(state.items.echo.snapZone || "FREE").toUpperCase();
+      if (panelSnap) panelSnap.textContent = String(state.items.telemetryPanel.snapZone || "FREE").toUpperCase();
     }
 
     function startDrag(event, itemId) {
@@ -515,6 +785,7 @@
       item.y = activeDrag.startItem.y + point.y - activeDrag.startPoint.y;
       item.snapZone = null;
       applyWorkspaceItem(item, false);
+      updateWorkspaceStatus();
       event.preventDefault();
     }
 
@@ -534,6 +805,7 @@
       }
       document.body.classList.remove("workspace-dragging");
       activeDrag = null;
+      updateWorkspaceStatus();
       saveWorkspaceState();
       event.preventDefault();
     }
@@ -558,6 +830,7 @@
       item.snapZone = zoneName;
       bringToFront(item);
       applyWorkspaceItem(item, false);
+      updateWorkspaceStatus();
       saveWorkspaceState();
     }
 
@@ -643,6 +916,9 @@
       },
       clampAfterResize,
       saveWorkspaceState,
+      restoreEchoPosition() {
+        applyWorkspaceItem(state.items.echo, false);
+      },
       resetWorkspace,
       recenterEcho,
       toggleLock,
@@ -709,6 +985,7 @@
     element.style.opacity = "1";
     element.classList.remove("muted");
     element.classList.add("visible");
+    updateResponseReadingMode(element, value);
 
     const responseTitle = byId("responseTitle");
     const bridgeReply = byId("bridgeReply");
@@ -719,9 +996,9 @@
     if (bridgeReply) bridgeReply.textContent = value;
     if (workspaceHint) workspaceHint.classList.remove("visible");
     if (clearButton) clearButton.classList.add("visible");
-    if (telemetryMode === "automatic" || telemetryState === "thinking_cloud") {
+    if (telemetryDebugMode && (telemetryMode === "automatic" || telemetryState === "thinking_cloud")) {
       applyTelemetryMock("response_ready");
-    } else {
+    } else if (telemetryDebugMode) {
       applyTelemetryMock("idle_local");
     }
 
@@ -734,6 +1011,34 @@
       opacity: styles.opacity,
       zIndex: styles.zIndex
     });
+  }
+
+  function isLongEchoResponse(element, text) {
+    const lineCount = String(text || "").split(/\r?\n/).length;
+    const wordCount = String(text || "").trim().split(/\s+/).filter(Boolean).length;
+    if (lineCount >= 8 || wordCount >= 120) return true;
+    return element.scrollHeight > 230;
+  }
+
+  function updateResponseReadingMode(element, text) {
+    const stage = document.querySelector(".stage");
+    const reading = isLongEchoResponse(element, text);
+    if (stage) stage.dataset.responseMode = reading ? "reading" : "short";
+    element.dataset.responseMode = reading ? "reading" : "short";
+    element.tabIndex = reading ? 0 : -1;
+    if (reading) {
+      element.setAttribute("role", "region");
+      element.setAttribute("aria-label", "Resposta longa do Echo");
+      if (window.echoEntity && typeof window.echoEntity.setCenter === "function") {
+        window.echoEntity.setCenter(650, 120, false);
+      }
+    } else {
+      element.removeAttribute("role");
+      element.removeAttribute("aria-label");
+      if (window.echoFreeWorkspace && typeof window.echoFreeWorkspace.restoreEchoPosition === "function") {
+        window.echoFreeWorkspace.restoreEchoPosition();
+      }
+    }
   }
 
   function renderEchoError(message) {
@@ -913,8 +1218,10 @@
 
     if (input) input.value = "";
     fadeCurrentReply();
-    if (telemetryMode === "automatic") runAutomaticRoutingMock();
-    else applyTelemetryMock("thinking_local");
+    if (telemetryDebugMode) {
+      if (telemetryMode === "automatic") runAutomaticRoutingMock();
+      else applyTelemetryMock("thinking_local");
+    }
     requestActive = true;
     setInputEnabled(false);
     controller.submitMessage(message);
@@ -942,6 +1249,20 @@
     activeController.uiEvent.connect((payload) => {
       handleUiEventPayload(payload);
     });
+
+    if (activeController.telemetryUpdated) {
+      activeController.telemetryUpdated.connect((payload) => {
+        console.log("[Echo UI JS] telemetryUpdated recebido:", payload);
+        applyRealTelemetry(payload);
+      });
+    }
+
+    if (activeController.modelModeChanged) {
+      activeController.modelModeChanged.connect((payload) => {
+        console.log("[Echo UI JS] modelModeChanged recebido:", payload);
+        applyRealTelemetry(payload);
+      });
+    }
 
     activeController.requestStarted.connect((message) => {
       console.log("[Echo UI JS] requestStarted recebido:", message);
@@ -996,6 +1317,9 @@
       console.log("[Echo UI JS] controller ligado", controller);
 
       connectControllerSignals(controller);
+      if (typeof controller.getModelTelemetry === "function") {
+        controller.getModelTelemetry((payload) => applyRealTelemetry(payload));
+      }
       setInputEnabled(true);
       focusInput();
     });
@@ -1008,6 +1332,12 @@
     const telemetryCompact = byId("telemetryCompact");
     const closeTelemetry = byId("closeTelemetry");
     const telemetryPanel = byId("telemetryPanel");
+    const autoClaudeButtons = Array.from(document.querySelectorAll("[data-auto-claude]"));
+    const saveModelBudget = byId("saveModelBudget");
+    const configureClaude = byId("configureClaude");
+    const saveAnthropicKey = byId("saveAnthropicKey");
+    const removeAnthropicKey = byId("removeAnthropicKey");
+    const testAnthropicKey = byId("testAnthropicKey");
 
     if (form) {
       form.addEventListener("submit", (event) => {
@@ -1030,11 +1360,18 @@
         if (window.echoWorkspace) window.echoWorkspace.clear();
         if (echoResponse) {
           echoResponse.textContent = "";
+          echoResponse.dataset.responseMode = "short";
+          echoResponse.tabIndex = -1;
           echoResponse.hidden = false;
           echoResponse.style.display = "";
           echoResponse.style.visibility = "";
           echoResponse.style.opacity = "";
           echoResponse.classList.remove("visible", "muted");
+        }
+        const stage = document.querySelector(".stage");
+        if (stage) stage.dataset.responseMode = "short";
+        if (window.echoFreeWorkspace && typeof window.echoFreeWorkspace.restoreEchoPosition === "function") {
+          window.echoFreeWorkspace.restoreEchoPosition();
         }
         clearButton.classList.remove("visible");
         speak("");
@@ -1064,10 +1401,70 @@
 
     if (telemetryPanel) {
       telemetryPanel.addEventListener("click", (event) => {
+        const sectionButton = event.target.closest("button[data-panel-section]");
+        if (sectionButton) {
+          openPanelSection(sectionButton.dataset.panelSection);
+          return;
+        }
         const modeButton = event.target.closest("button[data-telemetry-mode]");
         if (!modeButton) return;
         setTelemetryMode(modeButton.dataset.telemetryMode);
       });
+    }
+
+    autoClaudeButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        const enabled = button.dataset.autoClaude === "true";
+        if (enabled && button.dataset.confirmed !== "true") {
+          button.dataset.confirmed = "true";
+          const note = byId("telemetryNote");
+          if (note) note.textContent = "Clica novamente em ON para confirmar Claude automático.";
+          return;
+        }
+        autoClaudeButtons.forEach((item) => {
+          if (item !== button) item.dataset.confirmed = "false";
+        });
+        executeSystemCommand("set_automatic_claude_enabled", {enabled});
+      });
+    });
+
+    if (saveModelBudget) {
+      saveModelBudget.addEventListener("click", () => {
+        const daily = Number(byId("dailyBudgetUsd") ? byId("dailyBudgetUsd").value : 0);
+        const single = Number(byId("singleCallBudgetUsd") ? byId("singleCallBudgetUsd").value : 0);
+        executeSystemCommand("set_model_budget", {
+          daily_budget_usd: Math.max(0, daily),
+          max_single_call_estimated_usd: Math.max(0, single)
+        });
+      });
+    }
+
+    if (configureClaude) {
+      configureClaude.addEventListener("click", () => {
+        openPanelSection("models");
+        const keyPanel = byId("anthropicKeyPanel");
+        if (keyPanel) keyPanel.hidden = false;
+        const keyInput = byId("anthropicApiKey");
+        if (keyInput) keyInput.focus({preventScroll: true});
+      });
+    }
+
+    if (saveAnthropicKey) {
+      saveAnthropicKey.addEventListener("click", () => {
+        const keyInput = byId("anthropicApiKey");
+        executeSystemCommand("save_anthropic_key", {api_key: keyInput ? keyInput.value : ""}, (payload) => {
+          if (keyInput) keyInput.value = "";
+          applyRealTelemetry(payload);
+        });
+      });
+    }
+
+    if (removeAnthropicKey) {
+      removeAnthropicKey.addEventListener("click", () => executeSystemCommand("remove_anthropic_key"));
+    }
+
+    if (testAnthropicKey) {
+      testAnthropicKey.addEventListener("click", () => executeSystemCommand("test_anthropic_connection"));
     }
 
     document.addEventListener("click", (event) => {
@@ -1086,8 +1483,25 @@
     }
 
     window.addEventListener("keydown", (event) => {
+      if (telemetryPanelOpen && ["ArrowLeft", "ArrowRight"].includes(event.key) && document.activeElement && document.activeElement.matches("[data-panel-section]")) {
+        const tabs = Array.from(document.querySelectorAll("[data-panel-section]"));
+        const index = tabs.indexOf(document.activeElement);
+        const delta = event.key === "ArrowRight" ? 1 : -1;
+        const next = tabs[(index + delta + tabs.length) % tabs.length];
+        if (next) {
+          event.preventDefault();
+          next.focus();
+          openPanelSection(next.dataset.panelSection);
+        }
+        return;
+      }
       if (event.key === "Escape" && telemetryPanelOpen) {
         event.preventDefault();
+        const keyPanel = byId("anthropicKeyPanel");
+        if (keyPanel && !keyPanel.hidden) {
+          keyPanel.hidden = true;
+          return;
+        }
         setTelemetryPanel(false);
         focusInput();
       }
@@ -1097,6 +1511,7 @@
   window.addEventListener("DOMContentLoaded", () => {
     console.log("[Echo UI JS] DOMContentLoaded");
     console.log("[Echo UI JS] echoResponse no arranque:", byId("echoResponse"));
+    telemetryDebugMode = new URLSearchParams(window.location.search).get("telemetryDebug") === "1";
     window.echoEntity = new window.EchoEntity(byId("mind"));
     window.echoWorkspace = createWorkspaceController();
     window.echoFreeWorkspace = createFreeWorkspaceController();

@@ -196,7 +196,7 @@ input {
   max-height: 210px;
   z-index: 7;
   margin: 0;
-  overflow: auto;
+  overflow: hidden;
   color: var(--text-mid);
   font: 300 19px/1.5 var(--sans);
   text-align: center;
@@ -206,11 +206,84 @@ input {
   transform: translateX(-50%) translateY(6px);
   transition: opacity .36s ease, transform .36s ease;
   pointer-events: none;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
 }
 
 .echo-response.visible {
   opacity: 1;
   transform: translateX(-50%) translateY(0);
+}
+
+.stage[data-response-mode="reading"] .echo-response {
+  left: 50%;
+  top: 286px;
+  bottom: auto;
+  width: min(920px, calc(100% - 120px));
+  max-height: min(330px, calc(100% - 410px));
+  padding: 22px 28px 28px;
+  overflow-y: auto;
+  text-align: left;
+  pointer-events: auto;
+  user-select: text;
+  background:
+    linear-gradient(to bottom, rgba(8,10,15,.9), rgba(8,10,15,.58) 18%, rgba(8,10,15,.58) 82%, rgba(8,10,15,.9)),
+    rgba(8,10,15,.42);
+  border: 1px solid rgba(255,255,255,.07);
+  border-radius: 14px;
+  box-shadow: 0 24px 80px -44px rgba(0,0,0,.9);
+  scrollbar-color: rgba(143,208,196,.24) transparent;
+}
+
+.stage[data-response-mode="reading"] .echo-response::before,
+.stage[data-response-mode="reading"] .echo-response::after {
+  content: "";
+  position: sticky;
+  display: block;
+  height: 18px;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.stage[data-response-mode="reading"] .echo-response::before {
+  top: -22px;
+  margin: -22px -28px 4px;
+  background: linear-gradient(to bottom, rgba(8,10,15,.82), rgba(8,10,15,0));
+}
+
+.stage[data-response-mode="reading"] .echo-response::after {
+  bottom: -28px;
+  margin: 4px -28px -28px;
+  background: linear-gradient(to top, rgba(8,10,15,.86), rgba(8,10,15,0));
+}
+
+.stage[data-response-mode="reading"] .echo-response::-webkit-scrollbar {
+  width: 7px;
+}
+
+.stage[data-response-mode="reading"] .echo-response::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.stage[data-response-mode="reading"] .echo-response::-webkit-scrollbar-thumb {
+  background: rgba(143,208,196,0);
+  border-radius: 999px;
+}
+
+.stage[data-response-mode="reading"] .echo-response:hover::-webkit-scrollbar-thumb,
+.stage[data-response-mode="reading"] .echo-response:focus-visible::-webkit-scrollbar-thumb {
+  background: rgba(143,208,196,.26);
+}
+
+.stage[data-response-mode="reading"] .telemetry-compact {
+  bottom: 92px;
+}
+
+@media (max-height: 720px) {
+  .stage[data-response-mode="reading"] .echo-response {
+    top: 238px;
+    max-height: min(280px, calc(100% - 360px));
+  }
 }
 
 .echo-response.muted {
@@ -351,9 +424,144 @@ input {
   padding-top: 5px;
 }
 
+.telemetry-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1px;
+  margin: 14px 0 6px;
+  border: 1px solid rgba(255,255,255,.07);
+  background: rgba(255,255,255,.028);
+}
+
+.telemetry-tabs button,
+.telemetry-inline-action,
+.telemetry-secret-actions button,
+.telemetry-budget-controls button {
+  min-height: 28px;
+  border: 0;
+  border-radius: 0;
+  background: rgba(5,7,10,.5);
+  color: rgba(139,142,153,.86);
+  font: 500 8px var(--mono);
+  letter-spacing: .08em;
+  cursor: pointer;
+  transition: color .22s ease, background .22s ease, box-shadow .22s ease;
+}
+
+.telemetry-tabs button:hover,
+.telemetry-tabs button:focus-visible,
+.telemetry-tabs button.active,
+.telemetry-inline-action:hover,
+.telemetry-inline-action:focus-visible,
+.telemetry-secret-actions button:hover,
+.telemetry-secret-actions button:focus-visible,
+.telemetry-budget-controls button:hover,
+.telemetry-budget-controls button:focus-visible {
+  color: rgba(234,236,243,.92);
+  background: rgba(70,197,255,.08);
+  outline: 0;
+  box-shadow: 0 0 0 1px rgba(143,208,196,.22) inset;
+}
+
+.telemetry-panel-section {
+  display: none;
+}
+
+.telemetry-panel-section.active {
+  display: block;
+}
+
+.telemetry-error {
+  margin: 0;
+  color: #f0b7a4;
+  font: 400 11px/1.4 var(--mono);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.telemetry-inline-action {
+  width: 100%;
+  border-radius: 6px;
+}
+
 .telemetry-workspace-controls {
   grid-template-columns: repeat(3, 1fr);
   gap: 6px;
+}
+
+.telemetry-budget-controls {
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.telemetry-budget-controls label {
+  display: grid;
+  gap: 5px;
+}
+
+.telemetry-cloud-toggle {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 6px;
+}
+
+.telemetry-budget-controls span {
+  color: rgba(139,142,153,.82);
+  font: 400 8px var(--mono);
+  letter-spacing: .14em;
+}
+
+.telemetry-budget-controls input[type="number"] {
+  width: 100%;
+  min-height: 28px;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 6px;
+  background: rgba(5,7,10,.48);
+  color: rgba(234,236,243,.88);
+  font: 500 10px var(--mono);
+  padding: 4px 6px;
+  outline: 0;
+}
+
+.telemetry-secret-controls {
+  gap: 9px;
+}
+
+.telemetry-secret-controls input[type="password"] {
+  min-height: 30px;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 6px;
+  background: rgba(5,7,10,.52);
+  color: rgba(234,236,243,.88);
+  font: 400 11px var(--mono);
+  padding: 6px 8px;
+  outline: 0;
+}
+
+.telemetry-secret-controls input[type="password"]:focus-visible {
+  box-shadow: 0 0 0 1px rgba(143,208,196,.32);
+}
+
+.telemetry-secret-actions {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 5px;
+}
+
+#anthropicKeyStatus {
+  margin: 0;
+  color: rgba(174,178,192,.66);
+  font: 300 11px/1.4 var(--sans);
+}
+
+#automaticClaudeStatus {
+  margin: 0;
+  color: rgba(174,178,192,.68);
+  font: 300 10px/1.35 var(--sans);
+}
+
+.telemetry-budget-controls input:focus-visible {
+  box-shadow: 0 0 0 1px rgba(143,208,196,.32);
 }
 
 .telemetry-workspace-controls button {
@@ -368,9 +576,16 @@ input {
   transition: color .22s ease, background .22s ease, box-shadow .22s ease;
 }
 
+.telemetry-budget-controls button {
+  grid-column: 1 / -1;
+  border-radius: 6px;
+}
+
 .telemetry-workspace-controls button:hover,
 .telemetry-workspace-controls button:focus-visible,
-.telemetry-workspace-controls button[aria-pressed="true"] {
+.telemetry-workspace-controls button[aria-pressed="true"],
+.telemetry-budget-controls button:hover,
+.telemetry-budget-controls button:focus-visible {
   color: rgba(234,236,243,.92);
   background: rgba(70,197,255,.08);
   outline: 0;

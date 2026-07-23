@@ -3,9 +3,13 @@ from __future__ import annotations
 import time
 import os
 import traceback
+import json
 from collections.abc import Callable
+from typing import Any
 
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
+
+from assistant.secret_storage import sanitize_secret_error
 
 class EchoRequestWorker(QObject):
     finished = Signal(str)
@@ -40,6 +44,8 @@ class EchoUIController(QObject):
     stateChanged = Signal(str)
     errorOccurred = Signal(str)
     uiEvent = Signal(str)
+    telemetryUpdated = Signal(str)
+    modelModeChanged = Signal(str)
     requestStarted = Signal(str)
     requestFinished = Signal()
 
@@ -49,12 +55,16 @@ class EchoUIController(QObject):
         parent: QObject | None = None,
         *,
         clear_conversation: Callable[[], None] | None = None,
+        get_telemetry: Callable[[], dict | None] | None = None,
+        model_runtime: Any | None = None,
         thinking_min_ms: int = 300,
         speaking_duration_ms: int = 1000,
     ) -> None:
         super().__init__(parent)
         self.responder = responder
         self.clear_conversation_callback = clear_conversation
+        self.get_telemetry_callback = get_telemetry
+        self.model_runtime = model_runtime
         self.thinking_min_ms = thinking_min_ms
         self.speaking_duration_ms = speaking_duration_ms
         self._thread: QThread | None = None
@@ -82,6 +92,7 @@ class EchoUIController(QObject):
         self._visual_token += 1
         self.requestStarted.emit(message)
         self._emit_state("thinking")
+        self._emit_runtime_telemetry("request_started")
         _debug_ui("[Echo UI] request_started=true")
 
         self._thread = QThread(self)
@@ -115,6 +126,58 @@ class EchoUIController(QObject):
     def setState(self, state: str) -> None:
         self._emit_state(state)
 
+    @Slot(result=str)
+    def getModelTelemetry(self) -> str:
+        return self._runtime_payload_json("current")
+
+    @Slot(str, result=str)
+    def setModelMode(self, mode: str) -> str:
+        return self.executeSystemCommand(_json_payload({"intent": "set_model_mode", "parameters": {"mode": mode}, "source": "ui"}))
+
+    @Slot(bool, result=str)
+    def setAutomaticClaudeEnabled(self, enabled: bool) -> str:
+        return self.executeSystemCommand(
+            _json_payload({"intent": "set_automatic_claude_enabled", "parameters": {"enabled": bool(enabled)}, "source": "ui"})
+        )
+
+    @Slot(float, float, result=str)
+    def setModelBudget(self, daily_budget_usd: float, max_single_call_estimated_usd: float) -> str:
+        return self.executeSystemCommand(
+            _json_payload(
+                {
+                    "intent": "set_model_budget",
+                    "parameters": {
+                        "daily_budget_usd": daily_budget_usd,
+                        "max_single_call_estimated_usd": max_single_call_estimated_usd,
+                    },
+                    "source": "ui",
+                }
+            )
+        )
+
+    @Slot(str, result=str)
+    def executeSystemCommand(self, payload: str) -> str:
+        if self.model_runtime is None:
+            payload = {"state": "error", "note": "O runtime de modelos não está disponível."}
+        else:
+            try:
+                command = json.loads(str(payload or "{}"))
+            except json.JSONDecodeError:
+                command = {"intent": str(payload or ""), "source": "ui"}
+            try:
+                payload = self.model_runtime.execute_command(command, source="ui")
+            except Exception as exc:
+                payload = {
+                    "state": "error",
+                    "note": sanitize_secret_error(exc),
+                    "provider_error_type": "system_command_failed",
+                }
+        encoded = _json_payload(payload)
+        if str(payload.get("state") or "") == "mode_changed":
+            self.modelModeChanged.emit(encoded)
+        self.telemetryUpdated.emit(encoded)
+        return encoded
+
     @Slot(str)
     def sendTestResponse(self, text: str) -> None:
         self._thread_debug("sendTestResponse")
@@ -139,6 +202,7 @@ class EchoUIController(QObject):
         response_text = str(response or "")
         self._emit_response_ready(response_text)
         self._emit_pending_ui_events()
+        self._emit_runtime_telemetry("response_ready")
         elapsed_ms = int((time.perf_counter() - self._started_at) * 1000) if self._started_at else 0
         delay_ms = max(0, self.thinking_min_ms - elapsed_ms)
         token = self._visual_token
@@ -158,6 +222,7 @@ class EchoUIController(QObject):
         )
         self.errorOccurred.emit(error_text)
         self._emit_state("error")
+        self._emit_runtime_telemetry("error", error_text)
         QTimer.singleShot(1200, lambda: self._emit_state("idle"))
         self._cleanup_worker()
 
@@ -224,6 +289,27 @@ class EchoUIController(QObject):
         _debug_ui(f"[Echo UI DEBUG] emitting stateChanged {clean_state!r} controller_id={id(self)}")
         self.stateChanged.emit(clean_state)
 
+    def _runtime_payload_json(self, state: str) -> str:
+        if self.model_runtime is None:
+            return _json_payload({"state": state, "note": "O runtime de modelos não está disponível."})
+        if state == "request_started":
+            return _json_payload(self.model_runtime.request_started_payload())
+        telemetry = self.get_telemetry_callback() if self.get_telemetry_callback is not None else None
+        if telemetry:
+            return _json_payload(self.model_runtime.telemetry_payload(telemetry, state=state))
+        return _json_payload(self.model_runtime.current_payload(state=state))
+
+    def _emit_runtime_telemetry(self, state: str, error_message: str = "") -> None:
+        if self.model_runtime is None:
+            return
+        if state == "error":
+            payload = self.model_runtime.error_payload(error_message or "Erro.", provider_error_type="ui_error")
+            encoded = _json_payload(payload)
+        else:
+            encoded = self._runtime_payload_json(state)
+        _debug_ui(f"[Echo UI DEBUG] emitting telemetryUpdated {encoded}")
+        self.telemetryUpdated.emit(encoded)
+
     def _thread_debug(self, label: str) -> None:
         current_thread = QThread.currentThread()
         controller_thread = self.thread()
@@ -245,3 +331,7 @@ def _debug_ui(*parts: object) -> None:
 def _debug_threads(*parts: object) -> None:
     if os.environ.get("ECHO_DEBUG_THREADS", "").strip().lower() in {"1", "true", "yes", "on"}:
         print(*parts)
+
+
+def _json_payload(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False)

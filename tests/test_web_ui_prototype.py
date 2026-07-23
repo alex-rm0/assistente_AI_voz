@@ -46,6 +46,12 @@ def test_web_ui_controller_api_is_exposed() -> None:
     for signal in ("responseReady", "stateChanged", "errorOccurred", "uiEvent", "requestStarted", "requestFinished"):
         assert signal in controller
         assert signal in ui
+    for signal in ("telemetryUpdated", "modelModeChanged"):
+        assert signal in controller
+        assert signal in ui
+    for slot in ("getModelTelemetry", "setModelMode", "setAutomaticClaudeEnabled", "setModelBudget", "executeSystemCommand"):
+        assert slot in controller
+    assert "executeSystemCommand" in ui
     assert 'registerObject("echoController", self.controller)' in window
     assert "channel.objects.echoController" in ui
     assert "channel.objects.echoBridge" not in ui
@@ -114,7 +120,7 @@ def test_research_workspace_is_available() -> None:
     assert "conversation_cleared" in ui
 
 
-def test_cognitive_telemetry_panel_is_available_with_mock_data() -> None:
+def test_cognitive_telemetry_panel_is_available_with_real_runtime_controls() -> None:
     html = (WEB / "index.html").read_text(encoding="utf-8")
     css = (WEB / "styles.css").read_text(encoding="utf-8")
     ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
@@ -124,6 +130,16 @@ def test_cognitive_telemetry_panel_is_available_with_mock_data() -> None:
     assert 'aria-controls="telemetryPanel"' in html
     assert 'aria-hidden="true"' in html
     assert "MODEL BEHAVIOUR" in html
+    assert "AUTOMATIC CLOUD ROUTING" in html
+    assert 'id="automaticClaudeStatus"' in html
+    assert 'data-auto-claude="false"' in html
+    assert 'data-auto-claude="true"' in html
+    assert 'id="dailyBudgetUsd"' in html
+    assert 'id="singleCallBudgetUsd"' in html
+    assert 'id="saveModelBudget"' in html
+    for section in ("status", "models", "workspace", "system"):
+        assert f'data-panel-section="{section}"' in html
+        assert f'data-panel-page="{section}"' in html
     for mode in ("local", "claude", "automatic"):
         assert f'data-telemetry-mode="{mode}"' in html
 
@@ -133,11 +149,18 @@ def test_cognitive_telemetry_panel_is_available_with_mock_data() -> None:
     assert "backdrop-filter: blur" in css
     assert "@media (prefers-reduced-motion: reduce)" in css
 
+    assert "function applyRealTelemetry" in ui
     assert "const telemetryMocks" in ui
     assert "function applyTelemetryMock" in ui
     assert "function setTelemetryPanel" in ui
     assert "function setTelemetryMode" in ui
     assert "window.echoTelemetryDemo = applyTelemetryMock" in ui
+    assert 'telemetryDebug") === "1"' in ui
+    assert '"set_model_mode"' in ui
+    assert '"set_automatic_claude_enabled"' in ui
+    assert '"set_model_budget"' in ui
+    assert "executeSystemCommand" in ui
+    assert "buildSystemCommand" in ui
 
 
 def test_cognitive_telemetry_is_mocked_and_keyboard_accessible() -> None:
@@ -152,7 +175,9 @@ def test_cognitive_telemetry_is_mocked_and_keyboard_accessible() -> None:
     assert "runAutomaticRoutingMock()" in ui
     assert "controller.submitMessage(message)" in ui
     assert "ModelRouter" not in ui
-    assert "budget" not in ui.lower()
+    assert "ANTHROPIC_API_KEY" not in ui
+    assert "api_key_source" in ui
+    assert "secret_storage_available" in ui
 
 
 def test_cognitive_telemetry_maps_reason_codes_to_human_labels() -> None:
@@ -166,6 +191,8 @@ def test_cognitive_telemetry_maps_reason_codes_to_human_labels() -> None:
         "Local response",
         "Memory recall",
         "Local tool",
+        "API key required",
+        "Cloud routing disabled",
     )
     for label in expected_labels:
         assert label in ui or label in html
@@ -173,7 +200,51 @@ def test_cognitive_telemetry_maps_reason_codes_to_human_labels() -> None:
     assert "professional_writing" not in html
     assert "structured_summary" not in html
     assert "technical_explanation" not in html
-    assert 'elements.routing.textContent = data.routing' in ui
+    assert "humanReasonLabel" in ui
+    assert "reason_label" in ui
+
+
+def test_cognitive_telemetry_panel_sections_keep_concerns_separate() -> None:
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
+
+    status_block = html[html.index('data-panel-page="status"'):html.index('data-panel-page="models"')]
+    models_block = html[html.index('data-panel-page="models"'):html.index('data-panel-page="workspace"')]
+    workspace_block = html[html.index('data-panel-page="workspace"'):html.index('data-panel-page="system"')]
+    system_block = html[html.index('data-panel-page="system"'):html.index('</aside>')]
+
+    assert "telemetryMode" in status_block
+    assert "telemetrySource" in status_block
+    assert "telemetryFallback" in status_block
+    assert "data-telemetry-mode" not in status_block
+    assert "dailyBudgetUsd" not in status_block
+    assert "resetWorkspace" not in status_block
+
+    assert "data-telemetry-mode" in models_block
+    assert "data-auto-claude" in models_block
+    assert "automaticClaudeStatus" in models_block
+    assert "anthropicApiKey" in models_block
+    assert "resetWorkspace" not in models_block
+
+    assert "recenterEcho" in workspace_block
+    assert "resetWorkspace" in workspace_block
+    assert "toggleWorkspaceLock" in workspace_block
+    assert "data-telemetry-mode" not in workspace_block
+
+    assert "systemVersion" in system_block
+    assert "systemClaude" in system_block
+    assert "systemCliOverride" in system_block
+    assert "systemModelModeSource" in system_block
+    assert "systemAutomaticClaudeSource" in system_block
+    assert "systemApiKeySource" in system_block
+
+    assert "openPanelSection" in ui
+    assert "ArrowLeft" in ui and "ArrowRight" in ui
+    assert "anthropicKeyPanel" in ui
+    assert "CONFIGURED BY ENVIRONMENT" in ui
+    assert "CONFIGURED SECURELY" in ui
+    assert "window.confirm" not in ui
+    assert "alert(" not in ui
 
 
 def test_cognitive_telemetry_compact_line_sits_above_input_zone() -> None:
@@ -220,6 +291,29 @@ def test_cognitive_telemetry_panel_keeps_response_and_input_safe_on_compact_wind
     assert '.stage[data-telemetry-panel="open"] .echo-response' not in compact_block
     assert "inputSafeRect()" in (WEB / "echo_ui.js").read_text(encoding="utf-8")
     assert "rectsIntersect(itemRect(item), inputRect)" in (WEB / "echo_ui.js").read_text(encoding="utf-8")
+
+
+def test_long_response_reading_mode_is_available_without_persisting_echo_position() -> None:
+    css = (WEB / "styles.css").read_text(encoding="utf-8")
+    ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
+
+    assert 'stage.dataset.responseMode = reading ? "reading" : "short"' in ui
+    assert "function updateResponseReadingMode" in ui
+    assert "function isLongEchoResponse" in ui
+    assert "window.echoEntity.setCenter(650, 120, false)" in ui
+    assert "restoreEchoPosition" in ui
+    assert "applyWorkspaceItem(state.items.echo, false)" in ui
+    assert "saveWorkspaceState()" not in ui[ui.index("function updateResponseReadingMode"):ui.index("function renderEchoError")]
+
+    assert '.stage[data-response-mode="reading"] .echo-response' in css
+    assert "top: 286px;" in css
+    assert "max-height: min(330px, calc(100% - 410px));" in css
+    assert "overflow-y: auto;" in css
+    assert "scrollbar-width: thin;" in css
+    assert "::-webkit-scrollbar-thumb" in css
+    assert "user-select: text;" in css
+    assert '.stage[data-response-mode="reading"] .telemetry-compact' in css
+    assert "@media (max-height: 720px)" in css
 
 
 def test_web_ui_removes_try_suggestions_and_numbered_debug_states() -> None:
