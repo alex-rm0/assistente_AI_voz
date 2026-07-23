@@ -41,7 +41,10 @@
     single_call_budget_exceeded: "Call limit reached",
     budget_state_unavailable: "Budget unavailable",
     tool_result: "Local tool",
-    local_tool: "Local tool"
+    local_tool: "Local tool",
+    social_fast_path: "Social fast path",
+    system_datetime: "System datetime",
+    document_task: "Document task"
   };
 
   const telemetryMocks = {
@@ -217,7 +220,7 @@
     if (cleanProvider === "anthropic") return cleanModel.includes("haiku") ? "CLAUDE HAIKU" : "CLAUDE";
     if (cleanProvider === "ollama") return cleanModel.includes("llama") ? "LLAMA 3.1 8B" : cleanModel.toUpperCase();
     if (cleanProvider === "memory") return "NONE";
-    if (cleanProvider === "local_tool") return "NONE";
+    if (cleanProvider === "local_tool" || cleanProvider === "tool" || cleanProvider === "local") return "NONE";
     return cleanModel.toUpperCase();
   }
 
@@ -243,12 +246,18 @@
 
   function compactTelemetryLabel(data) {
     const state = String(data.state || "").toLowerCase();
-    const provider = String(data.provider || "").toLowerCase();
-    const mode = String(data.mode || "local").toLowerCase();
+    const provider = String(data.execution_provider || data.provider || "").toLowerCase();
+    const mode = String(data.configured_model_mode || data.mode || "local").toLowerCase();
+    const executionPath = String(data.execution_path || "").toLowerCase();
     const reason = String(data.reason_code || "").toLowerCase();
     if (state === "error") return `ERROR · ${humanReasonLabel(data.provider_error_type || reason).toUpperCase()}`;
     if (reason.includes("memory") || provider === "memory") return `MEMORY · ${latencyLabel(data.latency_ms)} · 0 COST`;
-    if (provider === "local_tool" || reason === "local_tool") return `LOCAL TOOL · ${latencyLabel(data.latency_ms)}`;
+    if (provider === "tool" || provider === "local_tool" || reason === "local_tool" || executionPath === "document_task") {
+      return `${modeLabel(mode)} · TOOL · ${latencyLabel(data.latency_ms)}`;
+    }
+    if (provider === "local" || executionPath === "system_datetime" || executionPath === "social_fast_path") {
+      return `${modeLabel(mode)} · LOCAL · ${latencyLabel(data.latency_ms)}`;
+    }
     if (state === "routing_automatic") return "ROUTING REQUEST";
     if (state === "thinking_cloud" || provider === "anthropic") return `${mode === "automatic" ? "AUTO" : "CLAUDE"} · CLAUDE · ${latencyLabel(data.latency_ms)}`;
     if (state === "thinking_local") return "ANALYSING LOCALLY";
@@ -312,10 +321,12 @@
     configurationError = null;
     const elements = telemetryElements();
     const state = String(data.state || "idle_local");
-    const mode = String(data.mode || "local").toLowerCase();
-    const provider = String(data.provider || "").toLowerCase();
+    const mode = String(data.configured_model_mode || data.mode || "local").toLowerCase();
+    const provider = String(data.execution_provider || data.provider || "").toLowerCase();
+    const executionModel = String(data.execution_model || data.model || "");
+    const executionPath = String(data.execution_path || "");
     const reasonCode = String(data.reason_code || "");
-    const reason = String(data.reason_label || humanReasonLabel(reasonCode));
+    const reason = String(data.reason_label || humanReasonLabel(reasonCode || executionPath));
 
     telemetryMode = mode === "claude" ? "claude" : mode === "automatic" ? "automatic" : "local";
     telemetryState = state;
@@ -326,7 +337,7 @@
     if (elements.compact) elements.compact.classList.add("visible");
     if (elements.compactText) elements.compactText.textContent = compactTelemetryLabel(data);
     if (elements.mode) elements.mode.textContent = modeLabel(mode);
-    if (elements.model) elements.model.textContent = Number(data.llm_calls || 0) > 0 ? modelLabel(provider, data.model) : "NONE";
+    if (elements.model) elements.model.textContent = modelLabel(provider, executionModel);
     if (elements.routing) elements.routing.textContent = reason;
     if (elements.latency) elements.latency.textContent = latencyLabel(data.latency_ms);
     if (elements.tokens) {

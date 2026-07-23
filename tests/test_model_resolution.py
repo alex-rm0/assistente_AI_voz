@@ -106,5 +106,7 @@ def test_model_and_source_appear_in_turn_telemetry(tmp_path: Path) -> None:
     engine._complete_turn("teste", "resposta local", "FAST_ROUTE", technical=True, selected_path="FAST_ROUTE")
     telemetry = engine.get_last_turn_telemetry() or {}
 
-    assert telemetry["model"] == "telemetry-model"
+    assert telemetry["model"] == "NONE"
+    assert telemetry["execution_model"] == "NONE"
+    assert telemetry["execution_provider"] == "tool"
     assert telemetry["model_source"] == "settings.json"

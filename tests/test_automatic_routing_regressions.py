@@ -185,6 +185,11 @@ def test_system_datetime_uses_local_clock_without_llm(tmp_path: Path, message: s
     assert telemetry["response_source"] == "LOCAL_DATETIME"
     assert telemetry["llm_calls"] == 0
     assert telemetry["tools_used"] == ["system_datetime"]
+    assert telemetry["configured_model_mode"] == "automatic"
+    assert telemetry["execution_path"] == "system_datetime"
+    assert telemetry["execution_provider"] == "local"
+    assert telemetry["execution_model"] == "NONE"
+    assert telemetry["model_routing_mode"] == "automatic"
     assert telemetry["model_routing_provider"] == "local"
     assert telemetry["model_routing_model"] == "NONE"
     assert telemetry["model_routing_reason_code"] == "system_datetime"
@@ -228,6 +233,11 @@ def test_professional_email_request_is_not_memory_command_and_uses_anthropic_whe
     assert telemetry["response_source"] != "MEMORY_COMMAND"
     assert "ACTIVE_CONVERSATION" not in response
     assert "Assunto:" in response
+    assert telemetry["configured_model_mode"] == "automatic"
+    assert telemetry["execution_path"] == "llm"
+    assert telemetry["execution_provider"] == "anthropic"
+    assert telemetry["execution_model"] == "claude-haiku-4-5-20251001"
+    assert telemetry["model_routing_mode"] == "automatic"
     assert telemetry["model_routing_provider"] == "anthropic"
     assert telemetry["model_routing_reason_code"] == "professional_writing"
     assert len(anthropic.calls) == 1
@@ -245,6 +255,11 @@ def test_professional_email_request_uses_ollama_when_automatic_claude_disabled(t
     telemetry = engine.get_last_turn_telemetry() or {}
 
     assert "Assunto:" in response
+    assert telemetry["configured_model_mode"] == "automatic"
+    assert telemetry["execution_path"] == "llm"
+    assert telemetry["execution_provider"] == "ollama"
+    assert telemetry["execution_model"] == "llama3.1:8b"
+    assert telemetry["model_routing_mode"] == "automatic"
     assert telemetry["model_routing_provider"] == "ollama"
     assert telemetry["model_routing_reason_code"] == "automatic_claude_disabled"
     assert len(ollama.calls) == 1
@@ -326,6 +341,11 @@ def test_project_duration_question_triggers_grounded_recall_from_history(tmp_pat
     assert "ha tres meses" in response.lower() or "há tres meses" in response.lower() or "há três meses" in response.lower()
     assert telemetry["selected_path"] == "MEMORY_RECALL"
     assert telemetry["memory_recall_detected"] is True
+    assert telemetry["configured_model_mode"] == "automatic"
+    assert telemetry["execution_path"] == "memory_recall"
+    assert telemetry["execution_provider"] == "memory"
+    assert telemetry["execution_model"] == "NONE"
+    assert telemetry["model_routing_mode"] == "automatic"
     assert "CONVERSATION_HISTORY" in telemetry["grounding_sources"]
     assert telemetry["history_context_used"] is True
     assert telemetry["llm_calls"] == 0
@@ -740,6 +760,11 @@ def test_social_fast_path_after_claude_does_not_inherit_paid_turn_telemetry(tmp_
     assert second_telemetry["selected_path"] == "SOCIAL_PATH"
     assert second_telemetry["response_source"] == "SOCIAL_FAST_PATH"
     assert second_telemetry["llm_calls"] == 0
+    assert second_telemetry["configured_model_mode"] == "automatic"
+    assert second_telemetry["execution_path"] == "social_fast_path"
+    assert second_telemetry["execution_provider"] == "local"
+    assert second_telemetry["execution_model"] == "NONE"
+    assert second_telemetry["model_routing_mode"] == "automatic"
     assert second_telemetry["model_routing_provider"] == "local"
     assert second_telemetry["model_routing_model"] == "NONE"
     assert second_telemetry["model_routing_reason_code"] == "social_fast_path"

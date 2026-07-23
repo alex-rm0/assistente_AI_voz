@@ -1790,7 +1790,16 @@ class AssistantEngine:
             if self._llm_chat_count() > llm_start:
                 self._turn_trace.update(_model_routing_telemetry(self.llm))
             else:
-                self._turn_trace.update(_local_turn_model_telemetry(selected_path or source))
+                self._turn_trace.update(_local_turn_model_telemetry(selected_path or source, self.llm))
+                if (selected_path or source) == "PROVIDER_ERROR":
+                    failed_provider = str(self._turn_trace.get("provider") or "")
+                    if failed_provider:
+                        self._turn_trace["execution_provider"] = failed_provider
+                        self._turn_trace["model_routing_provider"] = failed_provider
+                    error_code = str(self._turn_trace.get("provider_error_type") or "")
+                    if error_code:
+                        self._turn_trace["model_routing_reason_code"] = error_code
+                        self._turn_trace["model_routing_reason"] = _local_reason_label(error_code)
             self._turn_trace.setdefault("fallback_used", final_response_source in {"LOCAL_SAFE_FALLBACK", "FALLBACK"})
         return final_response
 
@@ -1838,17 +1847,37 @@ class AssistantEngine:
         estimated_cost_usd = sum(
             float(record.get("estimated_cost_usd") or 0.0) for record in turn_token_records if isinstance(record, dict)
         )
+        configured_mode = str(self._turn_trace.get("configured_model_mode") or self._turn_trace.get("model_routing_mode") or "")
+        configured_source = str(
+            self._turn_trace.get("configured_model_mode_source")
+            or self._turn_trace.get("model_routing_mode_source")
+            or _model_mode_source(self.llm)
+        )
+        execution_path = str(self._turn_trace.get("execution_path") or _execution_path_for_turn(selected_path, response_source, llm_calls))
+        execution_provider = str(
+            self._turn_trace.get("execution_provider")
+            or _execution_provider_for_turn(selected_path, self._turn_trace.get("model_routing_provider"), llm_calls)
+        )
+        execution_model = str(
+            self._turn_trace.get("execution_model")
+            or _execution_model_for_turn(self._turn_trace.get("model_routing_model"), self._turn_trace.get("model"), llm_calls)
+        )
         self._last_turn_telemetry = {
             "user_message": self._turn_trace.get("user_message"),
             "final_response": final_response,
             "selected_path": selected_path,
             "response_source": response_source,
-            "model": self._turn_trace.get("model"),
+            "configured_model_mode": configured_mode,
+            "configured_model_mode_source": configured_source,
+            "execution_path": execution_path,
+            "execution_provider": execution_provider,
+            "execution_model": execution_model,
+            "model": execution_model,
             "model_source": self._turn_trace.get("model_source"),
-            "provider": self._turn_trace.get("provider"),
-            "model_routing_mode": self._turn_trace.get("model_routing_mode"),
-            "model_routing_provider": self._turn_trace.get("model_routing_provider"),
-            "model_routing_model": self._turn_trace.get("model_routing_model"),
+            "provider": execution_provider,
+            "model_routing_mode": configured_mode,
+            "model_routing_provider": execution_provider,
+            "model_routing_model": execution_model,
             "model_routing_reason_code": self._turn_trace.get("model_routing_reason_code"),
             "model_routing_reason": self._turn_trace.get("model_routing_reason"),
             "model_routing_paid_call": self._turn_trace.get("model_routing_paid_call"),
@@ -1911,6 +1940,11 @@ class AssistantEngine:
         print("\n[TURN TRACE]")
         for key in (
             "user_message",
+            "configured_model_mode",
+            "configured_model_mode_source",
+            "execution_path",
+            "execution_provider",
+            "execution_model",
             "model",
             "model_source",
             "provider",
@@ -3581,17 +3615,77 @@ def _model_source(llm: object) -> str:
     return str(getattr(settings, "model_source", "") or "")
 
 
+def _model_mode_source(llm: object | None) -> str:
+    settings = getattr(llm, "settings", None)
+    return str(getattr(settings, "model_routing_mode_source", "") or "")
+
+
+def _configured_model_mode(llm: object | None) -> str:
+    settings = getattr(llm, "settings", None)
+    return str(getattr(settings, "model_routing_mode", "") or "local")
+
+
 def _provider_name(llm: object) -> str:
     provider = getattr(llm, "provider", None)
     return str(getattr(provider, "name", "") or "")
 
 
+def _execution_path_for_turn(selected_path: str, response_source: str, llm_calls: int) -> str:
+    if llm_calls > 0:
+        if response_source in {"AGENT_DIRECT", "AGENT"} or selected_path == "AGENT":
+            return "agent"
+        if response_source in {"RESPONSE_COMPOSER", "COMPOSER_REGENERATED"}:
+            return "response_composer"
+        return "llm"
+    path = str(selected_path or response_source or "").upper()
+    if path == "SOCIAL_PATH":
+        return "social_fast_path"
+    if path == "SYSTEM_DATETIME":
+        return "system_datetime"
+    if "MEMORY" in path:
+        return "memory_recall"
+    if path == "DOCUMENT_TASK":
+        return "document_task"
+    if "TOOL" in path or "FAST_ROUTE" in path:
+        return "local_tool"
+    if "ERROR" in path:
+        return "error"
+    return _local_reason_code_for_path(str(selected_path or response_source or ""))
+
+
+def _execution_provider_for_turn(selected_path: str, routed_provider: object, llm_calls: int) -> str:
+    if llm_calls > 0:
+        return str(routed_provider or "ollama")
+    path = str(selected_path or "").upper()
+    if "MEMORY" in path:
+        return "memory"
+    if path == "DOCUMENT_TASK" or "TOOL" in path or "FAST_ROUTE" in path:
+        return "tool"
+    if "ERROR" in path:
+        return "none"
+    return "local"
+
+
+def _execution_model_for_turn(routed_model: object, fallback_model: object, llm_calls: int) -> str:
+    if llm_calls <= 0:
+        return "NONE"
+    return str(routed_model or fallback_model or "")
+
+
 def _model_routing_telemetry(llm: object) -> dict[str, object]:
     settings = getattr(llm, "settings", None)
+    configured_mode = str(getattr(settings, "model_routing_mode", "") or "")
+    execution_provider = str(getattr(settings, "model_routing_provider", "") or "")
+    execution_model = str(getattr(settings, "model_routing_model", "") or "")
     return {
-        "model_routing_mode": str(getattr(settings, "model_routing_mode", "") or ""),
-        "model_routing_provider": str(getattr(settings, "model_routing_provider", "") or ""),
-        "model_routing_model": str(getattr(settings, "model_routing_model", "") or ""),
+        "configured_model_mode": configured_mode,
+        "configured_model_mode_source": str(getattr(settings, "model_routing_mode_source", "") or ""),
+        "execution_path": "llm",
+        "execution_provider": execution_provider,
+        "execution_model": execution_model,
+        "model_routing_mode": configured_mode,
+        "model_routing_provider": execution_provider,
+        "model_routing_model": execution_model,
         "model_routing_reason_code": str(getattr(settings, "model_routing_reason_code", "") or ""),
         "model_routing_reason": str(getattr(settings, "model_routing_reason", "") or ""),
         "model_routing_paid_call": bool(getattr(settings, "model_routing_paid_call", False)),
@@ -3605,11 +3699,20 @@ def _model_routing_telemetry(llm: object) -> dict[str, object]:
     }
 
 
-def _local_turn_model_telemetry(selected_path: str) -> dict[str, object]:
+def _local_turn_model_telemetry(selected_path: str, llm: object | None = None) -> dict[str, object]:
     reason_code = _local_reason_code_for_path(selected_path)
+    configured_mode = _configured_model_mode(llm)
+    configured_source = _model_mode_source(llm)
+    execution_provider = _execution_provider_for_turn(selected_path, "", 0)
+    execution_path = _execution_path_for_turn(selected_path, "", 0)
     return {
-        "model_routing_mode": "local",
-        "model_routing_provider": "local",
+        "configured_model_mode": configured_mode,
+        "configured_model_mode_source": configured_source,
+        "execution_path": execution_path,
+        "execution_provider": execution_provider,
+        "execution_model": "NONE",
+        "model_routing_mode": configured_mode,
+        "model_routing_provider": execution_provider,
         "model_routing_model": "NONE",
         "model_routing_reason_code": reason_code,
         "model_routing_reason": _local_reason_label(reason_code),

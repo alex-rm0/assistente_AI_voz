@@ -150,6 +150,13 @@ def test_cognitive_telemetry_panel_is_available_with_real_runtime_controls() -> 
     assert "@media (prefers-reduced-motion: reduce)" in css
 
     assert "function applyRealTelemetry" in ui
+    assert "configured_model_mode" in ui
+    assert "execution_path" in ui
+    assert "execution_provider" in ui
+    assert "execution_model" in ui
+    assert "data.configured_model_mode || data.mode" in ui
+    assert "data.execution_provider || data.provider" in ui
+    assert "data.execution_model || data.model" in ui
     assert "const telemetryMocks" in ui
     assert "function applyTelemetryMock" in ui
     assert "function setTelemetryPanel" in ui
@@ -191,6 +198,8 @@ def test_cognitive_telemetry_maps_reason_codes_to_human_labels() -> None:
         "Local response",
         "Memory recall",
         "Local tool",
+        "Social fast path",
+        "System datetime",
         "API key required",
         "Cloud routing disabled",
     )

@@ -53,6 +53,7 @@ REASON_LABELS = {
     "system_status": "System status",
     "fast_route": "Fast route",
     "local_deterministic": "Local deterministic response",
+    "document_task": "Document task",
     "complex_planning": "Complex planning",
     "complex_request": "Complex request",
     "document_synthesis": "Document synthesis",
@@ -156,12 +157,20 @@ class ModelRuntimeBridge:
             else "low_complexity"
         )
         provider = "ollama" if mode in {"local", "automatic"} else "anthropic"
+        model = self.anthropic_model if provider == "anthropic" else self.ollama_model
         return self._with_runtime_metadata(
             {
                 "mode": mode,
+                "configured_model_mode": mode,
+                "configured_model_mode_source": self.model_routing_mode_source,
+                "execution_path": "idle",
+                "execution_provider": provider,
+                "execution_model": "NONE",
                 "mode_locked": self.cli_locked,
                 "provider": provider,
-                "model": self.anthropic_model if provider == "anthropic" else self.ollama_model,
+                "model": "NONE",
+                "base_provider": provider,
+                "base_model": model,
                 "reason_code": reason_code,
                 "reason_label": human_reason_label(reason_code),
                 "paid_call": provider == "anthropic",
@@ -204,17 +213,26 @@ class ModelRuntimeBridge:
             or ""
         )
         llm_calls = int(telemetry.get("llm_calls") or 0)
-        provider = str(telemetry.get("model_routing_provider") or telemetry.get("provider") or "")
-        model = str(telemetry.get("model_routing_model") or telemetry.get("model") or "")
+        configured_mode = str(telemetry.get("configured_model_mode") or telemetry.get("model_routing_mode") or self._mode())
+        configured_source = str(telemetry.get("configured_model_mode_source") or telemetry.get("model_routing_mode_source") or self.model_routing_mode_source)
+        provider = str(telemetry.get("execution_provider") or telemetry.get("model_routing_provider") or telemetry.get("provider") or "")
+        model = str(telemetry.get("execution_model") or telemetry.get("model_routing_model") or telemetry.get("model") or "")
+        execution_path = str(telemetry.get("execution_path") or _execution_path_from_telemetry(telemetry, llm_calls))
         paid_call = bool(telemetry.get("model_routing_paid_call"))
         if llm_calls <= 0:
             reason_code = _reason_from_selected_path(str(telemetry.get("selected_path") or ""))
-            provider = _provider_for_local_path(str(telemetry.get("selected_path") or ""), provider)
+            provider = str(telemetry.get("execution_provider") or _provider_for_local_path(str(telemetry.get("selected_path") or ""), provider))
             model = "NONE"
+            execution_path = str(telemetry.get("execution_path") or _execution_path_from_telemetry(telemetry, llm_calls))
             paid_call = False
         return self._with_runtime_metadata(
             {
-                "mode": str(telemetry.get("model_routing_mode") or self._mode()),
+                "mode": configured_mode,
+                "configured_model_mode": configured_mode,
+                "configured_model_mode_source": configured_source,
+                "execution_path": execution_path,
+                "execution_provider": provider or "local",
+                "execution_model": model or "NONE",
                 "mode_locked": self.cli_locked,
                 "provider": provider or "ollama",
                 "model": model or self.ollama_model,
@@ -301,7 +319,7 @@ class ModelRuntimeBridge:
         if "modo" in text:
             return f"Estou em modo {payload['mode']}."
         if "modelo" in text:
-            return f"Estou a usar {payload['model']} através de {payload['provider']}."
+            return f"Estou a usar {payload.get('base_model') or payload['model']} através de {payload.get('base_provider') or payload['provider']}."
         return None
 
     def save_anthropic_key(self, value: str) -> dict[str, Any]:
@@ -425,6 +443,11 @@ class ModelRuntimeBridge:
         )
 
     def _with_runtime_metadata(self, payload: dict[str, Any], *, state: str) -> dict[str, Any]:
+        payload.setdefault("configured_model_mode", payload.get("mode") or self._mode())
+        payload.setdefault("configured_model_mode_source", self.model_routing_mode_source)
+        payload.setdefault("execution_path", "none")
+        payload.setdefault("execution_provider", payload.get("provider") or "none")
+        payload.setdefault("execution_model", payload.get("model") or "NONE")
         payload["model_routing_mode_source"] = self.model_routing_mode_source
         payload["automatic_claude_enabled_source"] = self.automatic_claude_enabled_source
         payload["api_key_configured"] = self._anthropic_key_configured()
@@ -546,6 +569,31 @@ def _reason_from_selected_path(selected_path: str) -> str:
     if "PROJECT" in path:
         return "project_memory_recall"
     return "low_complexity"
+
+
+def _execution_path_from_telemetry(telemetry: dict[str, Any], llm_calls: int) -> str:
+    if llm_calls > 0:
+        source = str(telemetry.get("response_source") or "").upper()
+        selected = str(telemetry.get("selected_path") or "").upper()
+        if "AGENT" in source or selected == "AGENT":
+            return "agent"
+        if "RESPONSE_COMPOSER" in source or "COMPOSER" in source:
+            return "response_composer"
+        return "llm"
+    selected = str(telemetry.get("selected_path") or "").upper()
+    if selected == "SOCIAL_PATH":
+        return "social_fast_path"
+    if selected == "SYSTEM_DATETIME":
+        return "system_datetime"
+    if "MEMORY" in selected:
+        return "memory_recall"
+    if selected == "DOCUMENT_TASK":
+        return "document_task"
+    if "TOOL" in selected or "FAST" in selected:
+        return "local_tool"
+    if "ERROR" in selected:
+        return "error"
+    return _reason_from_selected_path(selected)
 
 
 def _provider_for_local_path(selected_path: str, provider: str) -> str:

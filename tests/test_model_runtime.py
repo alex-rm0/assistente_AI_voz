@@ -63,7 +63,12 @@ def test_ui_reads_real_mode_and_local_changes_backend(tmp_path: Path) -> None:
 
     assert router.config.mode == "local"
     assert payload["mode"] == "local"
+    assert payload["configured_model_mode"] == "local"
+    assert payload["execution_path"] == "idle"
+    assert payload["execution_provider"] == "ollama"
+    assert payload["execution_model"] == "NONE"
     assert payload["provider"] == "ollama"
+    assert payload["model"] == "NONE"
     assert json.loads(store.path.read_text(encoding="utf-8"))["model_routing_mode"] == "local"
 
 
@@ -94,7 +99,12 @@ def test_claude_mode_changes_backend_when_allowed(tmp_path: Path) -> None:
 
     assert router.config.mode == "claude"
     assert payload["mode"] == "claude"
+    assert payload["configured_model_mode"] == "claude"
+    assert payload["execution_path"] == "idle"
+    assert payload["execution_provider"] == "anthropic"
+    assert payload["execution_model"] == "NONE"
     assert payload["provider"] == "anthropic"
+    assert payload["model"] == "NONE"
     assert payload["paid_call"] is True
     assert "sk-ant-test-value" not in json.dumps(payload)
 
@@ -166,6 +176,10 @@ def test_telemetry_payload_uses_real_tokens_cost_and_budget(tmp_path: Path) -> N
     )
 
     assert payload["provider"] == "anthropic"
+    assert payload["configured_model_mode"] == "automatic"
+    assert payload["execution_path"] == "llm"
+    assert payload["execution_provider"] == "anthropic"
+    assert payload["execution_model"] == "claude-haiku-4-5-20251001"
     assert payload["reason_label"] == "Structured summary"
     assert payload["latency_ms"] == 1200
     assert payload["input_tokens"] == 1000
@@ -180,6 +194,10 @@ def test_fast_path_and_memory_show_zero_tokens_and_cost(tmp_path: Path) -> None:
     payload = bridge.telemetry_payload({"selected_path": "MEMORY_RECALL", "llm_calls": 0})
 
     assert payload["provider"] == "memory"
+    assert payload["configured_model_mode"] == "local"
+    assert payload["execution_path"] == "memory_recall"
+    assert payload["execution_provider"] == "memory"
+    assert payload["execution_model"] == "NONE"
     assert payload["model"] == "NONE"
     assert payload["input_tokens"] is None
     assert payload["output_tokens"] is None
@@ -205,6 +223,7 @@ def test_social_fast_path_payload_does_not_inherit_previous_paid_call(tmp_path: 
         {
             "selected_path": "SOCIAL_PATH",
             "response_source": "SOCIAL_FAST_PATH",
+            "model_routing_mode": "automatic",
             "model_routing_provider": "anthropic",
             "model_routing_model": "claude-haiku-4-5-20251001",
             "model_routing_reason_code": "document_synthesis",
@@ -215,6 +234,10 @@ def test_social_fast_path_payload_does_not_inherit_previous_paid_call(tmp_path: 
     )
 
     assert payload["provider"] == "local"
+    assert payload["configured_model_mode"] == "automatic"
+    assert payload["execution_path"] == "social_fast_path"
+    assert payload["execution_provider"] == "local"
+    assert payload["execution_model"] == "NONE"
     assert payload["model"] == "NONE"
     assert payload["reason_code"] == "social_fast_path"
     assert payload["paid_call"] is False
