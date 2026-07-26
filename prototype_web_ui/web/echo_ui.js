@@ -114,20 +114,104 @@
     return document.getElementById(id);
   }
 
-  function scaleStage() {
+  let layoutFrame = 0;
+
+  function chooseLayoutDensity(width, height) {
+    if (width < 760 || height < 620) return "compact";
+    if (width >= 2200) return "ultrawide";
+    if (width >= 1500 && height >= 760) return "wide";
+    return "standard";
+  }
+
+  const RESPONSE_LAYOUT_CONFIG = {
+    inline: {
+      maxRenderedRatio: 0.18,
+      exitMaxRenderedRatio: 0.22,
+      maxCharacters: 220,
+      maxBlocks: 3
+    },
+    stacked: {
+      maxRenderedRatio: 0.38,
+      enterRenderedRatio: 0.20,
+      exitMaxRenderedRatio: 0.34,
+      maxCharacters: 760,
+      maxBlocks: 7
+    },
+    focus: {
+      enterRenderedRatio: 0.40,
+      exitRenderedRatio: 0.34,
+      forceCharacters: 1050,
+      forceListItems: 8,
+      forceBlocks: 9
+    }
+  };
+
+  let activeResponseLayout = "inline";
+  let responseLayoutFrame = 0;
+
+  function responseSizeForElement(element) {
+    if (!element || !String(element.textContent || "").trim()) return "none";
+    const wordCount = String(element.textContent || "").trim().split(/\s+/).filter(Boolean).length;
+    if (wordCount >= 120 || element.dataset.responseLayout === "focus") return "long";
+    if (wordCount >= 36) return "medium";
+    return "short";
+  }
+
+  function entityScaleForLayout(density, responseSize, height, responseLayout = "inline") {
+    if (height < 620 || density === "compact") return "compact";
+    if (responseLayout === "focus") return "compact";
+    if (responseLayout === "stacked" || responseSize === "long") return "reduced";
+    if (density === "ultrawide" && responseSize === "none") return "hero";
+    return "standard";
+  }
+
+  function cssPixelNumber(element, propertyName, fallback) {
+    if (!element) return fallback;
+    const value = Number.parseFloat(getComputedStyle(element).getPropertyValue(propertyName));
+    return Number.isFinite(value) && value > 0 ? value : fallback;
+  }
+
+  function updateAdaptiveLayout() {
     const scaler = byId("stageScaler");
     if (!scaler) {
       console.error("[Echo UI JS] #stageScaler nao encontrado");
       return;
     }
+    const stage = document.querySelector(".stage");
+    if (!stage) return;
+    const rect = stage.getBoundingClientRect();
+    const width = rect.width || window.innerWidth;
+    const height = rect.height || window.innerHeight;
+    const density = chooseLayoutDensity(width, height);
+    const responseSize = responseSizeForElement(byId("echoResponse"));
+    const responseLayout = stage.dataset.responseLayout || "inline";
+    const entityScale = entityScaleForLayout(density, responseSize, height, responseLayout);
 
-    const margin = 24;
-    const scale = Math.min(
-      (window.innerWidth - margin * 2) / 1300,
-      (window.innerHeight - margin * 2) / 812
-    );
-    const cleanScale = Math.max(0.32, scale);
-    scaler.style.transform = `translate(-50%, -50%) scale(${cleanScale})`;
+    stage.dataset.layoutDensity = density;
+    stage.dataset.responseSize = responseSize;
+    stage.dataset.responseLayout = responseLayout;
+    stage.dataset.entityScale = entityScale;
+    stage.style.setProperty("--stage-width", `${Math.round(width)}px`);
+    stage.style.setProperty("--stage-height", `${Math.round(height)}px`);
+    scaler.style.transform = "none";
+    if (window.echoEntity && typeof window.echoEntity.resize === "function") {
+      window.echoEntity.resize();
+    }
+  }
+
+  function scheduleAdaptiveLayout() {
+    window.cancelAnimationFrame(layoutFrame);
+    layoutFrame = window.requestAnimationFrame(() => {
+      updateAdaptiveLayout();
+      if (window.echoFreeWorkspace) {
+        window.echoFreeWorkspace.clampAfterResize({persist: false, restoreResponseLayout: true});
+      } else {
+        const response = byId("echoResponse");
+        if (response && response.classList.contains("visible")) {
+          applyResponseLayout(response, response.dataset.rawText || response.textContent || "", {measureAgain: false});
+        }
+      }
+    });
   }
 
   function setInputEnabled(enabled) {
@@ -494,6 +578,175 @@
     }
   }
 
+  function appendInlineMarkdown(parent, text) {
+    const source = String(text || "");
+    const tokenPattern = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*\n]+\*)/g;
+    let lastIndex = 0;
+    let match = null;
+
+    while ((match = tokenPattern.exec(source)) !== null) {
+      if (match.index > lastIndex) {
+        parent.append(document.createTextNode(source.slice(lastIndex, match.index)));
+      }
+
+      const token = match[0];
+      if (token.startsWith("`") && token.endsWith("`")) {
+        const code = document.createElement("code");
+        code.textContent = token.slice(1, -1);
+        parent.append(code);
+      } else if (token.startsWith("**") && token.endsWith("**")) {
+        const strong = document.createElement("strong");
+        strong.textContent = token.slice(2, -2);
+        parent.append(strong);
+      } else if (token.startsWith("*") && token.endsWith("*")) {
+        const emphasis = document.createElement("em");
+        emphasis.textContent = token.slice(1, -1);
+        parent.append(emphasis);
+      }
+      lastIndex = tokenPattern.lastIndex;
+    }
+
+    if (lastIndex < source.length) {
+      parent.append(document.createTextNode(source.slice(lastIndex)));
+    }
+  }
+
+  function renderSafeMarkdown(container, text) {
+    const source = String(text || "");
+    const lines = source.split(/\r?\n/);
+    let paragraphLines = [];
+    let list = null;
+
+    container.textContent = "";
+    container.dataset.rawText = source;
+
+    function flushParagraph() {
+      if (!paragraphLines.length) return;
+      const paragraph = document.createElement("p");
+      paragraphLines.forEach((line, index) => {
+        if (index > 0) paragraph.append(document.createElement("br"));
+        appendInlineMarkdown(paragraph, line);
+      });
+      container.append(paragraph);
+      paragraphLines = [];
+    }
+
+    function closeList() {
+      if (!list) return;
+      container.append(list);
+      list = null;
+    }
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      const bullet = trimmed.match(/^[-*]\s+(.+)$/);
+      if (!trimmed) {
+        flushParagraph();
+        closeList();
+        continue;
+      }
+      if (bullet) {
+        flushParagraph();
+        if (!list) list = document.createElement("ul");
+        const item = document.createElement("li");
+        appendInlineMarkdown(item, bullet[1]);
+        list.append(item);
+        continue;
+      }
+      closeList();
+      paragraphLines.push(line);
+    }
+
+    flushParagraph();
+    closeList();
+  }
+
+  function classifyResponseContent(text) {
+    const source = String(text || "");
+    const lines = source.split(/\r?\n/);
+    const codeBlockCount = (source.match(/```/g) || []).length >= 2 ? Math.floor((source.match(/```/g) || []).length / 2) : 0;
+    const tableLineCount = lines.filter((line) => /^\s*\|.+\|\s*$/.test(line)).length;
+    const listItemCount = lines.filter((line) => /^\s*[-*]\s+/.test(line)).length;
+    const emailSignals = [
+      /\bassunto\s*:/i,
+      /\bol[áa]\s+[\wÀ-ÿ]/i,
+      /\bcumprimentos\b/i,
+      /\bsegue em anexo\b/i
+    ].filter((pattern) => pattern.test(source)).length;
+
+    if (codeBlockCount > 0) return "code";
+    if (tableLineCount >= 2) return "table";
+    if (emailSignals >= 2) return "email";
+    if (listItemCount >= 3) return "list";
+    if (source.length > 700 || lines.length >= 8) return "document";
+    return listItemCount || tableLineCount ? "mixed" : "plain_text";
+  }
+
+  function collectResponseMetrics(element, text) {
+    const stage = document.querySelector(".stage");
+    const source = String(text || "");
+    const lines = source.split(/\r?\n/);
+    const stageRect = stage ? stage.getBoundingClientRect() : {width: STAGE_WIDTH, height: STAGE_HEIGHT};
+    const responseRect = element ? element.getBoundingClientRect() : {height: 0, width: 0};
+    const composer = byId("echoForm");
+    const composerRect = composer ? composer.getBoundingClientRect() : {height: 0};
+    const safeGap = cssPixelNumber(stage, "--safe-gap", 24);
+    const headerHeight = cssPixelNumber(stage, "--header-height", HEADER_SAFE_HEIGHT);
+    const renderedHeight = Math.max(element ? element.scrollHeight : 0, responseRect.height || 0);
+    const availableStageHeight = Math.max(1, stageRect.height - headerHeight - composerRect.height - safeGap * 3);
+    const paragraphCount = source.split(/\n\s*\n/).filter((block) => block.trim()).length || (source.trim() ? 1 : 0);
+    const listItemCount = lines.filter((line) => /^\s*[-*]\s+/.test(line)).length;
+    const codeBlockCount = (source.match(/```/g) || []).length >= 2 ? Math.floor((source.match(/```/g) || []).length / 2) : 0;
+    const tableLineCount = lines.filter((line) => /^\s*\|.+\|\s*$/.test(line)).length;
+    const blockCount = Math.max(paragraphCount, listItemCount + paragraphCount, lines.filter((line) => line.trim()).length);
+
+    return {
+      characterCount: source.length,
+      blockCount,
+      paragraphCount,
+      listItemCount,
+      codeBlockCount,
+      tableLineCount,
+      renderedHeight,
+      availableStageHeight,
+      availableStageWidth: stageRect.width || STAGE_WIDTH,
+      renderedRatio: renderedHeight / availableStageHeight,
+      contentType: classifyResponseContent(source)
+    };
+  }
+
+  function determineResponseLayout(metrics, previousLayout = activeResponseLayout) {
+    const inline = RESPONSE_LAYOUT_CONFIG.inline;
+    const stacked = RESPONSE_LAYOUT_CONFIG.stacked;
+    const focus = RESPONSE_LAYOUT_CONFIG.focus;
+    const type = metrics.contentType;
+    const forcedFocus = (
+      metrics.characterCount >= focus.forceCharacters ||
+      metrics.listItemCount >= focus.forceListItems ||
+      metrics.blockCount >= focus.forceBlocks ||
+      metrics.codeBlockCount > 0 ||
+      metrics.tableLineCount >= 2 ||
+      ["email", "document", "code", "table"].includes(type)
+    );
+
+    if (forcedFocus) return "focus";
+    if (previousLayout === "focus" && metrics.renderedRatio > focus.exitRenderedRatio) return "focus";
+    if (metrics.renderedRatio >= focus.enterRenderedRatio) return "focus";
+
+    if (previousLayout === "stacked" && metrics.renderedRatio > inline.exitMaxRenderedRatio) return "stacked";
+    if (
+      metrics.renderedRatio > inline.maxRenderedRatio ||
+      metrics.characterCount > inline.maxCharacters ||
+      metrics.blockCount > inline.maxBlocks
+    ) {
+      return metrics.renderedRatio <= stacked.maxRenderedRatio &&
+        metrics.characterCount <= stacked.maxCharacters &&
+        metrics.blockCount <= stacked.maxBlocks ? "stacked" : "focus";
+    }
+
+    return "inline";
+  }
+
   const WORKSPACE_STORAGE_KEY = "echo_os.free_workspace.v1";
   const STAGE_WIDTH = 1300;
   const STAGE_HEIGHT = 812;
@@ -528,6 +781,139 @@
     return {id, type, x, y, width, height, snapZone, locked, zIndex};
   }
 
+  function stageSize(stage) {
+    const rect = stage ? stage.getBoundingClientRect() : null;
+    return {
+      width: Math.max(320, rect && rect.width ? rect.width : STAGE_WIDTH),
+      height: Math.max(360, rect && rect.height ? rect.height : STAGE_HEIGHT)
+    };
+  }
+
+  function workspaceDefaults(stage) {
+    const size = stageSize(stage);
+    const entityDiameter = cssPixelNumber(stage, "--entity-size-actual", ECHO_ITEM_SIZE.width);
+    const entityRadius = Math.max(70, Math.min(220, entityDiameter / 2));
+    const safeGap = cssPixelNumber(stage, "--safe-gap", 24);
+    const headerHeight = cssPixelNumber(stage, "--header-height", HEADER_SAFE_HEIGHT);
+    const panelWidth = cssPixelNumber(stage, "--telemetry-panel-width", PANEL_ITEM_SIZE.width);
+    const centerX = size.width / 2;
+    const topCenterY = headerHeight + entityRadius + safeGap;
+    const topRightX = Math.max(size.width - entityRadius - safeGap * 1.4, centerX + entityRadius);
+    const centerY = Math.max(headerHeight + entityRadius + safeGap, (size.height - 82) * 0.48);
+    return {
+      echo: {
+        center: {x: centerX, y: centerY},
+        "top-center": {x: centerX, y: topCenterY},
+        "top-right": {x: Math.min(size.width - entityRadius - safeGap, topRightX), y: topCenterY},
+        "upper-left": {x: Math.max(190, size.width * 0.28), y: topCenterY + 22},
+        "upper-right": {x: Math.min(size.width - 190, size.width * 0.72), y: topCenterY + 22},
+        "center-left": {x: Math.max(190, size.width * 0.28), y: centerY + 18},
+        "center-right": {x: Math.min(size.width - 190, size.width * 0.72), y: centerY + 18}
+      },
+      telemetryPanel: {
+        "upper-left": {x: 56, y: headerHeight + 30},
+        "upper-right": {x: Math.max(12, size.width - panelWidth - 56), y: headerHeight + 30},
+        "center-left": {x: 56, y: headerHeight + 174},
+        "center-right": {x: Math.max(12, size.width - panelWidth - 56), y: headerHeight + 174}
+      }
+    };
+  }
+
+  function localRectFromElement(stage, element) {
+    if (!stage || !element) return null;
+    const stageRect = stage.getBoundingClientRect();
+    const rect = element.getBoundingClientRect();
+    if (!rect.width && !rect.height) return null;
+    return {
+      left: rect.left - stageRect.left,
+      top: rect.top - stageRect.top,
+      right: rect.right - stageRect.left,
+      bottom: rect.bottom - stageRect.top,
+      width: rect.width,
+      height: rect.height
+    };
+  }
+
+  function boxesIntersect(a, b) {
+    if (!a || !b) return false;
+    return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+  }
+
+  function echoRectForPoint(point, radius) {
+    return {
+      left: point.x - radius,
+      top: point.y - radius,
+      right: point.x + radius,
+      bottom: point.y + radius,
+      width: radius * 2,
+      height: radius * 2
+    };
+  }
+
+  function responseAnchorForLayout(stage, layout) {
+    const zones = workspaceDefaults(stage);
+    if (layout === "focus") return "top-right";
+    if (layout === "stacked") return "top-center";
+    return "center";
+  }
+
+  function resolveSafeEchoAnchor(stage, requestedAnchor) {
+    const zones = workspaceDefaults(stage);
+    const point = zones.echo[requestedAnchor] || zones.echo.center;
+    if (requestedAnchor !== "top-right" || !telemetryPanelOpen) return {anchor: requestedAnchor, point};
+
+    const entityDiameter = cssPixelNumber(stage, "--entity-size-actual", ECHO_ITEM_SIZE.width);
+    const entityRadius = Math.max(70, Math.min(220, entityDiameter / 2));
+    const echoRect = echoRectForPoint(point, entityRadius);
+    const panelRect = localRectFromElement(stage, byId("telemetryPanel"));
+    if (!boxesIntersect(echoRect, panelRect)) return {anchor: requestedAnchor, point};
+    return {anchor: "top-center", point: zones.echo["top-center"]};
+  }
+
+  function updateResponseLayoutBounds(stage, layout) {
+    if (!stage) return;
+    const size = stageSize(stage);
+    const anchor = responseAnchorForLayout(stage, layout);
+    let anchorResult = resolveSafeEchoAnchor(stage, anchor);
+    const entityDiameter = cssPixelNumber(stage, "--entity-size-actual", ECHO_ITEM_SIZE.width);
+    const entityRadius = Math.max(70, Math.min(220, entityDiameter / 2));
+    const safeGap = cssPixelNumber(stage, "--safe-gap", 24);
+    const headerHeight = cssPixelNumber(stage, "--header-height", HEADER_SAFE_HEIGHT);
+    const inputHeight = cssPixelNumber(stage, "--input-height", 72);
+    const minFocusResponseWidth = 540;
+    const maxFocusResponseWidth = Math.min(980, Math.max(360, size.width - safeGap * 4));
+    let focusResponseLeft = Math.max(safeGap * 2, 36);
+    let focusResponseWidth = maxFocusResponseWidth;
+
+    if (layout === "focus" && anchorResult.anchor === "top-right") {
+      const echoRect = echoRectForPoint(anchorResult.point, entityRadius);
+      const reservedRightEdge = echoRect.left - safeGap;
+      const availableLeft = Math.max(safeGap * 2, 36);
+      const availableWidth = reservedRightEdge - availableLeft;
+      if (availableWidth < minFocusResponseWidth) {
+        const zones = workspaceDefaults(stage);
+        anchorResult = {anchor: "top-center", point: zones.echo["top-center"]};
+      } else {
+        focusResponseWidth = Math.min(maxFocusResponseWidth, availableWidth);
+        focusResponseLeft = availableLeft + Math.max(0, (availableWidth - focusResponseWidth) / 2);
+      }
+    }
+
+    const focusTop = headerHeight + safeGap * 1.7;
+    const stackedTop = anchorResult.point.y + entityRadius + Math.max(14, safeGap * 0.7);
+    const inlineBottom = inputHeight + safeGap + 34;
+    const top = layout === "focus" && anchorResult.anchor === "top-right" ? focusTop : stackedTop;
+    const bottomReserve = layout === "focus" ? inputHeight + safeGap * 3.1 : inputHeight + safeGap * 3.4;
+    const maxHeight = Math.max(120, size.height - top - bottomReserve);
+
+    stage.dataset.entityAnchor = anchorResult.anchor;
+    stage.style.setProperty("--response-top", `${Math.round(top)}px`);
+    stage.style.setProperty("--response-bottom", `${Math.round(inlineBottom)}px`);
+    stage.style.setProperty("--response-max-height-current", `${Math.round(maxHeight)}px`);
+    stage.style.setProperty("--focus-response-left", `${Math.round(focusResponseLeft)}px`);
+    stage.style.setProperty("--focus-response-width", `${Math.round(focusResponseWidth)}px`);
+  }
+
   function createFreeWorkspaceController() {
     const stage = document.querySelector(".stage");
     const mind = byId("mind");
@@ -536,6 +922,7 @@
     const recenterButton = byId("recenterEcho");
     const resetButton = byId("resetWorkspace");
     const lockButton = byId("toggleWorkspaceLock");
+    const initialZones = workspaceDefaults(stage);
 
     const defaults = {
       locked: false,
@@ -545,8 +932,8 @@
         echo: createWorkspaceItem({
           id: "echo",
           type: "echo",
-          x: SNAP_ZONES.echo.center.x,
-          y: SNAP_ZONES.echo.center.y,
+          x: initialZones.echo.center.x,
+          y: initialZones.echo.center.y,
           width: ECHO_ITEM_SIZE.width,
           height: ECHO_ITEM_SIZE.height,
           snapZone: "center",
@@ -555,8 +942,8 @@
         telemetryPanel: createWorkspaceItem({
           id: "telemetryPanel",
           type: "panel",
-          x: SNAP_ZONES.telemetryPanel["upper-left"].x,
-          y: SNAP_ZONES.telemetryPanel["upper-left"].y,
+          x: initialZones.telemetryPanel["upper-left"].x,
+          y: initialZones.telemetryPanel["upper-left"].y,
           width: PANEL_ITEM_SIZE.width,
           height: PANEL_ITEM_SIZE.height,
           snapZone: "upper-left",
@@ -568,6 +955,19 @@
     let state = loadWorkspaceState();
     let activeDrag = null;
     let resizeFrame = 0;
+
+    function currentSnapZones() {
+      return workspaceDefaults(stage);
+    }
+
+    function resizeWorkspaceItems() {
+      const zones = currentSnapZones();
+      for (const item of Object.values(state.items)) {
+        if (!item || !item.snapZone || !zones[item.id] || !zones[item.id][item.snapZone]) continue;
+        item.x = zones[item.id][item.snapZone].x;
+        item.y = zones[item.id][item.snapZone].y;
+      }
+    }
 
     function cloneItem(item) {
       return {...item};
@@ -629,10 +1029,9 @@
     function stagePointFromEvent(event) {
       if (!stage) return {x: 0, y: 0};
       const rect = stage.getBoundingClientRect();
-      const scale = rect.width ? STAGE_WIDTH / rect.width : 1;
       return {
-        x: (event.clientX - rect.left) * scale,
-        y: (event.clientY - rect.top) * scale
+        x: event.clientX - rect.left,
+        y: event.clientY - rect.top
       };
     }
 
@@ -666,12 +1065,21 @@
       if (!stage || !form) return {left: 350, top: 708, right: 950, bottom: 790};
       const stageRect = stage.getBoundingClientRect();
       const formRect = form.getBoundingClientRect();
-      const scale = stageRect.width ? STAGE_WIDTH / stageRect.width : 1;
       return {
-        left: (formRect.left - stageRect.left) * scale - 16,
-        top: (formRect.top - stageRect.top) * scale - 14,
-        right: (formRect.right - stageRect.left) * scale + 16,
-        bottom: (formRect.bottom - stageRect.top) * scale + 14
+        left: (formRect.left - stageRect.left) - 16,
+        top: (formRect.top - stageRect.top) - 14,
+        right: (formRect.right - stageRect.left) + 16,
+        bottom: (formRect.bottom - stageRect.top) + 14
+      };
+    }
+
+    function safeAreaRect() {
+      const size = stageSize(stage);
+      return {
+        left: 12,
+        top: HEADER_SAFE_HEIGHT + 12,
+        right: size.width - 12,
+        bottom: size.height - 12
       };
     }
 
@@ -681,26 +1089,28 @@
 
     function clampItemToStage(item) {
       const inputRect = inputSafeRect();
+      const safeRect = safeAreaRect();
       if (item.type === "echo") {
-        item.x = clampNumber(item.x, item.width / 2, STAGE_WIDTH - item.width / 2);
-        item.y = clampNumber(item.y, HEADER_SAFE_HEIGHT + item.height / 2, STAGE_HEIGHT - item.height / 2);
+        item.x = clampNumber(item.x, safeRect.left + item.width / 2, safeRect.right - item.width / 2);
+        item.y = clampNumber(item.y, safeRect.top + item.height / 2, safeRect.bottom - item.height / 2);
         if (rectsIntersect(itemRect(item), inputRect)) {
           item.y = Math.min(item.y, inputRect.top - item.height / 2 - 14);
-          item.y = clampNumber(item.y, HEADER_SAFE_HEIGHT + item.height / 2, STAGE_HEIGHT - item.height / 2);
+          item.y = clampNumber(item.y, safeRect.top + item.height / 2, safeRect.bottom - item.height / 2);
         }
       } else {
-        item.x = clampNumber(item.x, 12, STAGE_WIDTH - item.width - 12);
-        item.y = clampNumber(item.y, HEADER_SAFE_HEIGHT + 12, STAGE_HEIGHT - item.height - 12);
+        item.width = cssPixelNumber(stage, "--telemetry-panel-width", PANEL_ITEM_SIZE.width);
+        item.x = clampNumber(item.x, safeRect.left, safeRect.right - item.width);
+        item.y = clampNumber(item.y, safeRect.top, safeRect.bottom - item.height);
         if (rectsIntersect(itemRect(item), inputRect)) {
           item.y = Math.min(item.y, inputRect.top - item.height - 12);
-          item.y = clampNumber(item.y, HEADER_SAFE_HEIGHT + 12, STAGE_HEIGHT - item.height - 12);
+          item.y = clampNumber(item.y, safeRect.top, safeRect.bottom - item.height);
         }
       }
       return item;
     }
 
     function findNearestSnapZone(item) {
-      const zones = SNAP_ZONES[item.id] || {};
+      const zones = currentSnapZones()[item.id] || {};
       let nearest = null;
       let nearestDistance = Number.POSITIVE_INFINITY;
       for (const [name, point] of Object.entries(zones)) {
@@ -721,7 +1131,7 @@
         item.snapZone = null;
         return;
       }
-      const point = SNAP_ZONES[item.id][zoneName];
+      const point = currentSnapZones()[item.id][zoneName];
       item.x = point.x;
       item.y = point.y;
       item.snapZone = zoneName;
@@ -834,7 +1244,8 @@
 
     function moveItemToSnap(itemId, zoneName) {
       const item = state.items[itemId];
-      const point = SNAP_ZONES[itemId] && SNAP_ZONES[itemId][zoneName];
+      const zones = currentSnapZones();
+      const point = zones[itemId] && zones[itemId][zoneName];
       if (!item || !point) return;
       item.x = point.x;
       item.y = point.y;
@@ -879,11 +1290,18 @@
       saveWorkspaceState();
     }
 
-    function clampAfterResize() {
+    function clampAfterResize(options = {}) {
       window.cancelAnimationFrame(resizeFrame);
       resizeFrame = window.requestAnimationFrame(() => {
+        resizeWorkspaceItems();
         applyAllWorkspaceItems(false);
-        saveWorkspaceState();
+        if (options.restoreResponseLayout) {
+          const response = byId("echoResponse");
+          if (response && response.classList.contains("visible")) {
+            applyResponseLayout(response, response.dataset.rawText || response.textContent || "", {measureAgain: false});
+          }
+        }
+        if (options.persist) saveWorkspaceState();
       });
     }
 
@@ -989,14 +1407,14 @@
     }
 
     replyFadeToken += 1;
-    element.textContent = value;
+    renderSafeMarkdown(element, value);
     element.hidden = false;
     element.style.display = "block";
     element.style.visibility = "visible";
     element.style.opacity = "1";
     element.classList.remove("muted");
     element.classList.add("visible");
-    updateResponseReadingMode(element, value);
+    updateResponseLayout(element, value);
 
     const responseTitle = byId("responseTitle");
     const bridgeReply = byId("bridgeReply");
@@ -1024,32 +1442,67 @@
     });
   }
 
-  function isLongEchoResponse(element, text) {
-    const lineCount = String(text || "").split(/\r?\n/).length;
-    const wordCount = String(text || "").trim().split(/\s+/).filter(Boolean).length;
-    if (lineCount >= 8 || wordCount >= 120) return true;
-    return element.scrollHeight > 230;
-  }
-
-  function updateResponseReadingMode(element, text) {
+  function applyResponseLayout(element, text, options = {}) {
     const stage = document.querySelector(".stage");
-    const reading = isLongEchoResponse(element, text);
-    if (stage) stage.dataset.responseMode = reading ? "reading" : "short";
+    if (!stage || !element) return;
+
+    const metrics = collectResponseMetrics(element, text);
+    const layout = determineResponseLayout(metrics, activeResponseLayout);
+    activeResponseLayout = layout;
+    const reading = layout !== "inline";
+    const anchor = responseAnchorForLayout(stage, layout);
+
+    stage.dataset.responseLayout = layout;
+    stage.dataset.responseMode = reading ? "reading" : "short";
+    stage.dataset.entityAnchor = anchor;
+    element.dataset.responseLayout = layout;
     element.dataset.responseMode = reading ? "reading" : "short";
+    element.dataset.contentType = metrics.contentType;
     element.tabIndex = reading ? 0 : -1;
+
+    updateAdaptiveLayout();
+    updateResponseLayoutBounds(stage, layout);
+
     if (reading) {
       element.setAttribute("role", "region");
       element.setAttribute("aria-label", "Resposta longa do Echo");
+      if (layout === "focus") element.setAttribute("aria-label", "Área de leitura do Echo");
       if (window.echoEntity && typeof window.echoEntity.setCenter === "function") {
-        window.echoEntity.setCenter(650, 120, false);
+        const finalAnchor = stage.dataset.entityAnchor || responseAnchorForLayout(stage, layout);
+        const anchorResult = resolveSafeEchoAnchor(stage, finalAnchor);
+        stage.dataset.entityAnchor = anchorResult.anchor;
+        window.echoEntity.setCenter(anchorResult.point.x, anchorResult.point.y, false);
       }
     } else {
       element.removeAttribute("role");
       element.removeAttribute("aria-label");
+      stage.style.removeProperty("--response-top");
+      stage.style.removeProperty("--response-bottom");
+      stage.style.removeProperty("--response-max-height-current");
+      stage.style.removeProperty("--focus-response-left");
+      stage.style.removeProperty("--focus-response-width");
       if (window.echoFreeWorkspace && typeof window.echoFreeWorkspace.restoreEchoPosition === "function") {
         window.echoFreeWorkspace.restoreEchoPosition();
       }
     }
+
+    if (options.measureAgain) {
+      window.cancelAnimationFrame(responseLayoutFrame);
+      responseLayoutFrame = window.requestAnimationFrame(() => {
+        const nextMetrics = collectResponseMetrics(element, text);
+        const nextLayout = determineResponseLayout(nextMetrics, activeResponseLayout);
+        if (nextLayout !== activeResponseLayout) {
+          applyResponseLayout(element, text, {measureAgain: false});
+          return;
+        }
+        updateAdaptiveLayout();
+        updateResponseLayoutBounds(stage, activeResponseLayout);
+      });
+    }
+  }
+
+  function updateResponseLayout(element, text) {
+    applyResponseLayout(element, text, {measureAgain: true});
   }
 
   function renderEchoError(message) {
@@ -1372,6 +1825,8 @@
         if (echoResponse) {
           echoResponse.textContent = "";
           echoResponse.dataset.responseMode = "short";
+          echoResponse.dataset.responseLayout = "inline";
+          echoResponse.dataset.contentType = "plain_text";
           echoResponse.tabIndex = -1;
           echoResponse.hidden = false;
           echoResponse.style.display = "";
@@ -1380,7 +1835,17 @@
           echoResponse.classList.remove("visible", "muted");
         }
         const stage = document.querySelector(".stage");
-        if (stage) stage.dataset.responseMode = "short";
+        activeResponseLayout = "inline";
+        if (stage) {
+          stage.dataset.responseMode = "short";
+          stage.dataset.responseLayout = "inline";
+          stage.dataset.entityAnchor = "center";
+          stage.style.removeProperty("--response-top");
+          stage.style.removeProperty("--response-bottom");
+          stage.style.removeProperty("--response-max-height-current");
+          stage.style.removeProperty("--focus-response-left");
+          stage.style.removeProperty("--focus-response-width");
+        }
         if (window.echoFreeWorkspace && typeof window.echoFreeWorkspace.restoreEchoPosition === "function") {
           window.echoFreeWorkspace.restoreEchoPosition();
         }
@@ -1527,7 +1992,7 @@
     window.echoWorkspace = createWorkspaceController();
     window.echoFreeWorkspace = createFreeWorkspaceController();
     window.echoTelemetryDemo = applyTelemetryMock;
-    scaleStage();
+    updateAdaptiveLayout();
     window.echoFreeWorkspace.initialize();
     startClock();
     applyEchoState("active");
@@ -1536,8 +2001,7 @@
     setInputEnabled(false);
     bindDomEvents();
     window.addEventListener("resize", () => {
-      scaleStage();
-      if (window.echoFreeWorkspace) window.echoFreeWorkspace.clampAfterResize();
+      scheduleAdaptiveLayout();
     });
     initializeEchoChannel();
   });

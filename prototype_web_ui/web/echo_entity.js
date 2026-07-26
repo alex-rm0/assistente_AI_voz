@@ -34,12 +34,21 @@
       this.canvas.width = Math.round(this.w * this.dpr);
       this.canvas.height = Math.round(this.h * this.dpr);
       this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      this.R = this.responsiveRadius();
       if (!this.cxTarget) {
         this.cxTarget = this.w * 0.5;
         this.cyTarget = this.h * 0.5;
         this.cx = this.cxTarget;
         this.cy = this.cyTarget;
       }
+    }
+
+    responsiveRadius() {
+      const stage = this.canvas.closest(".stage");
+      const raw = stage ? getComputedStyle(stage).getPropertyValue("--entity-size-actual") : "";
+      const size = Number.parseFloat(raw);
+      if (!Number.isFinite(size) || size <= 0) return 160;
+      return Math.max(70, Math.min(220, size / 2));
     }
 
     buildMind() {

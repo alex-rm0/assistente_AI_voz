@@ -12,14 +12,16 @@
 <body>
   <main class="prototype-shell">
     <div id="stageScaler" class="stage-scaler">
-      <section class="stage" aria-label="Echo prototype" data-telemetry-panel="closed">
-        <svg class="ticks" viewBox="0 0 1300 812" aria-hidden="true">
-          <path d="M28 44 h20 M28 44 v20"></path>
-          <path d="M1272 44 h-20 M1272 44 v20"></path>
-          <path d="M28 768 h20 M28 768 v-20"></path>
-          <path d="M1272 768 h-20 M1272 768 v-20"></path>
-        </svg>
-
+      <section
+        class="stage"
+        aria-label="Echo prototype"
+        data-telemetry-panel="closed"
+        data-layout-density="standard"
+        data-entity-scale="standard"
+        data-entity-anchor="center"
+        data-response-size="none"
+        data-response-layout="inline"
+      >
         <header class="topbar">
           <div class="topbar-left">
             <span class="wordmark">ECHO</span>
@@ -30,6 +32,14 @@
           <span id="appVersion" class="topbar-version">ECHO OS · v0.4.0</span>
         </header>
 
+        <div class="adaptive-layout-grid" aria-hidden="true">
+          <div class="layout-region layout-region--left"></div>
+          <div class="layout-region layout-region--stage"></div>
+          <div class="layout-region layout-region--right"></div>
+          <div class="layout-region layout-region--response"></div>
+          <div class="layout-region layout-region--composer"></div>
+        </div>
+
         <div class="echo-main">
           <canvas
             id="mind"
@@ -38,7 +48,7 @@
           ></canvas>
 
           <p id="echoSays" class="echo-says" aria-live="polite"></p>
-          <div id="echoResponse" class="echo-response" aria-live="polite"></div>
+          <div id="echoResponse" class="echo-response" aria-live="polite" data-response-layout="inline"></div>
 
           <button
             id="telemetryCompact"

@@ -77,14 +77,245 @@ def test_web_ui_app_entrypoints_are_available() -> None:
     assert "EchoOSWindow" in window
 
 
-def test_web_ui_scaling_allows_upscaling() -> None:
+def test_web_ui_uses_adaptive_layout_instead_of_global_scaling() -> None:
+    css = (WEB / "styles.css").read_text(encoding="utf-8")
+    ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+
+    assert "stage-scaler" in css
+    assert "--shell-inline-margin" in css
+    assert "--shell-block-margin" in css
+    assert "--content-max-width" in css
+    assert "--reading-max-width" in css
+    assert "--entity-size" in css
+    assert "--safe-gap" in css
+    assert "transform: none;" in css
+    assert "scale(" not in ui[ui.index("function updateAdaptiveLayout"):ui.index("function setInputEnabled")]
+    assert 'data-layout-density="standard"' in html
+    assert "function updateAdaptiveLayout()" in ui
+    assert "window.requestAnimationFrame" in ui
+
+
+def test_web_ui_has_structural_adaptive_regions_for_future_modules() -> None:
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    css = (WEB / "styles.css").read_text(encoding="utf-8")
+
+    for region in (
+        'class="layout-region layout-region--left"',
+        'class="layout-region layout-region--stage"',
+        'class="layout-region layout-region--right"',
+        'class="layout-region layout-region--response"',
+        'class="layout-region layout-region--composer"',
+    ):
+        assert region in html
+
+    assert ".adaptive-layout-grid" in css
+    assert "grid-template-areas:" in css
+    assert '"left stage right"' in css
+    assert '"left response right"' in css
+    assert '"left composer right"' in css
+    assert ".layout-region--left:empty" in css
+    assert ".layout-region--right:empty" in css
+
+
+def test_web_ui_removes_nonfunctional_decorative_corner_ticks() -> None:
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    css = (WEB / "styles.css").read_text(encoding="utf-8")
+
+    assert 'class="ticks"' not in html
+    assert "<path d=\"M28 44 h20 M28 44 v20\"" not in html
+    assert ".ticks" not in css
+    assert ".stage {" in css
+    assert "border: 1px solid var(--hairline);" in css
+
+
+def test_web_ui_declares_experience_breakpoints_and_density_attributes() -> None:
+    css = (WEB / "styles.css").read_text(encoding="utf-8")
+    ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
+    entity = (WEB / "echo_entity.js").read_text(encoding="utf-8")
+
+    for density in ("compact", "standard", "wide", "ultrawide"):
+        assert f'return "{density}"' in ui or f'=== "{density}"' in ui
+        assert f'.stage[data-layout-density="{density}"]' in css
+
+    assert "chooseLayoutDensity" in ui
+    assert "dataset.entityScale" in ui
+    assert "dataset.responseSize" in ui
+    assert "--entity-size-actual" in css
+    assert 'typeof window.echoEntity.resize === "function"' in ui
+    assert "window.echoEntity.resize();" in ui
+    assert "responsiveRadius()" in entity
+    assert 'getPropertyValue("--entity-size-actual")' in entity
+
+
+def test_web_ui_response_and_composer_expand_safely_on_large_viewports() -> None:
+    css = (WEB / "styles.css").read_text(encoding="utf-8")
+
+    assert "width: min(var(--reading-max-width), calc(100% - var(--safe-gap) * 2));" in css
+    assert "max-height: var(--response-max-height);" in css
+    assert ".stage[data-layout-density=\"wide\"]" in css
+    assert "--reading-max-width: min(1120px, 72vw);" in css
+    assert ".stage[data-layout-density=\"ultrawide\"]" in css
+    assert "--content-max-width: min(1880px, calc(100vw - var(--shell-inline-margin) * 2));" in css
+    assert "#voiceIn" in css
+    assert "width: clamp(260px, 42vw, 780px);" in css
+
+
+def test_web_ui_telemetry_is_slightly_larger_only_on_wide_layouts() -> None:
     css = (WEB / "styles.css").read_text(encoding="utf-8")
     ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
 
-    assert "stage-scaler" in css
-    assert "available_width / 1300" not in ui
-    assert "window.innerWidth" in ui
-    assert "scale(" in ui
+    root_block = css[css.index(":root {"):css.index("html,")]
+    wide_block = css[css.index('.stage[data-layout-density="wide"]'):css.index('.stage[data-layout-density="ultrawide"]')]
+    ultrawide_block = css[css.index('.stage[data-layout-density="ultrawide"]'):css.index(".stage[data-entity-scale")]
+    compact_block = css[css.index('.stage[data-layout-density="compact"]'):css.index('.stage[data-layout-density="standard"]')]
+    standard_block = css[css.index('.stage[data-layout-density="standard"]'):css.index('.stage[data-layout-density="wide"]')]
+
+    assert "--telemetry-panel-width: 318px;" in root_block
+    assert "--telemetry-panel-font-size: 11px;" in root_block
+    assert "--telemetry-panel-width: 354px;" in wide_block
+    assert "--telemetry-panel-width: 366px;" in ultrawide_block
+    assert "--telemetry-panel-font-size: 12px;" in wide_block
+    assert "--telemetry-panel-font-size: 12px;" in ultrawide_block
+    assert "--telemetry-panel-width" not in compact_block
+    assert "--telemetry-panel-width" not in standard_block
+    assert 'cssPixelNumber(stage, "--telemetry-panel-width", PANEL_ITEM_SIZE.width)' in ui
+
+
+def test_web_ui_response_layouts_use_real_metrics_and_anchors() -> None:
+    css = (WEB / "styles.css").read_text(encoding="utf-8")
+    ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+
+    stacked_block = css[css.index('.stage[data-response-layout="stacked"] .echo-response'):css.index(".echo-response p,")]
+    focus_block = css[css.index('.stage[data-response-layout="focus"] .echo-response {'):css.index('.stage[data-response-layout="stacked"] .echo-response {')]
+    workspace_defaults_block = ui[ui.index("function workspaceDefaults"):ui.index("function createFreeWorkspaceController")]
+
+    assert 'data-response-layout="inline"' in html
+    assert 'data-entity-anchor="center"' in html
+    assert "const RESPONSE_LAYOUT_CONFIG" in ui
+    assert "function collectResponseMetrics" in ui
+    assert "function determineResponseLayout(metrics" in ui
+    assert "renderedHeight" in ui
+    assert "availableStageHeight" in ui
+    assert "renderedRatio" in ui
+    assert "contentType" in ui
+    assert 'return "inline"' in ui
+    assert 'return "stacked"' in ui
+    assert 'return "focus"' in ui
+    assert 'stage.dataset.responseLayout = layout' in ui
+    assert 'stage.dataset.entityAnchor = anchorResult.anchor' in ui
+    assert "top: var(--response-top);" in stacked_block
+    assert "max-height: min(var(--response-max-height), var(--response-max-height-current));" in stacked_block
+    assert "width: min(980px" in focus_block
+    assert "const entityRadius = Math.max(70, Math.min(220, entityDiameter / 2));" in workspace_defaults_block
+    assert "const topCenterY = headerHeight + entityRadius + safeGap;" in workspace_defaults_block
+    assert '"top-right": {x:' in workspace_defaults_block
+    assert "function updateResponseLayoutBounds(stage, layout)" in ui
+    assert 'stage.style.setProperty("--response-top"' in ui
+    assert 'return "top-center"' in ui
+    assert 'point: zones.echo["top-center"]' in ui
+    assert 'responseAnchorForLayout(stage, layout)' in ui
+
+
+def test_web_ui_response_layout_modes_position_routing_and_composer() -> None:
+    css = (WEB / "styles.css").read_text(encoding="utf-8")
+
+    assert '.stage[data-response-layout="inline"] .echo-response' in css
+    assert '.stage[data-response-layout="stacked"] .telemetry-compact' in css
+    assert "bottom: calc(var(--input-height) + var(--safe-gap) + 28px);" in css
+    assert '.stage[data-response-layout="stacked"] .input-zone' in css
+    assert "bottom: calc(var(--safe-gap) + 24px);" in css
+    assert '.stage[data-response-layout="focus"] .telemetry-compact' in css
+    assert "bottom: calc(var(--input-height) + var(--safe-gap) + 20px);" in css
+    assert '.stage[data-response-layout="focus"] .input-zone' in css
+    assert "bottom: calc(var(--safe-gap) + 18px);" in css
+
+
+def test_web_ui_focus_layout_reserves_horizontal_space_for_echo() -> None:
+    css = (WEB / "styles.css").read_text(encoding="utf-8")
+    ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
+
+    bounds_block = ui[ui.index("function updateResponseLayoutBounds"):ui.index("function createFreeWorkspaceController")]
+    focus_block = css[css.index('.stage[data-response-layout="focus"] .echo-response {'):css.index('.stage[data-response-layout="focus"] .echo-response.visible')]
+
+    assert "const minFocusResponseWidth = 540;" in bounds_block
+    assert "const echoRect = echoRectForPoint(anchorResult.point, entityRadius);" in bounds_block
+    assert "const reservedRightEdge = echoRect.left - safeGap;" in bounds_block
+    assert "const availableWidth = reservedRightEdge - availableLeft;" in bounds_block
+    assert "focusResponseWidth = Math.min(maxFocusResponseWidth, availableWidth);" in bounds_block
+    assert "focusResponseLeft = availableLeft + Math.max(0, (availableWidth - focusResponseWidth) / 2);" in bounds_block
+    assert 'stage.style.setProperty("--focus-response-left"' in bounds_block
+    assert 'stage.style.setProperty("--focus-response-width"' in bounds_block
+    assert "left: var(--focus-response-left);" in focus_block
+    assert "width: var(--focus-response-width);" in focus_block
+    assert "transform: translateY(6px);" in focus_block
+
+
+def test_web_ui_focus_layout_falls_back_to_top_center_when_space_is_tight() -> None:
+    css = (WEB / "styles.css").read_text(encoding="utf-8")
+    ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
+
+    bounds_block = ui[ui.index("function updateResponseLayoutBounds"):ui.index("function createFreeWorkspaceController")]
+    apply_block = ui[ui.index("function applyResponseLayout"):ui.index("function updateResponseLayout(element, text)")]
+
+    assert 'anchorResult = {anchor: "top-center", point: zones.echo["top-center"]};' in bounds_block
+    assert "const finalAnchor = stage.dataset.entityAnchor || responseAnchorForLayout(stage, layout);" in apply_block
+    assert "resolveSafeEchoAnchor(stage, finalAnchor)" in apply_block
+    assert '.stage[data-response-layout="focus"][data-entity-anchor="top-center"] .echo-response' in css
+    assert "width: min(980px, calc(100% - var(--safe-gap) * 2));" in css
+    assert "transform: translateX(-50%) translateY(6px);" in css
+
+
+def test_web_ui_focus_layout_avoids_telemetry_echo_collision() -> None:
+    ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
+
+    safe_anchor_block = ui[ui.index("function resolveSafeEchoAnchor"):ui.index("function updateResponseLayoutBounds")]
+
+    assert "requestedAnchor !== \"top-right\" || !telemetryPanelOpen" in safe_anchor_block
+    assert 'const panelRect = localRectFromElement(stage, byId("telemetryPanel"));' in safe_anchor_block
+    assert "if (!boxesIntersect(echoRect, panelRect)) return {anchor: requestedAnchor, point};" in safe_anchor_block
+    assert 'return {anchor: "top-center", point: zones.echo["top-center"]};' in safe_anchor_block
+
+
+def test_web_ui_renders_safe_markdown_without_inner_html() -> None:
+    ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
+    css = (WEB / "styles.css").read_text(encoding="utf-8")
+
+    markdown_block = ui[ui.index("function appendInlineMarkdown"):ui.index("const WORKSPACE_STORAGE_KEY")]
+    render_block = ui[ui.index("function renderEchoResponse"):ui.index("function applyResponseLayout")]
+
+    assert "function renderSafeMarkdown" in markdown_block
+    assert "document.createElement(\"strong\")" in markdown_block
+    assert "document.createElement(\"em\")" in markdown_block
+    assert "document.createElement(\"ul\")" in markdown_block
+    assert "document.createElement(\"li\")" in markdown_block
+    assert "document.createElement(\"p\")" in markdown_block
+    assert "document.createElement(\"br\")" in markdown_block
+    assert "document.createElement(\"code\")" in markdown_block
+    assert "document.createTextNode" in markdown_block
+    assert ".textContent =" in markdown_block
+    assert "innerHTML" not in markdown_block
+    assert "renderSafeMarkdown(element, value)" in render_block
+    assert "element.textContent = value" not in render_block
+    assert "container.dataset.rawText = source" in markdown_block
+    assert ".echo-response strong" in css
+    assert ".echo-response code" in css
+    assert "user-select: text;" in css
+
+
+def test_web_ui_workspace_resize_clamps_without_destroying_persistent_positions() -> None:
+    ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
+
+    assert "layoutFrame" in ui
+    assert "updateAdaptiveLayout()" in ui
+    assert "clampAfterResize({persist: false, restoreResponseLayout: true})" in ui
+    resize_block = ui[ui.index("function clampAfterResize"):ui.index("function bind")]
+    assert "if (options.persist) saveWorkspaceState();" in resize_block
+    assert "stageSize(stage)" in ui
+    assert "workspaceDefaults(stage)" in ui
+    assert "resizeWorkspaceItems()" in ui
+    assert "safeAreaRect()" in ui
 
 
 def test_echo_response_has_dedicated_visible_layer() -> None:
@@ -98,7 +329,7 @@ def test_echo_response_has_dedicated_visible_layer() -> None:
     assert "z-index: 7" in css
     assert 'const element = byId("echoResponse")' in ui
     assert "function renderEchoResponse(text)" in ui
-    assert 'element.textContent = value' in ui
+    assert 'renderSafeMarkdown(element, value)' in ui
     assert 'element.style.display = "block"' in ui
     assert 'element.classList.add("visible")' in ui
     assert 'console.log("[Echo UI JS] resposta aplicada:"' in ui
@@ -263,8 +494,8 @@ def test_cognitive_telemetry_compact_line_sits_above_input_zone() -> None:
     visible_block = css[css.index(".telemetry-compact.visible"):css.index(".telemetry-compact::before")]
     input_block = css[css.index(".input-zone {"):css.index(".input-pill {")]
 
-    assert "bottom: 124px;" in compact_block
-    assert "bottom: 30px;" in input_block
+    assert "bottom: calc(var(--input-height) + var(--safe-gap) + 10px);" in compact_block
+    assert "bottom: var(--safe-gap);" in input_block
     assert "opacity: .62;" in visible_block
     assert '.stage[data-telemetry-state="thinking_local"] .telemetry-compact' in css
     assert '.stage[data-telemetry-state="response_ready"] .telemetry-compact' in css
@@ -275,10 +506,10 @@ def test_cognitive_telemetry_panel_resize_layout_is_explicit() -> None:
     css = (WEB / "styles.css").read_text(encoding="utf-8")
     ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
 
-    assert "function scaleStage()" in ui
+    assert "function updateAdaptiveLayout()" in ui
     assert 'window.addEventListener("resize", () => {' in ui
     assert "window.requestAnimationFrame" in ui
-    assert "renderEchoResponse" not in ui[ui.index("function scaleStage"):ui.index("function setInputEnabled")]
+    assert "renderEchoResponse" not in ui[ui.index("function updateAdaptiveLayout"):ui.index("function setInputEnabled")]
     assert 'elements.stage.dataset.telemetryPanel = telemetryPanelOpen ? "open" : "closed"' in ui
 
     assert '.stage[data-telemetry-panel="open"] .echo-main' not in css
@@ -296,33 +527,55 @@ def test_cognitive_telemetry_panel_keeps_response_and_input_safe_on_compact_wind
     compact_block = css[css.index("@media (max-width: 760px), (max-height: 620px)"):css.index("@media (max-height: 560px)")]
     input_block = css[css.index(".input-zone {"):css.index(".input-pill {")]
 
-    assert "bottom: 30px;" in input_block
+    assert "bottom: var(--safe-gap);" in input_block
     assert '.stage[data-telemetry-panel="open"] .echo-response' not in compact_block
     assert "inputSafeRect()" in (WEB / "echo_ui.js").read_text(encoding="utf-8")
     assert "rectsIntersect(itemRect(item), inputRect)" in (WEB / "echo_ui.js").read_text(encoding="utf-8")
 
 
-def test_long_response_reading_mode_is_available_without_persisting_echo_position() -> None:
+def test_focus_response_layout_is_available_without_persisting_echo_position() -> None:
     css = (WEB / "styles.css").read_text(encoding="utf-8")
     ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
 
-    assert 'stage.dataset.responseMode = reading ? "reading" : "short"' in ui
-    assert "function updateResponseReadingMode" in ui
-    assert "function isLongEchoResponse" in ui
-    assert "window.echoEntity.setCenter(650, 120, false)" in ui
+    assert 'stage.dataset.responseLayout = layout' in ui
+    assert "function updateResponseLayout(element, text)" in ui
+    assert "function applyResponseLayout(element, text" in ui
+    assert "function determineResponseLayout(metrics" in ui
+    assert 'return "top-right"' in ui
+    assert 'return "top-center"' in ui
     assert "restoreEchoPosition" in ui
     assert "applyWorkspaceItem(state.items.echo, false)" in ui
-    assert "saveWorkspaceState()" not in ui[ui.index("function updateResponseReadingMode"):ui.index("function renderEchoError")]
+    assert "saveWorkspaceState()" not in ui[ui.index("function applyResponseLayout"):ui.index("function updateResponseLayout")]
 
-    assert '.stage[data-response-mode="reading"] .echo-response' in css
-    assert "top: 286px;" in css
-    assert "max-height: min(330px, calc(100% - 410px));" in css
+    assert '.stage[data-response-layout="focus"] .echo-response' in css
+    assert "top: var(--response-top" in css
+    assert "max-height: min(var(--response-max-height)" in css
     assert "overflow-y: auto;" in css
     assert "scrollbar-width: thin;" in css
     assert "::-webkit-scrollbar-thumb" in css
     assert "user-select: text;" in css
-    assert '.stage[data-response-mode="reading"] .telemetry-compact' in css
+    assert '.stage[data-response-layout="focus"] .telemetry-compact' in css
     assert "@media (max-height: 720px)" in css
+
+
+def test_response_layout_hysteresis_and_content_type_forces_focus() -> None:
+    ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
+
+    config_block = ui[ui.index("const RESPONSE_LAYOUT_CONFIG"):ui.index("let activeResponseLayout")]
+    determine_block = ui[ui.index("function determineResponseLayout"):ui.index("function createWorkspaceItem")]
+    classifier_block = ui[ui.index("function classifyResponseContent"):ui.index("function collectResponseMetrics")]
+
+    assert "enterRenderedRatio: 0.40" in config_block
+    assert "exitRenderedRatio: 0.34" in config_block
+    assert "exitMaxRenderedRatio: 0.22" in config_block
+    assert "metrics.renderedRatio > focus.exitRenderedRatio" in determine_block
+    assert "metrics.renderedRatio >= focus.enterRenderedRatio" in determine_block
+    assert "metrics.codeBlockCount > 0" in determine_block
+    assert "metrics.tableLineCount >= 2" in determine_block
+    assert '["email", "document", "code", "table"].includes(type)' in determine_block
+    assert 'return "email"' in classifier_block
+    assert 'return "table"' in classifier_block
+    assert 'return "code"' in classifier_block
 
 
 def test_web_ui_removes_try_suggestions_and_numbered_debug_states() -> None:
@@ -420,7 +673,7 @@ def test_web_ui_workspace_drag_does_not_call_backend_or_move_input() -> None:
     assert "controller.submitMessage" not in workspace_block
     assert "echoController" not in workspace_block
     assert "ModelRouter" not in ui
-    assert "bottom: 30px;" in input_block
+    assert "bottom: var(--safe-gap);" in input_block
     assert ".stage[data-telemetry-panel=\"open\"] .input-zone" not in css
     assert ".stage[data-telemetry-panel=\"open\"] .echo-main" not in css
 
