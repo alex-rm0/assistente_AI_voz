@@ -2674,3 +2674,253 @@ def test_escalation_no_real_anthropic_provider_ever_used(tmp_path: Path) -> None
     _engine, llm, _ollama, _anthropic = make_engine(tmp_path, mode="automatic", claude_enabled=True, env=_PAID_ENV)
 
     assert type(llm.providers["anthropic"]).__name__ == "FakeProvider"
+
+
+# --- Fixed telemetry bug: a real paid test showed a Claude-then-Claude retry
+# mislabeled as "Tentativa local falhou a validacao" even though no local
+# (Ollama) attempt ever happened that turn. previous_provider is now tracked
+# per attempt so the reason code always matches which provider actually
+# failed. All Anthropic replies here are FakeProvider -- no real call (I).
+
+def test_escalation_local_failure_then_claude_reports_correct_sequence(tmp_path: Path) -> None:
+    """A: a first-time rewrite fails validation on Ollama, then genuinely
+    escalates to Claude on attempt 2 -- sequence=[ollama, anthropic],
+    reason=document_escalated_after_local_failure (the failure really was
+    local this time)."""
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=True,
+        env=_PAID_ENV,
+        ollama_replies=[
+            "O documento parece pronto para enviar! E para enviar a algum destinatario ou e apenas um resumo interno?"
+        ],
+        anthropic_replies=[_VALID_FORMAL_REWRITE],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+    engine.respond("lê o ficheiro email_resumo_novo e mostra tudo sem resumir")
+
+    response = engine.respond("Torna-o mais formal, mas não guardes ainda.")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["initial_provider"] == "ollama"
+    assert telemetry["final_provider"] == "anthropic"
+    assert telemetry["provider_attempt_sequence"] == ["ollama", "anthropic"]
+    assert telemetry["attempt_count"] == 2
+    assert telemetry["attempt_failure_reasons"] == ["termina_em_pergunta", ""]
+    assert telemetry["final_routing_reason_code"] == "document_escalated_after_local_failure"
+    assert telemetry["document_routing_features"]["document_previous_provider"] == "ollama"
+    assert telemetry["document_routing_features"]["document_previous_local_failure"] is True
+    assert len(ollama.calls) == 1
+    assert len(anthropic.calls) == 1
+    assert "Prezada Francisca" in response
+
+
+def test_escalation_claude_failure_regenerates_with_claude_not_local(tmp_path: Path) -> None:
+    """B: the FIRST refinement attempt already escalated to Claude (high
+    complexity is inherent to refinement) and failed validation -- the retry
+    stays on Claude, never mislabeled as a local failure. sequence=
+    [anthropic, anthropic]; reason=document_regenerated_with_claude;
+    previous_local_failure stays false."""
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=True,
+        env=_PAID_ENV,
+        ollama_replies=[_VALID_FORMAL_REWRITE],
+        anthropic_replies=[
+            "Isto ja parece uma melhoria bastante razoavel em relacao a versao anterior, mas ainda tenho "
+            "duvidas sobre se deves querer ajustar mais algum pormenor antes de ficares satisfeita com o "
+            "resultado final?",
+            _VALID_REFINED_REWRITE,
+        ],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+    engine.respond("lê o ficheiro email_resumo_novo e mostra tudo sem resumir")
+    engine.respond("Torna-o mais formal, mas não guardes ainda.")
+
+    response = engine.respond("ainda consegues melhor")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["initial_provider"] == "anthropic"
+    assert telemetry["final_provider"] == "anthropic"
+    assert telemetry["provider_attempt_sequence"] == ["anthropic", "anthropic"]
+    assert telemetry["attempt_count"] == 2
+    assert telemetry["final_routing_reason_code"] == "document_regenerated_with_claude"
+    # Preserves the FIRST attempt's own reason too, not just the last one.
+    assert telemetry["escalation_reason"] == "iterative_refinement_high_complexity"
+    assert telemetry["document_routing_features"]["document_previous_provider"] == "anthropic"
+    assert telemetry["document_routing_features"]["document_previous_local_failure"] is False
+    assert telemetry["document_routing_features"]["document_previous_validation_failed"] is True
+    assert len(ollama.calls) == 1  # only the earlier plain rewrite, never a local retry here
+    assert len(anthropic.calls) == 2
+    assert "Alexandre" in response
+
+
+def test_escalation_claude_valid_first_attempt_no_regeneration(tmp_path: Path) -> None:
+    """C: Claude gets it right on the first refinement attempt --
+    sequence=[anthropic], attempt_count=1, no regeneration reason code."""
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=True,
+        env=_PAID_ENV,
+        ollama_replies=[_VALID_FORMAL_REWRITE],
+        anthropic_replies=[_VALID_REFINED_REWRITE],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+    engine.respond("lê o ficheiro email_resumo_novo e mostra tudo sem resumir")
+    engine.respond("Torna-o mais formal, mas não guardes ainda.")
+
+    engine.respond("ainda consegues melhor")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["provider_attempt_sequence"] == ["anthropic"]
+    assert telemetry["attempt_count"] == 1
+    assert telemetry["attempt_failure_reasons"] == [""]
+    assert telemetry["final_routing_reason_code"] == "iterative_refinement_high_complexity"
+    assert len(anthropic.calls) == 1
+    assert len(ollama.calls) == 1
+
+
+def test_local_regeneration_sequence_when_claude_unavailable(tmp_path: Path) -> None:
+    """D: a first attempt fails locally and, with Claude unavailable, the
+    retry also stays local -- sequence=[ollama, ollama], never touching
+    Claude at all."""
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=[
+            "O documento parece pronto para enviar! E para enviar a algum destinatario ou e apenas um resumo interno?",
+            _VALID_FORMAL_REWRITE,
+        ],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+    engine.respond("lê o ficheiro email_resumo_novo e mostra tudo sem resumir")
+
+    engine.respond("Torna-o mais formal, mas não guardes ainda.")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["provider_attempt_sequence"] == ["ollama", "ollama"]
+    assert telemetry["attempt_count"] == 2
+    assert telemetry["final_provider"] == "ollama"
+    assert len(ollama.calls) == 2
+    assert anthropic.calls == []
+
+
+def test_document_previous_local_failure_requires_local_provider(tmp_path: Path) -> None:
+    """E: document_previous_local_failure is only true when the previous
+    attempt was actually local -- a previous Claude failure never sets it,
+    even though both are validation failures."""
+    router = ModelRouter(
+        ModelRoutingConfig(
+            mode="automatic",
+            automatic=AutomaticRoutingConfig(claude_enabled=True, daily_budget_usd=0.25, max_single_call_estimated_usd=0.05),
+        ),
+        env=_PAID_ENV,
+        budget=ModelUsageBudget(tmp_path / "u.json"),
+    )
+    base_profile = {
+        "task_type": "document_refinement",
+        "document_chars": 200,
+        "document_named_entity_count": 2,
+        "document_list_item_count": 4,
+        "document_regeneration_attempt": 2,
+        "document_validation_failure_reason": "termina_em_pergunta",
+        "document_previous_validation_failed": True,
+        "preferred_provider": "auto",
+    }
+
+    from assistant.model_router import ModelRoutingInput
+
+    local_failure_decision = router.decide(
+        ModelRoutingInput(
+            source="RESPONSE_COMPOSER",
+            user_message="ainda consegues melhor",
+            task_profile={**base_profile, "document_previous_provider": "ollama", "document_previous_local_failure": True},
+        )
+    )
+    claude_failure_decision = router.decide(
+        ModelRoutingInput(
+            source="RESPONSE_COMPOSER",
+            user_message="ainda consegues melhor",
+            task_profile={**base_profile, "document_previous_provider": "anthropic", "document_previous_local_failure": False},
+        )
+    )
+
+    assert local_failure_decision.reason_code == "document_escalated_after_local_failure"
+    assert claude_failure_decision.reason_code == "document_regenerated_with_claude"
+
+
+def test_escalation_budget_accounted_per_call_not_per_turn(tmp_path: Path) -> None:
+    """F: a Claude-then-Claude turn registers TWO calls against the budget
+    ledger, not one -- the budget is spent per actual paid call."""
+    import json
+
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=True,
+        env=_PAID_ENV,
+        ollama_replies=[_VALID_FORMAL_REWRITE],
+        anthropic_replies=[
+            "Isto ja parece uma melhoria bastante razoavel em relacao a versao anterior, mas ainda tenho "
+            "duvidas sobre se deves querer ajustar mais algum pormenor antes de ficares satisfeita com o "
+            "resultado final?",
+            _VALID_REFINED_REWRITE,
+        ],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+    engine.respond("lê o ficheiro email_resumo_novo e mostra tudo sem resumir")
+    engine.respond("Torna-o mais formal, mas não guardes ainda.")
+
+    engine.respond("ainda consegues melhor")
+
+    usage = json.loads((tmp_path / "usage.json").read_text(encoding="utf-8"))
+    assert usage["calls"] == 2
+    assert usage["providers"]["anthropic"]["calls"] == 2
+    assert len(anthropic.calls) == 2
+
+
+def test_escalation_never_exceeds_two_calls_per_turn(tmp_path: Path) -> None:
+    """G: regardless of how the attempts split across providers, a single
+    turn never makes more than 2 LLM calls in total."""
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=True,
+        env=_PAID_ENV,
+        ollama_replies=[
+            "O documento parece pronto para enviar! E para enviar a algum destinatario ou e apenas um resumo interno?"
+        ],
+        anthropic_replies=[_VALID_FORMAL_REWRITE],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+    engine.respond("lê o ficheiro email_resumo_novo e mostra tudo sem resumir")
+
+    engine.respond("Torna-o mais formal, mas não guardes ainda.")
+
+    assert len(ollama.calls) + len(anthropic.calls) == 2
+
+
+def test_rewrite_and_refinement_prompts_preserve_tense_and_chronology(tmp_path: Path) -> None:
+    """H: every rewrite/refinement/correction prompt explicitly instructs the
+    model to preserve verb tenses and factual chronology -- a real paid test
+    showed a completed action ("contactou") rewritten into the present
+    ("contacta")."""
+    import assistant.conversation as conversation_module
+
+    request = conversation_module.DocumentTaskRequest(
+        source_files=["doc.txt"], actions=["read_source", "rewrite"], instructions="torna-o mais formal",
+        action="rewrite", requested_output="",
+    )
+    context = conversation_module.ActiveDocumentContext(resolved_file="doc.txt", content="Conteúdo original.")
+
+    fidelity_marker = "tempos verbais"
+    assert fidelity_marker in conversation_module._document_rewrite_prompt(request, context)
+    assert fidelity_marker in conversation_module._document_rewrite_correction_prompt(request, context, "resposta invalida", "termina_em_pergunta")
+    assert fidelity_marker in conversation_module._document_refinement_prompt(request, context, "Versão atual.")
+    assert fidelity_marker in conversation_module._document_refinement_correction_prompt(
+        request, context, "Versão atual.", "resposta invalida", "termina_em_pergunta"
+    )
