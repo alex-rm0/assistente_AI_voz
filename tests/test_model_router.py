@@ -18,6 +18,30 @@ from assistant.model_router import (
 )
 
 
+def _document_profile(**overrides) -> dict:
+    """A document task profile shaped like a small, structurally simple
+    first-time rewrite -- override fields per test to model refinement,
+    prior local failures, larger documents, etc. Mirrors the structure
+    assistant/conversation.py's rewrite branch builds (see
+    _build_task_profile), never containing document content."""
+    profile = {
+        "task_type": "document_rewrite",
+        "document_chars": 200,
+        "document_has_draft": False,
+        "document_revision_number": 0,
+        "document_named_entity_count": 2,
+        "document_list_item_count": 4,
+        "document_requires_fidelity": True,
+        "document_requires_full_output": True,
+        "document_previous_local_failure": False,
+        "document_validation_failure_reason": "",
+        "document_regeneration_attempt": 1,
+        "preferred_provider": "auto",
+    }
+    profile.update(overrides)
+    return profile
+
+
 class FakeProvider:
     def __init__(self, name: str, model: str, text: str = "resposta") -> None:
         self._name = name
@@ -374,3 +398,270 @@ def test_budget_register_stores_only_totals(tmp_path: Path) -> None:
     assert data["calls"] == 1
     assert data["providers"]["anthropic"]["input_tokens"] == 10
     assert "resposta secreta" not in path.read_text(encoding="utf-8")
+
+
+# --- Document task_profile-driven escalation policy: complexity is scored
+# from the RECONSTRUCTED task (revision number, prior local failure,
+# structural density...), never from raw message length alone -- a short
+# follow-up like "ainda consegues melhor" carries none of that on its own.
+
+_PAID_ENV = {"ANTHROPIC_API_KEY": "secret", PAID_CALL_CONFIRMATION_ENV: "true"}
+
+
+def test_document_task_simple_first_rewrite_stays_local_first(tmp_path: Path) -> None:
+    """C: a short, simple first-time rewrite is Ollama-preferred (Via 2:
+    local first), not sent straight to Claude."""
+    decision = _router("automatic", claude_enabled=True, env=_PAID_ENV, budget=ModelUsageBudget(tmp_path / "u.json")).decide(
+        ModelRoutingInput(source="RESPONSE_COMPOSER", user_message="torna-o mais formal", task_profile=_document_profile())
+    )
+
+    assert decision.provider == "ollama"
+    assert decision.reason_code == "document_local_first"
+    assert decision.task_complexity_band == "medium"
+    assert decision.escalation_considered is False
+
+
+def test_document_task_trivial_document_is_low_complexity(tmp_path: Path) -> None:
+    decision = _router("automatic", claude_enabled=True, env=_PAID_ENV, budget=ModelUsageBudget(tmp_path / "u.json")).decide(
+        ModelRoutingInput(
+            source="RESPONSE_COMPOSER",
+            user_message="torna-o mais formal",
+            task_profile=_document_profile(document_chars=10, document_named_entity_count=0, document_list_item_count=0),
+        )
+    )
+
+    assert decision.provider == "ollama"
+    assert decision.reason_code == "document_simple_local"
+    assert decision.task_complexity_band == "low"
+
+
+def test_document_task_iterative_refinement_escalates_when_authorized(tmp_path: Path) -> None:
+    """D: an iterative refinement with an active draft is high complexity
+    and escalates to Claude once paid calls are authorized."""
+    decision = _router("automatic", claude_enabled=True, env=_PAID_ENV, budget=ModelUsageBudget(tmp_path / "u.json")).decide(
+        ModelRoutingInput(
+            source="RESPONSE_COMPOSER",
+            user_message="ainda consegues melhor",
+            task_profile=_document_profile(task_type="document_refinement", document_has_draft=True, document_revision_number=1),
+        )
+    )
+
+    assert decision.provider == "anthropic"
+    assert decision.paid_call is True
+    assert decision.reason_code == "iterative_refinement_high_complexity"
+    assert decision.task_complexity_band == "high"
+
+
+def test_document_task_refinement_stays_local_without_paid_calls_confirmed(tmp_path: Path) -> None:
+    """E: same high-complexity refinement, but paid calls are not
+    confirmed -- stays on Ollama with a document-specific blocked reason."""
+    env = {"ANTHROPIC_API_KEY": "secret"}
+    decision = _router("automatic", claude_enabled=True, env=env, budget=ModelUsageBudget(tmp_path / "u.json")).decide(
+        ModelRoutingInput(
+            source="RESPONSE_COMPOSER",
+            user_message="ainda consegues melhor",
+            task_profile=_document_profile(task_type="document_refinement", document_has_draft=True, document_revision_number=1),
+        )
+    )
+
+    assert decision.provider == "ollama"
+    assert decision.reason_code == "document_escalation_blocked_paid_disabled"
+    assert decision.paid_call is False
+
+
+def test_document_task_first_attempt_placeholder_escalates_second_attempt(tmp_path: Path) -> None:
+    """F: a first local attempt rejected for a placeholder makes the second
+    attempt's profile escalation-eligible."""
+    decision = _router("automatic", claude_enabled=True, env=_PAID_ENV, budget=ModelUsageBudget(tmp_path / "u.json")).decide(
+        ModelRoutingInput(
+            source="RESPONSE_COMPOSER",
+            user_message="torna-o mais formal",
+            task_profile=_document_profile(
+                document_previous_local_failure=True,
+                document_validation_failure_reason="placeholder_detected",
+                document_regeneration_attempt=2,
+            ),
+        )
+    )
+
+    assert decision.provider == "anthropic"
+    assert decision.reason_code == "document_escalated_after_local_failure"
+    assert decision.task_complexity_band == "high"
+
+
+def test_document_task_first_attempt_valid_does_not_escalate(tmp_path: Path) -> None:
+    """G: a first attempt with no failure signal never escalates."""
+    decision = _router("automatic", claude_enabled=True, env=_PAID_ENV, budget=ModelUsageBudget(tmp_path / "u.json")).decide(
+        ModelRoutingInput(source="RESPONSE_COMPOSER", user_message="torna-o mais formal", task_profile=_document_profile())
+    )
+
+    assert decision.provider == "ollama"
+    assert decision.escalation_considered is False
+
+
+def test_document_task_noop_refinement_can_escalate_second_attempt(tmp_path: Path) -> None:
+    """H: a no-op refinement result on the first attempt makes the second
+    attempt escalation-eligible too."""
+    decision = _router("automatic", claude_enabled=True, env=_PAID_ENV, budget=ModelUsageBudget(tmp_path / "u.json")).decide(
+        ModelRoutingInput(
+            source="RESPONSE_COMPOSER",
+            user_message="ainda consegues melhor",
+            task_profile=_document_profile(
+                task_type="document_refinement",
+                document_has_draft=True,
+                document_revision_number=1,
+                document_previous_local_failure=True,
+                document_validation_failure_reason="no_op_detected",
+                document_regeneration_attempt=2,
+            ),
+        )
+    )
+
+    assert decision.provider == "anthropic"
+    assert decision.reason_code == "document_escalated_after_local_failure"
+
+
+def test_document_task_insufficient_budget_blocks_escalation(tmp_path: Path) -> None:
+    """I: high-complexity task, everything authorized, but budget is too
+    small -- stays on Ollama with a document-specific budget reason."""
+    router = ModelRouter(
+        ModelRoutingConfig(
+            mode="automatic",
+            automatic=AutomaticRoutingConfig(claude_enabled=True, daily_budget_usd=0.00001, max_single_call_estimated_usd=0.00001),
+        ),
+        env=_PAID_ENV,
+        budget=ModelUsageBudget(tmp_path / "u.json"),
+    )
+    decision = router.decide(
+        ModelRoutingInput(
+            source="RESPONSE_COMPOSER",
+            user_message="ainda consegues melhor",
+            task_profile=_document_profile(task_type="document_refinement", document_has_draft=True, document_revision_number=1),
+        )
+    )
+
+    assert decision.provider == "ollama"
+    assert decision.reason_code == "document_escalation_blocked_budget"
+
+
+def test_document_task_missing_api_key_blocks_escalation(tmp_path: Path) -> None:
+    """J: high-complexity task, paid calls confirmed, but no API key --
+    stays on Ollama with a document-specific api-key reason."""
+    env = {PAID_CALL_CONFIRMATION_ENV: "true"}
+    decision = _router("automatic", claude_enabled=True, env=env, budget=ModelUsageBudget(tmp_path / "u.json")).decide(
+        ModelRoutingInput(
+            source="RESPONSE_COMPOSER",
+            user_message="ainda consegues melhor",
+            task_profile=_document_profile(task_type="document_refinement", document_has_draft=True, document_revision_number=1),
+        )
+    )
+
+    assert decision.provider == "ollama"
+    assert decision.reason_code == "document_escalation_blocked_api_key"
+
+
+def test_document_task_claude_disabled_blocks_escalation(tmp_path: Path) -> None:
+    """K: automatic_claude_enabled=false blocks escalation regardless of
+    complexity, same as any other automatic-mode call."""
+    decision = _router("automatic", claude_enabled=False, env=_PAID_ENV, budget=ModelUsageBudget(tmp_path / "u.json")).decide(
+        ModelRoutingInput(
+            source="RESPONSE_COMPOSER",
+            user_message="ainda consegues melhor",
+            task_profile=_document_profile(task_type="document_refinement", document_has_draft=True, document_revision_number=1),
+        )
+    )
+
+    assert decision.provider == "ollama"
+    assert decision.reason_code == "automatic_claude_disabled"
+
+
+def test_document_task_local_validation_failed_reason_when_still_medium(tmp_path: Path) -> None:
+    """A prior local failure on a trivial-enough document does not
+    automatically clear the high-complexity bar -- stays local with a
+    distinct reason instead of silently reusing document_local_first."""
+    decision = _router("automatic", claude_enabled=True, env=_PAID_ENV, budget=ModelUsageBudget(tmp_path / "u.json")).decide(
+        ModelRoutingInput(
+            source="RESPONSE_COMPOSER",
+            user_message="torna-o mais formal",
+            task_profile=_document_profile(
+                document_named_entity_count=0,
+                document_list_item_count=0,
+                document_chars=0,
+                document_previous_local_failure=True,
+                document_validation_failure_reason="termina_em_pergunta",
+                document_regeneration_attempt=2,
+            ),
+        )
+    )
+
+    assert decision.provider == "ollama"
+    assert decision.reason_code == "document_local_validation_failed"
+    assert decision.task_complexity_band == "medium"
+
+
+def test_document_task_preferred_provider_ollama_forces_local(tmp_path: Path) -> None:
+    """Section 7: the document flow can force attempt 1 to stay local even
+    when the profile would otherwise score as high complexity."""
+    decision = _router("automatic", claude_enabled=True, env=_PAID_ENV, budget=ModelUsageBudget(tmp_path / "u.json")).decide(
+        ModelRoutingInput(
+            source="RESPONSE_COMPOSER",
+            user_message="ainda consegues melhor",
+            task_profile=_document_profile(
+                task_type="document_refinement", document_has_draft=True, document_revision_number=1, preferred_provider="ollama"
+            ),
+        )
+    )
+
+    assert decision.provider == "ollama"
+    assert decision.reason_code == "document_local_first"
+
+
+def test_document_task_complexity_fields_recorded_on_decision(tmp_path: Path) -> None:
+    """N: task_complexity_score/band and escalation_considered are exposed
+    on the decision object for telemetry."""
+    decision = _router("automatic", claude_enabled=True, env=_PAID_ENV, budget=ModelUsageBudget(tmp_path / "u.json")).decide(
+        ModelRoutingInput(
+            source="RESPONSE_COMPOSER",
+            user_message="ainda consegues melhor",
+            task_profile=_document_profile(task_type="document_refinement", document_has_draft=True, document_revision_number=1),
+        )
+    )
+
+    assert decision.task_complexity_score > 40.0
+    assert decision.task_complexity_band == "high"
+    assert decision.escalation_considered is True
+
+
+def test_routed_llm_forwards_task_profile_and_escalates(tmp_path: Path) -> None:
+    """O: RoutedLLM.chat() actually threads task_profile through to the
+    router -- no real Anthropic call, FakeProvider stands in."""
+    ollama = FakeProvider("ollama", "llama3.1:8b")
+    anthropic = FakeProvider("anthropic", "claude-haiku-4-5-20251001")
+    llm = RoutedLLM(
+        providers={"ollama": ollama, "anthropic": anthropic},
+        router=_router("automatic", claude_enabled=True, env=_PAID_ENV, budget=ModelUsageBudget(tmp_path / "u.json")),
+    )
+
+    llm.chat(
+        "ainda consegues melhor",
+        source="RESPONSE_COMPOSER",
+        task_profile=_document_profile(task_type="document_refinement", document_has_draft=True, document_revision_number=1),
+    )
+
+    assert ollama.calls == []
+    assert len(anthropic.calls) == 1
+    assert llm.last_routing_decision.reason_code == "iterative_refinement_high_complexity"
+
+
+def test_routed_llm_without_task_profile_uses_generic_heuristic() -> None:
+    """Every non-document call site never sets task_profile -- confirms the
+    generic text-based heuristic is unchanged for them (RoutedLLM defaults
+    task_profile to None)."""
+    ollama = FakeProvider("ollama", "llama3.1:8b")
+    anthropic = FakeProvider("anthropic", "claude-haiku-4-5-20251001")
+    llm = RoutedLLM(providers={"ollama": ollama, "anthropic": anthropic}, router=_router("local"))
+
+    llm.chat("Olá", source="RESPONSE_COMPOSER")
+
+    assert llm.last_routing_decision.task_complexity_band == ""
+    assert ollama.calls[0].get("timeout_seconds") is None
