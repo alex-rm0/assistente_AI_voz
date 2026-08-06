@@ -25,7 +25,7 @@ from assistant.delegation import DelegationManager, DelegationTarget
 from assistant.fast_router import load_quick_sites, route_fast_command
 from assistant.long_term_memory import LongTermMemory, MemoryCategory
 from assistant.memory import ConversationMemory
-from assistant.model_provider import ProviderConfigurationError
+from assistant.model_provider import ProviderConfigurationError, ProviderTimeoutError
 from assistant.memory_recall import (
     build_memory_retrieval,
     build_task_retrieval,
@@ -1745,8 +1745,12 @@ class AssistantEngine:
             self._last_fast_tools_used = ("read_workspace_document",) if reloaded else ()
             original_content = context.content
             rewrite_started_at = time.perf_counter()
+            rewrite_deadline = rewrite_started_at + DOCUMENT_REWRITE_TOTAL_TIMEOUT_SECONDS
 
-            def _compose_rewrite(prompt: str) -> str:
+            def _remaining_seconds() -> float:
+                return rewrite_deadline - time.perf_counter()
+
+            def _compose_rewrite(prompt: str, *, timeout_seconds: float) -> str:
                 return self.response_composer.compose(
                     ComposerRequest(
                         intent="document_rewrite",
@@ -1760,6 +1764,7 @@ class AssistantEngine:
                         language_instruction=self._language_instruction(),
                         temperature=_REWRITE_TEMPERATURE,
                         num_predict=_REWRITE_MAX_OUTPUT_TOKENS,
+                        timeout_seconds=timeout_seconds,
                     )
                 )
 
@@ -1779,13 +1784,40 @@ class AssistantEngine:
                 )
                 return "Pedido cancelado."
 
+            def _timeout_response(attempt_1_ms: float, attempt_2_ms: float, regenerated: bool, remaining_seconds: float) -> str:
+                self._record_document_trace(
+                    found=True, files_used=files_used, output_created=False,
+                    document_action=action, active_document=context, context_reused=not reloaded,
+                    draft_validation_failed=True,
+                    draft_regeneration_attempted=regenerated,
+                    draft_original_length=len(original_content),
+                    rewrite_attempt_1_latency_ms=attempt_1_ms,
+                    rewrite_attempt_2_latency_ms=attempt_2_ms,
+                    rewrite_total_latency_ms=attempt_1_ms + attempt_2_ms,
+                    rewrite_timeout=True,
+                    rewrite_timeout_seconds=DOCUMENT_REWRITE_TOTAL_TIMEOUT_SECONDS,
+                    rewrite_elapsed_ms_at_timeout=(time.perf_counter() - rewrite_started_at) * 1000,
+                    rewrite_remaining_timeout_ms=max(0.0, remaining_seconds * 1000),
+                )
+                return (
+                    "A reescrita demorou mais do que o previsto e foi interrompida. "
+                    "O ficheiro original continua igual."
+                )
+
             # Checkpoint 1: before the first LLM call.
             prompt = _document_rewrite_prompt(request, context)
             if self.is_cancel_requested():
                 return _cancelled_response(0.0, 0.0, False)
+            remaining_for_attempt_1 = _remaining_seconds()
+            if remaining_for_attempt_1 < _REWRITE_MIN_SECONDS_FOR_ATTEMPT:
+                return _timeout_response(0.0, 0.0, False, remaining_for_attempt_1)
 
             attempt_1_started_at = time.perf_counter()
-            attempt = _compose_rewrite(prompt)
+            try:
+                attempt = _compose_rewrite(prompt, timeout_seconds=remaining_for_attempt_1)
+            except ProviderTimeoutError:
+                attempt_1_latency_ms = (time.perf_counter() - attempt_1_started_at) * 1000
+                return _timeout_response(attempt_1_latency_ms, 0.0, False, _remaining_seconds())
             attempt_1_latency_ms = (time.perf_counter() - attempt_1_started_at) * 1000
 
             # Checkpoint 2: immediately after the first call.
@@ -1799,14 +1831,24 @@ class AssistantEngine:
             attempt_2_latency_ms = 0.0
 
             if not valid:
-                # Checkpoint 3: before starting the second attempt.
+                # Checkpoint 3: before starting the second attempt -- also
+                # where the proactive total-timeout check happens, since
+                # starting an LLM call we already know can't finish in time
+                # is worse than giving up cleanly.
                 if self.is_cancel_requested():
                     return _cancelled_response(attempt_1_latency_ms, 0.0, False)
+                remaining_for_attempt_2 = _remaining_seconds()
+                if remaining_for_attempt_2 < _REWRITE_MIN_SECONDS_FOR_ATTEMPT:
+                    return _timeout_response(attempt_1_latency_ms, 0.0, False, remaining_for_attempt_2)
 
                 regenerated = True
                 correction_prompt = _document_rewrite_correction_prompt(request, context, attempt, reason)
                 attempt_2_started_at = time.perf_counter()
-                attempt = _compose_rewrite(correction_prompt)
+                try:
+                    attempt = _compose_rewrite(correction_prompt, timeout_seconds=remaining_for_attempt_2)
+                except ProviderTimeoutError:
+                    attempt_2_latency_ms = (time.perf_counter() - attempt_2_started_at) * 1000
+                    return _timeout_response(attempt_1_latency_ms, attempt_2_latency_ms, True, _remaining_seconds())
                 attempt_2_latency_ms = (time.perf_counter() - attempt_2_started_at) * 1000
 
                 # Checkpoint 4: immediately after the second call.
@@ -2144,6 +2186,10 @@ class AssistantEngine:
         cancellation_requested: bool = False,
         request_cancelled: bool = False,
         rewrite_elapsed_ms_at_cancel: float = 0.0,
+        rewrite_timeout: bool = False,
+        rewrite_timeout_seconds: float = 0.0,
+        rewrite_elapsed_ms_at_timeout: float = 0.0,
+        rewrite_remaining_timeout_ms: float = 0.0,
     ) -> None:
         if self._turn_trace is None:
             return
@@ -2178,6 +2224,10 @@ class AssistantEngine:
         self._turn_trace["cancellation_requested"] = bool(cancellation_requested)
         self._turn_trace["request_cancelled"] = bool(request_cancelled)
         self._turn_trace["rewrite_elapsed_ms_at_cancel"] = round(float(rewrite_elapsed_ms_at_cancel), 1)
+        self._turn_trace["rewrite_timeout"] = bool(rewrite_timeout)
+        self._turn_trace["rewrite_timeout_seconds"] = float(rewrite_timeout_seconds)
+        self._turn_trace["rewrite_elapsed_ms_at_timeout"] = round(float(rewrite_elapsed_ms_at_timeout), 1)
+        self._turn_trace["rewrite_remaining_timeout_ms"] = round(float(rewrite_remaining_timeout_ms), 1)
 
     def _fast_agent_context(self) -> AgentContext:
         return AgentContext(
@@ -2721,6 +2771,10 @@ class AssistantEngine:
             "cancellation_requested": bool(self._turn_trace.get("cancellation_requested")),
             "request_cancelled": bool(self._turn_trace.get("request_cancelled")),
             "rewrite_elapsed_ms_at_cancel": float(self._turn_trace.get("rewrite_elapsed_ms_at_cancel") or 0.0),
+            "rewrite_timeout": bool(self._turn_trace.get("rewrite_timeout")),
+            "rewrite_timeout_seconds": float(self._turn_trace.get("rewrite_timeout_seconds") or 0.0),
+            "rewrite_elapsed_ms_at_timeout": float(self._turn_trace.get("rewrite_elapsed_ms_at_timeout") or 0.0),
+            "rewrite_remaining_timeout_ms": float(self._turn_trace.get("rewrite_remaining_timeout_ms") or 0.0),
             "response_grounded": self._turn_trace.get("response_grounded"),
             "unsupported_tool_claim_detected": bool(self._turn_trace.get("unsupported_tool_claim_detected")),
             "unsupported_memory_claim_detected": bool(self._turn_trace.get("unsupported_memory_claim_detected")),
@@ -5447,6 +5501,17 @@ def _looks_like_ambiguous_document_followup(text: str, content_type: str) -> boo
 # provider's defaults.
 _REWRITE_TEMPERATURE = 0.2
 _REWRITE_MAX_OUTPUT_TOKENS = 1200
+
+# Aggregate wall-clock budget for the whole rewrite flow (both attempts,
+# validation and response composition) -- independent of, and tighter than,
+# a single Ollama HTTP call's own 120s default timeout. A slow first attempt
+# eats into the budget available for a possible second attempt; the timeout
+# passed to the provider on each call is clamped to whatever remains of it.
+DOCUMENT_REWRITE_TOTAL_TIMEOUT_SECONDS = 60
+# Below this much remaining budget, starting another LLM call isn't worth
+# it (real rewrite responses take several seconds at minimum) -- the flow
+# gives up cleanly instead of starting a call almost certain to also time out.
+_REWRITE_MIN_SECONDS_FOR_ATTEMPT = 2.0
 
 # Verbs that, on their own, unambiguously mean "transform the active
 # document now" (produce a full rewritten version) rather than something

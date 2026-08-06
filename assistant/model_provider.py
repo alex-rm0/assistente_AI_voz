@@ -31,6 +31,21 @@ class ProviderConfigurationError(RuntimeError):
         self.provider_error_type = provider_error_type
 
 
+class ProviderTimeoutError(RuntimeError):
+    """Raised when a provider HTTP call exceeds its timeout.
+
+    Distinguished from other RequestExceptions so a caller that explicitly
+    requested a bounded timeout (currently only document rewrite, via
+    ComposerRequest.timeout_seconds) can react specifically instead of
+    getting the generic connection-failure message every other call site
+    still gets.
+    """
+
+    def __init__(self, message: str, *, provider: str) -> None:
+        super().__init__(message)
+        self.provider = provider
+
+
 @dataclass
 class ModelResponse:
     text: str
@@ -56,6 +71,7 @@ class ModelProvider(Protocol):
         tools: list[dict] | None = None,
         temperature: float | None = None,
         num_predict: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> ModelResponse: ...
 
 
@@ -176,8 +192,13 @@ class OllamaProvider:
         tools: list[dict] | None = None,
         temperature: float | None = None,
         num_predict: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> ModelResponse:
         resolved_model = model or self.model
+        # Per-call override only used by callers with their own deadline
+        # budget (currently just document rewrite); every other call keeps
+        # using the provider's configured self.timeout_seconds, unchanged.
+        resolved_timeout = timeout_seconds if timeout_seconds is not None else self.timeout_seconds
         url = f"{self.base_url.rstrip('/')}/api/chat"
         payload: dict[str, Any] = {"model": resolved_model, "messages": messages, "stream": False}
         if response_format is not None:
@@ -196,10 +217,15 @@ class OllamaProvider:
                 url,
                 json=payload,
                 headers={"Content-Type": "application/json; charset=utf-8"},
-                timeout=self.timeout_seconds,
+                timeout=resolved_timeout,
             )
             response.raise_for_status()
             data = response.json()
+        except requests.Timeout as exc:
+            raise ProviderTimeoutError(
+                f"O Ollama excedeu o tempo limite de {resolved_timeout}s.",
+                provider=self.name,
+            ) from exc
         except requests.RequestException as exc:
             raise RuntimeError(
                 f"Nao consegui ligar ao Ollama (modelo '{resolved_model}'). "
@@ -265,13 +291,20 @@ class ProviderBackedLLM:
         source: str | None = None,
         temperature: float | None = None,
         num_predict: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> str:
         messages = [{"role": "system", "content": system_prompt or self.system_prompt}]
         messages.extend(history or [])
         messages.append({"role": "user", "content": user_message})
         source_name = str(source or self._next_call_source or "OTHER").strip() or "OTHER"
         self._next_call_source = ""
-        result = self.provider.chat(messages, response_format=response_format, temperature=temperature, num_predict=num_predict)
+        result = self.provider.chat(
+            messages,
+            response_format=response_format,
+            temperature=temperature,
+            num_predict=num_predict,
+            timeout_seconds=timeout_seconds,
+        )
         self.last_response = result
         self.responses.append(result)
         self._call_sources.append(source_name)

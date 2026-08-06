@@ -343,6 +343,7 @@ class RoutedLLM(ProviderBackedLLM):
         source: str | None = None,
         temperature: float | None = None,
         num_predict: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> str:
         messages = [{"role": "system", "content": system_prompt or self.system_prompt}]
         messages.extend(history or [])
@@ -369,7 +370,14 @@ class RoutedLLM(ProviderBackedLLM):
                 provider_error_type="provider_not_configured",
             )
         self.provider = provider
-        result = provider.chat(messages, model=decision.model, response_format=response_format, temperature=temperature, num_predict=num_predict)
+        result = provider.chat(
+            messages,
+            model=decision.model,
+            response_format=response_format,
+            temperature=temperature,
+            num_predict=num_predict,
+            timeout_seconds=timeout_seconds,
+        )
         self.router.budget.register(result) if self.router.budget is not None else None
         self.last_response = result
         self.responses.append(result)

@@ -5,7 +5,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from assistant.model_provider import ProviderConfigurationError
+from assistant.model_provider import ProviderConfigurationError, ProviderTimeoutError
 from assistant.voice_critic import VoiceCritic
 
 
@@ -18,6 +18,7 @@ class ChatModel(Protocol):
         response_format: str | None = None,
         temperature: float | None = None,
         num_predict: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> str: ...
 
 
@@ -71,6 +72,11 @@ class ComposerRequest:
     # None and the provider's own defaults apply, unchanged.
     temperature: float | None = None
     num_predict: int | None = None
+    # Only set by callers with their own deadline budget (currently just
+    # document rewrite). When set, a ProviderTimeoutError from the LLM
+    # propagates instead of being swallowed into a fallback reply, so the
+    # caller can react to it specifically (see compose() below).
+    timeout_seconds: float | None = None
     language_instruction: str = (
         "Preferências de idioma:\n"
         "- idioma_base = pt-PT.\n"
@@ -106,6 +112,8 @@ class ResponseComposer:
             generation_kwargs["temperature"] = request.temperature
         if request.num_predict is not None:
             generation_kwargs["num_predict"] = request.num_predict
+        if request.timeout_seconds is not None:
+            generation_kwargs["timeout_seconds"] = request.timeout_seconds
 
         try:
             _mark_llm_source(self.llm, "RESPONSE_COMPOSER")
@@ -117,6 +125,14 @@ class ResponseComposer:
             )
         except ProviderConfigurationError:
             raise
+        except ProviderTimeoutError:
+            # Only propagates for callers that set their own timeout_seconds
+            # (currently just document rewrite) -- everyone else keeps the
+            # pre-existing behavior of falling back to a safe reply, exactly
+            # as any other provider error already did.
+            if request.timeout_seconds is not None:
+                raise
+            return _simple_fallback(request)
         except Exception:
             return _simple_fallback(request)
 

@@ -13,7 +13,7 @@ from typing import Any
 
 import requests
 
-from assistant.model_provider import ModelResponse, ProviderConfigurationError, estimate_cost
+from assistant.model_provider import ModelResponse, ProviderConfigurationError, ProviderTimeoutError, estimate_cost
 
 
 ANTHROPIC_VERSION = "2023-06-01"
@@ -58,11 +58,13 @@ class AnthropicProvider:
         tools: list[dict] | None = None,
         temperature: float | None = None,
         num_predict: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> ModelResponse:
         # num_predict is Ollama-specific (options.num_predict); Anthropic has
         # no equivalent wired up yet, so it's accepted-and-ignored here only
         # to keep the ModelProvider interface uniform across providers.
         resolved_model = model or self.model
+        resolved_timeout = timeout_seconds if timeout_seconds is not None else self.timeout_seconds
         api_key = str(self.api_key_getter() if self.api_key_getter is not None else self.api_key or "").strip()
         if not api_key:
             raise ProviderConfigurationError(
@@ -100,12 +102,15 @@ class AnthropicProvider:
                 f"{self.base_url.rstrip('/')}{ANTHROPIC_MESSAGES_PATH}",
                 json=payload,
                 headers=headers,
-                timeout=self.timeout_seconds,
+                timeout=resolved_timeout,
             )
             response.raise_for_status()
             data = response.json()
         except requests.Timeout as exc:
-            raise RuntimeError("A chamada Anthropic excedeu o tempo limite configurado.") from exc
+            raise ProviderTimeoutError(
+                f"A chamada Anthropic excedeu o tempo limite de {resolved_timeout}s.",
+                provider=self.name,
+            ) from exc
         except requests.HTTPError as exc:
             status = getattr(exc.response, "status_code", None)
             if status == 429:
