@@ -584,6 +584,17 @@ class AssistantEngine:
             self._perf_log("resposta total", request_started_at, time.perf_counter())
             return document_fallback_response
 
+        clarification_response = self._try_ambiguous_opinion_clarification(user_message)
+        if clarification_response is not None:
+            clarification_response = self._complete_turn(
+                user_message,
+                clarification_response,
+                "CLARIFICATION_DETERMINISTIC",
+                selected_path="GENERAL_CONVERSATION",
+            )
+            self._perf_log("resposta total", request_started_at, time.perf_counter())
+            return clarification_response
+
         social_response = self._try_pure_social_turn(user_message)
         if social_response is not None:
             social_response = self._complete_turn(
@@ -1849,6 +1860,24 @@ class AssistantEngine:
                 language_instruction=self._language_instruction(),
             )
         )
+
+    def _try_ambiguous_opinion_clarification(self, user_message: str) -> str | None:
+        """A short opinion question with no antecedent at all (e.g. "O que
+        achas?" right after "Vamos falar de outra coisa.") has nothing to be
+        grounded in — there is no active document, and it is too short/vague
+        to answer or to treat as a memory-recall question. Ask what it is
+        about instead of letting the Composer guess; an ungrounded guess here
+        is exactly the kind of thing the Composer's own memory-claim guard
+        later has to catch and replace with a canned "posso consultar a
+        memória real" message, which reads as a wrong-cause substitution for
+        plain conversational ambiguity.
+        """
+        if self._active_document_context is not None:
+            return None
+        normalized = _normalize_text(user_message)
+        if not _is_referentially_ambiguous_opinion_question(normalized):
+            return None
+        return "Sobre o quê?"
 
     def _refresh_active_document_context(self, context: ActiveDocumentContext) -> tuple[ActiveDocumentContext, bool] | None:
         path = (self.workspace_path / context.resolved_file).resolve()
@@ -5496,6 +5525,21 @@ def _document_rewrite_correction_prompt(
         f"<USER_TRANSFORMATION>\n{request.instructions}\n</USER_TRANSFORMATION>\n\n"
         f"<RESPOSTA_INVALIDA_ANTERIOR razao=\"{reason}\">\n{_truncate_document_content(invalid_response, limit=2000)}\n</RESPOSTA_INVALIDA_ANTERIOR>"
     )
+
+
+_BARE_OPINION_QUESTION_MARKERS = ("achas", "que tal", "concordas", "o que dizes", "que dizes")
+
+
+def _is_referentially_ambiguous_opinion_question(text: str) -> bool:
+    """A short opinion question with no antecedent at all ("O que achas?"
+    right after a topic change, with no active document) — deterministically
+    ask what it's about instead of letting the Composer guess and risk a
+    hallucinated-sounding answer that later gets caught by the ungrounded-
+    memory-claim guard and replaced with a canned memory-flavored message."""
+    normalized = _normalize_text(text).strip(" .!?")
+    if not normalized or len(normalized.split()) > 4:
+        return False
+    return contains_any_phrase(normalized, _BARE_OPINION_QUESTION_MARKERS)
 
 
 def _active_document_followup_action(text: str, content_type: str = "") -> str:
