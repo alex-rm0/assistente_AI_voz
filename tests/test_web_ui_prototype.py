@@ -61,9 +61,9 @@ def test_web_ui_entity_exposes_state_api() -> None:
     entity = (WEB / "echo_entity.js").read_text(encoding="utf-8")
     ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
 
-    assert "setState(state)" in entity
-    assert "window.echoEntity.setState(value)" in ui
-    for state in ("idle", "thinking", "speaking", "error"):
+    assert "setState(state, options = {})" in entity
+    assert "window.echoEntity.setState(value, {intensityBoost});" in ui
+    for state in ("idle", "listening", "thinking", "reading", "working", "speaking", "error"):
         assert state in ui
 
 
@@ -877,3 +877,222 @@ def test_submit_message_reaches_idle_cleans_worker_and_delivers_progress_event()
     assert finished["count"] == 1
     assert "idle" in states
     assert controller.has_active_request() is False
+
+
+# --- Echo visual-state redesign (Passo 2): idle/listening/thinking/reading/
+# working/speaking/compact/focus/error. echo_entity.js exposes
+# window.EchoEntity + window.ECHO_STATE_CONFIG, so these run the real
+# animation code in Node rather than pattern-matching source text.
+
+ENTITY_JS_PATH = WEB / "echo_entity.js"
+
+
+def _run_entity_harness(js_tail: str) -> dict:
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        import pytest
+
+        pytest.skip("node is not available on PATH")
+
+    script = f"""
+    global.window = global;
+    global.__reducedMotion = false;
+    global.performance = {{ now: () => Date.now() }};
+    global.requestAnimationFrame = () => 0;
+    global.addEventListener = () => {{}};
+    global.getComputedStyle = () => ({{ getPropertyValue: () => "" }});
+    window.matchMedia = () => ({{
+      get matches() {{ return global.__reducedMotion === true; }},
+      addEventListener() {{}},
+      addListener() {{}}
+    }});
+
+    function fakeCtx() {{
+      return {{
+        setTransform() {{}}, clearRect() {{}}, beginPath() {{}}, arc() {{}}, fill() {{}}, stroke() {{}},
+        moveTo() {{}}, lineTo() {{}},
+        createRadialGradient() {{ return {{ addColorStop() {{}} }}; }}
+      }};
+    }}
+    function fakeCanvas() {{
+      return {{
+        getContext: () => fakeCtx(),
+        getBoundingClientRect: () => ({{ width: 1300, height: 812 }}),
+        closest: () => null,
+        addEventListener() {{}},
+        width: 0, height: 0
+      }};
+    }}
+
+    require({json.dumps(str(ENTITY_JS_PATH))});
+
+    {js_tail}
+    """
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, f"node harness failed:\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+SEMANTIC_ENTITY_STATES = {"idle", "listening", "thinking", "reading", "working", "speaking", "error"}
+REQUIRED_STATE_CONFIG_KEYS = (
+    "spin", "statePulse", "nodeDecay", "edgeDecay", "pulseChance", "driftScale",
+    "accent", "outerAlpha", "coreAlpha", "sparkOnEnter", "ambientSparkRate", "periodicFocusSpark",
+)
+
+
+def test_echo_entity_state_config_covers_all_semantic_states() -> None:
+    """16.A: each semantic state produces its own configured visual state,
+    and an unrecognised state name falls back to idle instead of silently
+    rendering nothing special."""
+    result = _run_entity_harness(
+        """
+        const REQUIRED = %s;
+        const configKeys = Object.keys(window.ECHO_STATE_CONFIG).sort();
+        const missingKeys = {};
+        for (const k of configKeys) {
+          missingKeys[k] = REQUIRED.filter((r) => !(r in window.ECHO_STATE_CONFIG[k]));
+        }
+        const entity = new window.EchoEntity(fakeCanvas());
+        const observedStates = {};
+        for (const name of configKeys) {
+          entity.setState(name);
+          observedStates[name] = entity.state;
+        }
+        entity.setState("nonexistent_state_xyz");
+        console.log(JSON.stringify({configKeys, missingKeys, observedStates, fallbackState: entity.state}));
+        """
+        % (list(REQUIRED_STATE_CONFIG_KEYS),)
+    )
+
+    assert set(result["configKeys"]) == SEMANTIC_ENTITY_STATES
+    assert all(not missing for missing in result["missingKeys"].values()), result["missingKeys"]
+    assert all(result["observedStates"][name] == name for name in SEMANTIC_ENTITY_STATES)
+    assert result["fallbackState"] == "idle"
+
+
+def test_echo_entity_layout_role_combines_with_cognitive_state() -> None:
+    """16.B: compact/focus are spatial roles orthogonal to the cognitive
+    state -- setting one must never overwrite the other."""
+    result = _run_entity_harness(
+        """
+        const entity = new window.EchoEntity(fakeCanvas());
+        const combos = [];
+        for (const mode of ["idle", "thinking", "working", "speaking"]) {
+          for (const role of ["normal", "compact", "focus"]) {
+            entity.setState(mode);
+            entity.setLayoutRole(role);
+            combos.push({mode, role, observedState: entity.state, observedRole: entity.layoutRole});
+          }
+        }
+        console.log(JSON.stringify({combos}));
+        """
+    )
+
+    for combo in result["combos"]:
+        assert combo["observedState"] == combo["mode"], combo
+        assert combo["observedRole"] == combo["role"], combo
+
+
+def test_echo_entity_reduced_motion_lowers_live_motion_params() -> None:
+    """16.I: prefers-reduced-motion must reduce (not necessarily eliminate)
+    canvas-side motion parameters -- this loop is outside CSS's reach."""
+    result = _run_entity_harness(
+        """
+        function buildAndStep(reduced) {
+          global.__reducedMotion = reduced;
+          const entity = new window.EchoEntity(fakeCanvas());
+          entity.setState("thinking");
+          for (let i = 0; i < 240; i += 1) entity.stepLiveParams(0.05);
+          return {spin: entity.liveParams.spin, pulseChance: entity.liveParams.pulseChance, driftScale: entity.liveParams.driftScale};
+        }
+        const normal = buildAndStep(false);
+        const reduced = buildAndStep(true);
+        console.log(JSON.stringify({normal, reduced}));
+        """
+    )
+
+    assert result["reduced"]["spin"] < result["normal"]["spin"]
+    assert result["reduced"]["pulseChance"] < result["normal"]["pulseChance"]
+    assert result["reduced"]["driftScale"] < result["normal"]["driftScale"]
+
+
+def test_echo_entity_regeneration_intensity_boost_raises_live_params() -> None:
+    """16.D (entity side): rewrite_regeneration_started keeps the "working"
+    mode but must read as slightly more intense than a plain working tick."""
+    result = _run_entity_harness(
+        """
+        function buildAndStep(boost) {
+          const entity = new window.EchoEntity(fakeCanvas());
+          entity.setState("working", {intensityBoost: boost});
+          for (let i = 0; i < 240; i += 1) entity.stepLiveParams(0.05);
+          return {coreAlpha: entity.liveParams.coreAlpha, statePulse: entity.liveParams.statePulse};
+        }
+        const base = buildAndStep(1);
+        const boosted = buildAndStep(1.15);
+        console.log(JSON.stringify({base, boosted}));
+        """
+    )
+
+    assert result["boosted"]["coreAlpha"] > result["base"]["coreAlpha"]
+    assert result["boosted"]["statePulse"] > result["base"]["statePulse"]
+
+
+def test_progress_events_map_to_states_and_labels_without_new_layout() -> None:
+    """16.D (UI side): the live rewrite progress events drive mode +
+    progressLabel through the single PROGRESS_EVENT_STATE_MAP table."""
+    ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
+    map_block = ui[ui.index("const PROGRESS_EVENT_STATE_MAP"):ui.index("let currentProgressLabel")]
+
+    assert '{mode: "working", progressLabel: "A reescrever…"}' in map_block.replace("\n", " ").replace("  ", " ") or "rewrite_attempt_started" in map_block
+    assert "rewrite_validation_started" in map_block and "A validar a versão" in map_block
+    assert "rewrite_regeneration_started" in map_block and "intensityBoost: 1.15" in map_block
+    assert "rewrite_cancelled" in map_block and '{mode: "idle", progressLabel: ""}' in map_block
+    assert "rewrite_timeout" in map_block and '{mode: "error", progressLabel: ""}' in map_block
+    assert "cancel_requested" in map_block and "mode: null" in map_block
+    # Not a new DOM element / new layout region -- reuses the existing
+    # #statusLine element via updateStatusLabel.
+    assert "function applyEchoState" in ui
+    assert "updateStatusLabel(value, currentProgressLabel)" in ui
+
+
+def test_progress_events_are_handled_before_workspace_delegation() -> None:
+    """Progress events (working/idle/error) are not research/memory
+    workspace events -- they must be intercepted before
+    window.echoWorkspace.handleEvent, not silently misrouted into it."""
+    ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
+    dispatch_block = ui[ui.index("function handleUiEventPayload"):ui.index("function fadeCurrentReply")]
+
+    assert "if (applyProgressEvent(event)) return;" in dispatch_block
+    assert dispatch_block.index("applyProgressEvent(event)") < dispatch_block.index("echoWorkspace.handleEvent")
+
+
+def test_focus_role_never_hides_echo_entity() -> None:
+    """16.C: focus lowers Echo's prominence but never hides it -- no rule
+    may set display:none/visibility:hidden on the entity for focus/compact."""
+    css = (WEB / "styles.css").read_text(encoding="utf-8")
+    role_block = css[css.index('.stage[data-echo-role="compact"] #mind'):css.index('.stage[data-echo-role="compact"] #mind') + 400]
+
+    assert "display: none" not in role_block
+    assert "visibility: hidden" not in role_block
+    assert "opacity: .92" in role_block or "opacity: .9" in role_block
+
+
+def test_controller_known_states_include_new_modes_and_skip_speaking_on_cancel_timeout() -> None:
+    """16.E/F: cancellation goes straight to idle and timeout flashes error
+    then idle -- skipping the normal thinking->speaking animation, driven
+    off the same progress-event tracking used for telemetry."""
+    controller = (PROTOTYPE / "controller.py").read_text(encoding="utf-8")
+
+    for state in ("idle", "listening", "thinking", "reading", "working", "speaking", "error"):
+        assert f'"{state}"' in controller
+
+    assert "self._last_progress_event = str(event or \"\")" in controller
+    response_block = controller[controller.index("def _handle_response"):controller.index("def _handle_error")]
+    assert 'last_progress_event == "rewrite_cancelled"' in response_block
+    assert 'last_progress_event == "rewrite_timeout"' in response_block
+    assert 'self._emit_state("idle")' in response_block
+    assert 'self._emit_state("error")' in response_block

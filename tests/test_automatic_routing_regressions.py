@@ -2229,3 +2229,46 @@ def test_document_rewrite_emits_cancelled_progress_event(tmp_path: Path, monkeyp
 
     assert response == "Pedido cancelado."
     assert "rewrite_cancelled" in events
+
+
+def test_document_rewrite_progress_events_never_reach_conversation_history(tmp_path: Path) -> None:
+    """16.J: progress events (and the frontend's auxiliary progress labels
+    derived from them) drive the entity/status-line only -- the actual
+    conversation history must contain neither the raw event names nor the
+    Portuguese label text a UI would show for them."""
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=[
+            "O documento parece pronto para enviar! É para enviar a algum destinatário?",
+            _VALID_FORMAL_REWRITE,
+        ],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+
+    events: list[str] = []
+    engine.set_progress_listener(events.append)
+    try:
+        engine.respond("lê o ficheiro email_resumo_novo e diz exatamente o que lá está escrito")
+        engine.respond("Torna-o mais formal, mas não guardes ainda.")
+    finally:
+        engine.set_progress_listener(None)
+
+    assert "rewrite_regeneration_started" in events
+
+    history_text = " ".join(f"{entry.get('role')}:{entry.get('content')}" for entry in engine.memory.load())
+    forbidden_fragments = (
+        "rewrite_attempt_started",
+        "rewrite_validation_started",
+        "rewrite_regeneration_started",
+        "rewrite_cancelled",
+        "rewrite_timeout",
+        "A reescrever",
+        "A validar a versão",
+        "A tentar novamente",
+        "A cancelar",
+    )
+    for fragment in forbidden_fragments:
+        assert fragment not in history_text
+
