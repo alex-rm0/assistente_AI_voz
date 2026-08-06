@@ -562,6 +562,10 @@ def _reason_from_selected_path(selected_path: str) -> str:
         return "social_fast_path"
     if "SYSTEM_DATETIME" in path:
         return "system_datetime"
+    if "SYSTEM_CONTEXT_STATUS" in path:
+        return "system_context_status"
+    if "WRITING_TASK" in path:
+        return "writing_workflow"
     if "MEMORY" in path:
         return "memory_recall"
     if "TOOL" in path or "FAST_ROUTE" in path:
@@ -585,6 +589,10 @@ def _execution_path_from_telemetry(telemetry: dict[str, Any], llm_calls: int) ->
         return "social_fast_path"
     if selected == "SYSTEM_DATETIME":
         return "system_datetime"
+    if selected == "SYSTEM_CONTEXT_STATUS":
+        return "system_context_status"
+    if selected == "WRITING_TASK":
+        return "writing_workflow"
     if "MEMORY" in selected:
         return "memory_recall"
     if selected == "DOCUMENT_TASK":
@@ -598,7 +606,7 @@ def _execution_path_from_telemetry(telemetry: dict[str, Any], llm_calls: int) ->
 
 def _provider_for_local_path(selected_path: str, provider: str) -> str:
     path = selected_path.upper()
-    if "SOCIAL" in path or "SYSTEM_DATETIME" in path:
+    if "SOCIAL" in path or "SYSTEM_DATETIME" in path or "SYSTEM_CONTEXT_STATUS" in path or "WRITING_TASK" in path:
         return "local"
     if "MEMORY" in path:
         return "memory"
