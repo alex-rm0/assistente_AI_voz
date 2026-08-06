@@ -17,10 +17,33 @@
   const stateLabels = {
     active: ["ACTIVE", "#8fd0c4"],
     idle: ["IDLE", "#5a5d6b"],
+    listening: ["LISTENING", "#66cdff"],
     thinking: ["THINKING", "#6ea8ff"],
+    reading: ["READING", "#6ea8ff"],
+    working: ["WORKING", "#6ea8ff"],
     speaking: ["SPEAKING", "#8fd0c4"],
     error: ["ERROR", "#f08a8a"]
   };
+
+  // Maps the live progress uiEvents (see assistant/conversation.py's
+  // _emit_progress + prototype_web_ui/controller.py's _handle_progress) to
+  // an entity mode + auxiliary label. These never touch conversation
+  // history -- they only drive the entity/status-line, exactly like the
+  // pre-existing research_started/topic_changed events do.
+  const PROGRESS_EVENT_STATE_MAP = {
+    rewrite_attempt_started: {mode: "working", progressLabel: "A reescrever…"},
+    rewrite_validation_started: {mode: "working", progressLabel: "A validar a versão…"},
+    rewrite_regeneration_started: {
+      mode: "working",
+      progressLabel: "A primeira versão ficou incompleta. A tentar novamente…",
+      intensityBoost: 1.15
+    },
+    rewrite_cancelled: {mode: "idle", progressLabel: ""},
+    rewrite_timeout: {mode: "error", progressLabel: ""},
+    cancel_requested: {mode: null, progressLabel: "A cancelar…"}
+  };
+
+  let currentProgressLabel = "";
 
   const routingLabels = {
     professional_writing: "Professional writing",
@@ -186,16 +209,25 @@
     const responseSize = responseSizeForElement(byId("echoResponse"));
     const responseLayout = stage.dataset.responseLayout || "inline";
     const entityScale = entityScaleForLayout(density, responseSize, height, responseLayout);
+    // compact/focus are spatial roles derived from values the Adaptive
+    // Layout System already computes -- not a duplicate positioning system,
+    // just reading its output. They combine with whatever cognitive mode
+    // (thinking/working/speaking/idle) is currently active.
+    const echoRole = responseLayout === "focus" ? "focus" : (entityScale === "compact" || entityScale === "reduced") ? "compact" : "normal";
 
     stage.dataset.layoutDensity = density;
     stage.dataset.responseSize = responseSize;
     stage.dataset.responseLayout = responseLayout;
     stage.dataset.entityScale = entityScale;
+    stage.dataset.echoRole = echoRole;
     stage.style.setProperty("--stage-width", `${Math.round(width)}px`);
     stage.style.setProperty("--stage-height", `${Math.round(height)}px`);
     scaler.style.transform = "none";
     if (window.echoEntity && typeof window.echoEntity.resize === "function") {
       window.echoEntity.resize();
+    }
+    if (window.echoEntity && typeof window.echoEntity.setLayoutRole === "function") {
+      window.echoEntity.setLayoutRole(echoRole);
     }
   }
 
@@ -225,7 +257,7 @@
     form.classList.toggle("busy", !enabled);
   }
 
-  function updateStatusLabel(state) {
+  function updateStatusLabel(state, progressLabel) {
     const stage = document.querySelector(".stage");
     const statusLine = byId("statusLine");
     const label = stateLabels[state] || stateLabels.error;
@@ -236,7 +268,8 @@
     }
 
     stage.dataset.state = state;
-    statusLine.textContent = label[0];
+    const text = String(progressLabel || "").trim();
+    statusLine.textContent = text || label[0];
     statusLine.style.color = label[1];
   }
 
@@ -450,6 +483,15 @@
       elements.singleCallBudgetUsd.value = Number(data.max_single_call_estimated_usd || 0).toFixed(2);
     }
     updateTelemetryButtons();
+
+    // "reading": a brief, honest flash right as a document-tool response
+    // (no LLM call, execution_path=="document_task") arrives -- reusing
+    // telemetry that already flows over the wire, not a new backend event.
+    // Python's own stateChanged("speaking") lands a moment later and
+    // naturally takes over, so this never needs to be cleared explicitly.
+    if (state === "response_ready" && executionPath === "document_task") {
+      applyEchoState("reading", {progressLabel: ""});
+    }
   }
 
   function updateModelConfigState(data) {
@@ -1358,23 +1400,50 @@
     };
   }
 
-  function applyEchoState(state) {
+  // Single entry point translating a semantic state (+ optional progress
+  // sub-state) into the entity animation, the status-line auxiliary text,
+  // and the CSS hook (body[data-echo-mode]) -- nothing else should set
+  // echoEntity.setState or statusLine text directly.
+  function applyEchoState(state, options = {}) {
     const value = String(state || "idle").trim().toLowerCase();
-    console.log("[Echo UI JS] applyEchoState:", value);
+    const intensityBoost = Number.isFinite(options.intensityBoost) ? options.intensityBoost : 1;
+    console.log("[Echo UI JS] applyEchoState:", value, options);
 
     if (window.echoEntity && typeof window.echoEntity.setState === "function") {
-      window.echoEntity.setState(value);
+      window.echoEntity.setState(value, {intensityBoost});
     } else {
       console.error("[Echo UI JS] echoEntity.setState indisponivel");
     }
 
-    updateStatusLabel(value);
+    if (options.progressLabel !== undefined) {
+      currentProgressLabel = String(options.progressLabel || "");
+    } else if (value === "idle" || value === "error") {
+      currentProgressLabel = "";
+    }
+    updateStatusLabel(value, currentProgressLabel);
     document.body.dataset.echoState = value;
+    document.body.dataset.echoMode = value;
 
     if (value === "idle") {
       const echoSays = byId("echoSays");
       if (echoSays) echoSays.classList.remove("visible");
     }
+  }
+
+  // Handles the live progress uiEvents (rewrite_attempt_started, ...,
+  // cancel_requested) via PROGRESS_EVENT_STATE_MAP. Returns true if the
+  // event was one of these (caller should not forward it to
+  // window.echoWorkspace, which only knows about research/memory events).
+  function applyProgressEvent(event) {
+    const action = PROGRESS_EVENT_STATE_MAP[event.type];
+    if (!action) return false;
+    if (action.mode) {
+      applyEchoState(action.mode, {progressLabel: action.progressLabel, intensityBoost: action.intensityBoost || 1});
+    } else if (action.progressLabel !== undefined) {
+      currentProgressLabel = action.progressLabel;
+      updateStatusLabel(document.body.dataset.echoState || "idle", currentProgressLabel);
+    }
+    return true;
   }
 
   function focusInput() {
@@ -1639,6 +1708,7 @@
       console.error("[Echo UI JS] uiEvent sem type valido", event);
       return;
     }
+    if (applyProgressEvent(event)) return;
     if (window.echoWorkspace) window.echoWorkspace.handleEvent(event);
   }
 

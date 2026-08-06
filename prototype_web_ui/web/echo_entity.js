@@ -1,4 +1,68 @@
 (function () {
+  // Single central control point for how each semantic state looks/moves.
+  // Every per-state visual difference (speed, density/decay, glow, color,
+  // ambient behaviour) lives here instead of being scattered across loop()/
+  // draw() as ad-hoc ternaries -- see STATE_CONFIG below.
+  //
+  // driftScale multiplies the ambient wander of the entity's center point;
+  // pulseChance/statePulse/nodeDecay/edgeDecay/spin keep their original
+  // meaning (see loop()); sparkOnEnter is one of "focus" (spark a persistent
+  // focus node, re-sparked periodically -- used by thinking/working),
+  // "goal" (boost the goal node once -- listening/speaking) or "random"
+  // (one-shot scatter spark -- error); accent is the [r,g,b] glow color.
+  const STATE_CONFIG = {
+    idle: {
+      spin: 0.14, statePulse: 0.022, nodeDecay: 1.55, edgeDecay: 1.4,
+      pulseChance: 2.2, driftScale: 1.0, ambientSparkRate: 0, periodicFocusSpark: false,
+      accent: [70, 197, 255], outerAlpha: 0.20, coreAlpha: 0.50, sparkOnEnter: null
+    },
+    listening: {
+      spin: 0.15, statePulse: 0.024, nodeDecay: 1.7, edgeDecay: 1.6,
+      pulseChance: 1.8, driftScale: 0.85, ambientSparkRate: 0, periodicFocusSpark: false,
+      accent: [102, 205, 255], outerAlpha: 0.21, coreAlpha: 0.52, sparkOnEnter: "goal"
+    },
+    thinking: {
+      spin: 0.20, statePulse: 0.030, nodeDecay: 2.3, edgeDecay: 2.6,
+      pulseChance: 1.3, driftScale: 0.4, ambientSparkRate: 0, periodicFocusSpark: true,
+      accent: [70, 197, 255], outerAlpha: 0.24, coreAlpha: 0.58, sparkOnEnter: "focus"
+    },
+    reading: {
+      spin: 0.12, statePulse: 0.016, nodeDecay: 1.4, edgeDecay: 1.3,
+      pulseChance: 1.0, driftScale: 0.5, ambientSparkRate: 0, periodicFocusSpark: false,
+      accent: [70, 197, 255], outerAlpha: 0.18, coreAlpha: 0.46, sparkOnEnter: null
+    },
+    working: {
+      spin: 0.15, statePulse: 0.028, nodeDecay: 2.0, edgeDecay: 2.3,
+      pulseChance: 1.5, driftScale: 0.35, ambientSparkRate: 0, periodicFocusSpark: true,
+      accent: [70, 197, 255], outerAlpha: 0.23, coreAlpha: 0.55, sparkOnEnter: "focus"
+    },
+    speaking: {
+      spin: 0.16, statePulse: 0.025, nodeDecay: 1.9, edgeDecay: 2.2,
+      pulseChance: 0.8, driftScale: 1.1, ambientSparkRate: 0.8, periodicFocusSpark: false,
+      accent: [143, 208, 196], outerAlpha: 0.20, coreAlpha: 0.54, sparkOnEnter: "goal"
+    },
+    error: {
+      spin: 0.08, statePulse: 0.014, nodeDecay: 1.2, edgeDecay: 1.0,
+      pulseChance: 0.6, driftScale: 0.15, ambientSparkRate: 0, periodicFocusSpark: false,
+      accent: [240, 138, 138], outerAlpha: 0.16, coreAlpha: 0.50, sparkOnEnter: "random"
+    }
+  };
+
+  // Spatial roles (compact/focus) are not cognitive states -- they combine
+  // with whatever STATE_CONFIG mode is active by scaling intensity down a
+  // little, so Echo draws less attention when the layout needs the space.
+  const ROLE_INTENSITY = { normal: 1, compact: 0.85, focus: 0.75 };
+
+  const TRANSITION_KEYS = [
+    "spin", "statePulse", "nodeDecay", "edgeDecay", "pulseChance",
+    "driftScale", "outerAlpha", "coreAlpha"
+  ];
+  // How quickly live parameters ease toward the target state's config --
+  // higher = snappier. Kept state-independent and moderate so every
+  // transition (idle->thinking, working->error, etc.) reads as a glide
+  // rather than a jump, without ever feeling sluggish to respond.
+  const TRANSITION_RATE = 2.4;
+
   class EchoEntity {
     constructor(canvas) {
       this.canvas = canvas;
@@ -8,6 +72,8 @@
       this.edges = [];
       this.pulses = [];
       this.state = "idle";
+      this.intensityBoost = 1;
+      this.layoutRole = "normal";
       this.yaw = 0;
       this.pitch = 0.42;
       this.t = 0;
@@ -21,6 +87,23 @@
       this.cyTarget = 0;
       this.customCenter = false;
       this.R = 160;
+
+      // prefers-reduced-motion reaches only CSS transitions/animations by
+      // default -- this canvas loop runs on its own requestAnimationFrame
+      // clock, so it needs its own check. Motion (spin/pulse/drift/ambient
+      // sparking) is reduced, not eliminated: Echo must keep reading as
+      // alive, just calmer (section 15).
+      this.motionMedia = window.matchMedia ? window.matchMedia("(prefers-reduced-motion: reduce)") : null;
+      this.reducedMotion = Boolean(this.motionMedia && this.motionMedia.matches);
+      if (this.motionMedia) {
+        const onChange = (event) => { this.reducedMotion = Boolean(event.matches); };
+        if (typeof this.motionMedia.addEventListener === "function") this.motionMedia.addEventListener("change", onChange);
+        else if (typeof this.motionMedia.addListener === "function") this.motionMedia.addListener(onChange);
+      }
+
+      this.liveParams = { ...STATE_CONFIG.idle };
+      this.liveAccent = [...STATE_CONFIG.idle.accent];
+
       this.resize();
       this.buildMind();
       window.addEventListener("resize", () => this.resize());
@@ -145,22 +228,38 @@
       });
     }
 
-    setState(state) {
-      this.state = state || "idle";
-      if (this.state === "thinking") {
+    // Central entry point: translate a semantic state name into the
+    // STATE_CONFIG entry that drives loop()/draw(); unknown state strings
+    // fall back to "idle" rather than silently rendering nothing special.
+    // intensityBoost lets a sub-state (e.g. rewrite regeneration) push the
+    // same "working" mode a little harder without switching mode.
+    setState(state, options = {}) {
+      const next = String(state || "idle").trim().toLowerCase();
+      this.state = STATE_CONFIG[next] ? next : "idle";
+      this.intensityBoost = Number.isFinite(options.intensityBoost) ? options.intensityBoost : 1;
+      const config = STATE_CONFIG[this.state];
+      if (config.sparkOnEnter === "focus") {
         this.thinkingFocus = this.nodes[(Math.random() * this.nodes.length) | 0];
         this.nextThinkingSpark = 0;
         this.spark(this.thinkingFocus, 1);
-      } else if (this.state === "speaking") {
+      } else if (config.sparkOnEnter === "goal") {
         const goal = this.nodes[0];
         if (goal) goal.act = Math.max(goal.act, 0.72);
-      } else if (this.state === "error") {
+      } else if (config.sparkOnEnter === "random") {
         this.sparkRandom(1, 0);
       }
       if (!this.customCenter) {
         this.cxTarget = this.w * 0.5;
         this.cyTarget = this.h * 0.5;
       }
+    }
+
+    // Spatial role reported by the Adaptive Layout System (normal/compact/
+    // focus) -- purely dampens intensity, never touches size/position
+    // (those stay owned by CSS --entity-size-actual and setCenter/layout).
+    setLayoutRole(role) {
+      const next = String(role || "normal").trim().toLowerCase();
+      this.layoutRole = Object.prototype.hasOwnProperty.call(ROLE_INTENSITY, next) ? next : "normal";
     }
 
     setCenter(x, y, immediate = false) {
@@ -232,45 +331,73 @@
       }
     }
 
+    // Eases this.liveParams/this.liveAccent toward the current state's
+    // target config (scaled by intensityBoost, layoutRole and reduced-
+    // motion) so switching state glides rather than jumps -- see
+    // TRANSITION_RATE/TRANSITION_KEYS above.
+    stepLiveParams(dt) {
+      const config = STATE_CONFIG[this.state] || STATE_CONFIG.idle;
+      const roleScale = ROLE_INTENSITY[this.layoutRole] ?? 1;
+      const motionScale = this.reducedMotion ? 0.4 : 1;
+      const boost = this.intensityBoost || 1;
+      const ease = Math.min(1, dt * TRANSITION_RATE);
+      for (const key of TRANSITION_KEYS) {
+        let target = config[key];
+        if (key === "outerAlpha" || key === "coreAlpha" || key === "statePulse") target *= roleScale * boost;
+        if (key === "spin" || key === "pulseChance" || key === "driftScale") target *= motionScale;
+        this.liveParams[key] += (target - this.liveParams[key]) * ease;
+      }
+      for (let i = 0; i < 3; i += 1) {
+        this.liveAccent[i] += (config.accent[i] - this.liveAccent[i]) * ease;
+      }
+    }
+
     loop(now) {
       const dt = Math.min(0.05, (now - this.last) / 1000);
       this.last = now;
       this.t += dt;
-      const spin = this.state === "thinking" ? 0.17 : this.state === "speaking" ? 0.16 : 0.14;
-      this.yaw += dt * spin;
-      this.cx += (this.cxTarget + Math.sin(this.t * 0.12) * this.w * 0.006 - this.cx) * Math.min(1, dt * 1.5);
-      this.cy += (this.cyTarget + Math.cos(this.t * 0.1) * this.h * 0.006 - this.cy) * Math.min(1, dt * 1.5);
-      const statePulse = this.state === "thinking" ? 0.026 : this.state === "speaking" ? 0.025 : 0.022;
-      this.R = (52 + 11 * Math.sqrt(this.nodes.length)) * (1 + statePulse * Math.sin(this.t * 1.2));
-      const nodeDecay = this.state === "thinking" ? 2.1 : this.state === "speaking" ? 1.9 : 1.55;
-      const edgeDecay = this.state === "thinking" ? 2.5 : this.state === "speaking" ? 2.2 : 1.4;
+      this.stepLiveParams(dt);
+      const config = STATE_CONFIG[this.state] || STATE_CONFIG.idle;
+      const p = this.liveParams;
+
+      this.yaw += dt * p.spin;
+      const drift = p.driftScale;
+      this.cx += (this.cxTarget + Math.sin(this.t * 0.12) * this.w * 0.006 * drift - this.cx) * Math.min(1, dt * 1.5);
+      this.cy += (this.cyTarget + Math.cos(this.t * 0.1) * this.h * 0.006 * drift - this.cy) * Math.min(1, dt * 1.5);
+      this.R = (52 + 11 * Math.sqrt(this.nodes.length)) * (1 + p.statePulse * Math.sin(this.t * 1.2));
+
       for (const n of this.nodes) {
         const k = Math.min(1, dt * 3);
         n.pos[0] += (n.dir[0] - n.pos[0]) * k;
         n.pos[1] += (n.dir[1] - n.pos[1]) * k;
         n.pos[2] += (n.dir[2] - n.pos[2]) * k;
-        n.act *= Math.max(0, 1 - dt * nodeDecay);
+        n.act *= Math.max(0, 1 - dt * p.nodeDecay);
       }
-      for (const e of this.edges) e.act *= Math.max(0, 1 - dt * edgeDecay);
+      for (const e of this.edges) e.act *= Math.max(0, 1 - dt * p.edgeDecay);
+
       this.nextAmbient -= dt;
       if (this.nextAmbient <= 0) {
         this.nextAmbient = 3.5 + Math.random() * 4;
         this.spark(this.nodes[(Math.random() * this.nodes.length) | 0], 1);
       }
+
       this.nextThinkingSpark -= dt;
-      if (this.state === "thinking" && this.nextThinkingSpark <= 0) {
+      if (config.periodicFocusSpark && this.nextThinkingSpark <= 0) {
         const focus = this.thinkingFocus || this.nodes[(Math.random() * this.nodes.length) | 0];
         this.spark(focus, 1);
         this.nextThinkingSpark = 0.45 + Math.random() * 0.45;
       }
-      if (this.state === "speaking" && Math.random() < dt * 0.8) this.sparkRandom(1, 0);
-      const pulseChance = this.state === "thinking" ? dt * 1.2 : this.state === "speaking" ? dt * 0.8 : dt * 2.2;
+      if (config.ambientSparkRate > 0 && Math.random() < dt * config.ambientSparkRate * (this.reducedMotion ? 0.4 : 1)) {
+        this.sparkRandom(1, 0);
+      }
+
+      const pulseChance = p.pulseChance * dt;
       if (Math.random() < pulseChance && this.edges.length) {
         const e = this.edges[(Math.random() * this.edges.length) | 0];
         this.pulses.push({ from: e.a, to: e.b, p: 0, sp: 0.55 + Math.random() * 0.7, s: 0.32 });
       }
-      for (const p of this.pulses) p.p += dt * p.sp;
-      this.pulses = this.pulses.filter((p) => p.p < 1);
+      for (const pulse of this.pulses) pulse.p += dt * pulse.sp;
+      this.pulses = this.pulses.filter((pulse) => pulse.p < 1);
       this.projectAll(dt);
       this.draw();
       requestAnimationFrame((next) => this.loop(next));
@@ -279,10 +406,11 @@
     draw() {
       const ctx = this.ctx;
       ctx.clearRect(0, 0, this.w, this.h);
-      const accent = this.state === "error" ? [240, 138, 138] : this.state === "speaking" ? [143, 208, 196] : [70, 197, 255];
+      const accent = this.liveAccent;
+      const p = this.liveParams;
       ctx.globalCompositeOperation = "lighter";
-      const outerAlpha = this.state === "thinking" ? 0.22 : this.state === "error" ? 0.16 : 0.20;
-      const coreAlpha = this.state === "thinking" ? 0.56 : this.state === "speaking" ? 0.54 : 0.50;
+      const outerAlpha = p.outerAlpha;
+      const coreAlpha = p.coreAlpha;
       const outer = ctx.createRadialGradient(this.cx, this.cy - this.R * 0.15, 0, this.cx, this.cy, this.R * 1.3);
       outer.addColorStop(0, `rgba(${accent[0]},${accent[1]},${accent[2]},${outerAlpha})`);
       outer.addColorStop(0.6, "rgba(40,64,120,0.08)");
@@ -317,12 +445,12 @@
         ctx.stroke();
       }
       ctx.globalCompositeOperation = "lighter";
-      for (const p of this.pulses) {
-        const x = p.from.sx + (p.to.sx - p.from.sx) * p.p;
-        const y = p.from.sy + (p.to.sy - p.from.sy) * p.p;
-        const rad = 4 * p.s;
+      for (const pulse of this.pulses) {
+        const x = pulse.from.sx + (pulse.to.sx - pulse.from.sx) * pulse.p;
+        const y = pulse.from.sy + (pulse.to.sy - pulse.from.sy) * pulse.p;
+        const rad = 4 * pulse.s;
         const g = ctx.createRadialGradient(x, y, 0, x, y, rad);
-        g.addColorStop(0, `rgba(226,240,255,${0.55 * p.s})`);
+        g.addColorStop(0, `rgba(226,240,255,${0.55 * pulse.s})`);
         g.addColorStop(1, "rgba(226,240,255,0)");
         ctx.fillStyle = g;
         ctx.beginPath();
@@ -371,4 +499,5 @@
   }
 
   window.EchoEntity = EchoEntity;
+  window.ECHO_STATE_CONFIG = STATE_CONFIG;
 })();

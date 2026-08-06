@@ -80,6 +80,12 @@ class EchoUIController(QObject):
         self._active = False
         self._started_at = 0.0
         self._visual_token = 0
+        # Set by _handle_progress with the most recent rewrite progress
+        # event for this request; consulted by _handle_response to decide
+        # whether the normal thinking->speaking->idle animation should be
+        # skipped in favour of going straight to idle (cancellation) or a
+        # brief error flash (timeout) -- see _handle_response.
+        self._last_progress_event = ""
 
     @Slot(str)
     def submitMessage(self, text: str) -> None:
@@ -98,6 +104,7 @@ class EchoUIController(QObject):
         self._active = True
         self._started_at = time.perf_counter()
         self._visual_token += 1
+        self._last_progress_event = ""
         self.requestStarted.emit(message)
         self._emit_state("thinking")
         self._emit_runtime_telemetry("request_started")
@@ -219,10 +226,21 @@ class EchoUIController(QObject):
         self._emit_response_ready(response_text)
         self._emit_pending_ui_events()
         self._emit_runtime_telemetry("response_ready")
-        elapsed_ms = int((time.perf_counter() - self._started_at) * 1000) if self._started_at else 0
-        delay_ms = max(0, self.thinking_min_ms - elapsed_ms)
-        token = self._visual_token
-        QTimer.singleShot(delay_ms, lambda: self._enter_speaking(token))
+        last_progress_event = self._last_progress_event
+        self._last_progress_event = ""
+        if last_progress_event == "rewrite_cancelled":
+            # The request already resolved to "Pedido cancelado." -- go
+            # straight to idle instead of playing the normal thinking->
+            # speaking animation over a response nobody asked to see spoken.
+            self._emit_state("idle")
+        elif last_progress_event == "rewrite_timeout":
+            self._emit_state("error")
+            QTimer.singleShot(900, lambda: self._emit_state("idle"))
+        else:
+            elapsed_ms = int((time.perf_counter() - self._started_at) * 1000) if self._started_at else 0
+            delay_ms = max(0, self.thinking_min_ms - elapsed_ms)
+            token = self._visual_token
+            QTimer.singleShot(delay_ms, lambda: self._enter_speaking(token))
         self._cleanup_worker()
 
     @Slot(str)
@@ -246,6 +264,7 @@ class EchoUIController(QObject):
     def _handle_progress(self, event: str) -> None:
         self._thread_debug("_handle_progress")
         _debug_ui(f"[Echo UI] progress_event={event}")
+        self._last_progress_event = str(event or "")
         self.uiEvent.emit(_json_payload({"type": str(event or "")}))
 
     @Slot(int)
@@ -303,9 +322,17 @@ class EchoUIController(QObject):
             _debug_ui(f"[Echo UI DEBUG] emitting uiEvent {payload}")
             self.uiEvent.emit(payload)
 
+    # The 9 semantic states from the visual-state redesign. "listening" has
+    # no emitter yet (no voice-capture state machine exists) -- it's
+    # whitelisted so the existing setState QWebChannel slot can already
+    # drive it once that's wired up, without touching this whitelist again.
+    _KNOWN_STATES = {
+        "idle", "listening", "thinking", "reading", "working", "speaking", "error",
+    }
+
     def _emit_state(self, state: str) -> None:
         clean_state = (state or "").strip().lower()
-        if clean_state not in {"idle", "thinking", "speaking", "error"}:
+        if clean_state not in self._KNOWN_STATES:
             clean_state = "error"
         _debug_ui(f"[Echo UI] state={clean_state}")
         _debug_ui(f"[Echo UI DEBUG] emitting stateChanged {clean_state!r} controller_id={id(self)}")
