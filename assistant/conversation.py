@@ -1812,17 +1812,28 @@ class AssistantEngine:
             rewrite_deadline = rewrite_started_at + DOCUMENT_REWRITE_TOTAL_TIMEOUT_SECONDS
             document_anchors = _extract_document_anchors(original_content)
             routing_decisions: list[dict[str, object]] = []
+            attempt_failure_reasons: list[str] = []
             last_task_profile: dict[str, object] = {}
 
             def _remaining_seconds() -> float:
                 return rewrite_deadline - time.perf_counter()
 
-            def _build_task_profile(attempt_number: int, previous_failure_reason: str) -> dict[str, object]:
+            def _build_task_profile(
+                attempt_number: int, previous_failure_reason: str, previous_provider: str = ""
+            ) -> dict[str, object]:
                 # Structured description of the RECONSTRUCTED task, not the
                 # literal user message -- a short follow-up like "ainda
                 # consegues melhor" carries none of this on its own. Never
                 # includes the document's actual content (see
                 # assistant/model_router.py's _document_task_complexity_score).
+                #
+                # previous_provider is the ACTUAL provider that served the
+                # previous attempt (from routing_decisions, not assumed) --
+                # a failed attempt is not necessarily a *local* failure, since
+                # attempt 1 can itself already have been escalated to Claude
+                # on a high-complexity profile. document_previous_local_failure
+                # must only be true when that previous attempt was local.
+                previous_provider = str(previous_provider or "").strip().lower()
                 profile = {
                     "task_type": "document_refinement" if is_refinement else "document_rewrite",
                     "document_chars": len(base_content),
@@ -1833,7 +1844,11 @@ class AssistantEngine:
                     "document_list_item_count": len(document_anchors["bullet_items"]),
                     "document_requires_fidelity": True,
                     "document_requires_full_output": True,
-                    "document_previous_local_failure": bool(previous_failure_reason),
+                    "document_previous_provider": previous_provider,
+                    "document_previous_call_was_local": previous_provider == "ollama",
+                    "document_previous_call_was_paid": previous_provider == "anthropic",
+                    "document_previous_validation_failed": bool(previous_failure_reason),
+                    "document_previous_local_failure": bool(previous_failure_reason) and previous_provider == "ollama",
                     "document_validation_failure_reason": previous_failure_reason,
                     "document_regeneration_attempt": attempt_number,
                     # Always "auto" -- the router stays the sole authority on
@@ -1883,6 +1898,9 @@ class AssistantEngine:
             def _routing_telemetry_kwargs() -> dict[str, object]:
                 initial_provider = str(routing_decisions[0]["provider"]) if routing_decisions else ""
                 final_provider = str(routing_decisions[-1]["provider"]) if routing_decisions else ""
+                # Never deduplicated -- each position is one real attempt, so
+                # ["anthropic", "anthropic"] and ["ollama", "anthropic"] stay
+                # distinguishable instead of collapsing to the same set.
                 sequence = [str(d["provider"]) for d in routing_decisions]
                 escalation_reason = next(
                     (str(d["reason_code"]) for d in routing_decisions if d["provider"] == "anthropic"), ""
@@ -1897,7 +1915,11 @@ class AssistantEngine:
                     "escalation_reason": escalation_reason,
                     "initial_provider": initial_provider,
                     "final_provider": final_provider,
+                    "initial_routing_reason_code": str(routing_decisions[0]["reason_code"]) if routing_decisions else "",
+                    "final_routing_reason_code": str(routing_decisions[-1]["reason_code"]) if routing_decisions else "",
                     "provider_attempt_sequence": sequence,
+                    "attempt_count": len(routing_decisions),
+                    "attempt_failure_reasons": list(attempt_failure_reasons),
                     "paid_call_authorized": any(bool(d["paid_call"]) for d in routing_decisions),
                 }
 
@@ -1993,6 +2015,7 @@ class AssistantEngine:
             valid, reason, cleaned = _validate_rewrite_draft(original_content, attempt)
             if valid and _check_noop(cleaned):
                 valid, reason = False, "no_op_detected"
+            attempt_failure_reasons.append(reason if not valid else "")
             preamble_removed = cleaned.strip() != attempt.strip()
             placeholder_detected = reason == "placeholder_detected"
             regenerated = False
@@ -2011,6 +2034,10 @@ class AssistantEngine:
 
                 regenerated = True
                 local_failure_reason = reason
+                # The provider that actually served attempt 1 -- never
+                # assumed -- so attempt 2's profile can tell an Ollama
+                # failure apart from a Claude failure (see _build_task_profile).
+                previous_provider = str(routing_decisions[-1]["provider"]) if routing_decisions else ""
                 self._emit_progress("rewrite_regeneration_started")
                 correction_prompt = (
                     _document_refinement_correction_prompt(request, context, base_content, attempt, reason)
@@ -2022,7 +2049,7 @@ class AssistantEngine:
                     attempt = _compose_rewrite(
                         correction_prompt,
                         timeout_seconds=remaining_for_attempt_2,
-                        task_profile=_build_task_profile(2, local_failure_reason),
+                        task_profile=_build_task_profile(2, local_failure_reason, previous_provider),
                     )
                 except ProviderTimeoutError:
                     attempt_2_latency_ms = (time.perf_counter() - attempt_2_started_at) * 1000
@@ -2037,6 +2064,7 @@ class AssistantEngine:
                 valid, reason, cleaned = _validate_rewrite_draft(original_content, attempt)
                 if valid and _check_noop(cleaned):
                     valid, reason = False, "no_op_detected"
+                attempt_failure_reasons.append(reason if not valid else "")
                 preamble_removed = preamble_removed or (cleaned.strip() != attempt.strip())
                 placeholder_detected = placeholder_detected or (reason == "placeholder_detected")
             total_latency_ms = attempt_1_latency_ms + attempt_2_latency_ms
@@ -2419,7 +2447,11 @@ class AssistantEngine:
         escalation_reason: str = "",
         initial_provider: str = "",
         final_provider: str = "",
+        initial_routing_reason_code: str = "",
+        final_routing_reason_code: str = "",
         provider_attempt_sequence: list[str] | None = None,
+        attempt_count: int = 0,
+        attempt_failure_reasons: list[str] | None = None,
         local_failure_reason: str = "",
         paid_call_authorized: bool = False,
     ) -> None:
@@ -2479,7 +2511,11 @@ class AssistantEngine:
         self._turn_trace["escalation_reason"] = escalation_reason
         self._turn_trace["initial_provider"] = initial_provider
         self._turn_trace["final_provider"] = final_provider
+        self._turn_trace["initial_routing_reason_code"] = initial_routing_reason_code
+        self._turn_trace["final_routing_reason_code"] = final_routing_reason_code
         self._turn_trace["provider_attempt_sequence"] = list(provider_attempt_sequence or [])
+        self._turn_trace["attempt_count"] = int(attempt_count)
+        self._turn_trace["attempt_failure_reasons"] = list(attempt_failure_reasons or [])
         self._turn_trace["local_failure_reason"] = local_failure_reason
         self._turn_trace["paid_call_authorized"] = bool(paid_call_authorized)
 
@@ -3050,7 +3086,11 @@ class AssistantEngine:
             "escalation_reason": self._turn_trace.get("escalation_reason") or "",
             "initial_provider": self._turn_trace.get("initial_provider") or "",
             "final_provider": self._turn_trace.get("final_provider") or "",
+            "initial_routing_reason_code": self._turn_trace.get("initial_routing_reason_code") or "",
+            "final_routing_reason_code": self._turn_trace.get("final_routing_reason_code") or "",
             "provider_attempt_sequence": self._turn_trace.get("provider_attempt_sequence") or [],
+            "attempt_count": int(self._turn_trace.get("attempt_count") or 0),
+            "attempt_failure_reasons": self._turn_trace.get("attempt_failure_reasons") or [],
             "local_failure_reason": self._turn_trace.get("local_failure_reason") or "",
             "paid_call_authorized": bool(self._turn_trace.get("paid_call_authorized")),
             "response_grounded": self._turn_trace.get("response_grounded"),
@@ -6116,6 +6156,9 @@ def _document_rewrite_prompt(request: DocumentTaskRequest, context: ActiveDocume
         "SAÍDA OBRIGATÓRIA: apenas o documento completo reescrito, do início ao fim.\n"
         "Não faças perguntas. Não analises. Não resumas. Não omitas nenhuma secção.\n"
         "Mantém todos os factos, nomes, destinatário, assunto, listas e assinatura do original.\n"
+        "Preserva os tempos verbais e a cronologia de cada facto -- não transformes ações já concluídas em "
+        "ações atuais, nem mudes quem fez, o que fez, quando fez, ou se algo está concluído, previsto ou "
+        "pendente. Podes melhorar o estilo; nunca reinterpretar a cronologia.\n"
         "Não uses placeholders. Não digas que o documento está pronto, nem que vais enviar ou guardar algo.\n"
         "Não comeces a resposta com frases como 'Aqui está' — devolve apenas o documento.\n"
         f"Aplica apenas esta transformação: {request.instructions}\n\n"
@@ -6134,6 +6177,9 @@ def _document_rewrite_correction_prompt(
         "SAÍDA OBRIGATÓRIA: apenas o documento completo reescrito.\n"
         "Não faças perguntas. Não analises. Não comentes. Não omitas nenhuma secção.\n"
         "Mantém todos os factos, nomes, destinatário, assunto, listas e assinatura do original.\n"
+        "Preserva os tempos verbais e a cronologia de cada facto -- não transformes ações já concluídas em "
+        "ações atuais, nem mudes quem fez, o que fez, quando fez, ou se algo está concluído, previsto ou "
+        "pendente. Podes melhorar o estilo; nunca reinterpretar a cronologia.\n"
         "Não comeces a resposta com frases como 'Aqui está' — devolve apenas o documento.\n"
         f"Aplica apenas esta transformação: {request.instructions}\n\n"
         f"<ORIGINAL_DOCUMENT>\n{_truncate_document_content(context.content, limit=12000)}\n</ORIGINAL_DOCUMENT>\n\n"
@@ -6152,6 +6198,9 @@ def _document_refinement_prompt(request: DocumentTaskRequest, context: ActiveDoc
         "SAÍDA OBRIGATÓRIA: apenas o documento completo melhorado, do início ao fim.\n"
         "Não faças perguntas. Não analises. Não resumas. Não omitas nenhuma secção.\n"
         "Mantém todos os factos, nomes, destinatário, assunto, listas e assinatura.\n"
+        "Preserva os tempos verbais e a cronologia de cada facto -- não transformes ações já concluídas em "
+        "ações atuais, nem mudes quem fez, o que fez, quando fez, ou se algo está concluído, previsto ou "
+        "pendente. Podes melhorar o estilo; nunca reinterpretar a cronologia.\n"
         "Não uses placeholders. Não digas que não tens acesso ao documento. "
         "Não digas que o documento está pronto, nem que vais enviar ou guardar algo.\n"
         "Não comeces a resposta com frases como 'Aqui está' — devolve apenas o documento.\n"
@@ -6182,6 +6231,9 @@ def _document_refinement_correction_prompt(
         "SAÍDA OBRIGATÓRIA: apenas o documento completo melhorado.\n"
         "Não faças perguntas. Não analises. Não comentes. Não omitas nenhuma secção.\n"
         "Mantém todos os factos, nomes, destinatário, assunto, listas e assinatura.\n"
+        "Preserva os tempos verbais e a cronologia de cada facto -- não transformes ações já concluídas em "
+        "ações atuais, nem mudes quem fez, o que fez, quando fez, ou se algo está concluído, previsto ou "
+        "pendente. Podes melhorar o estilo; nunca reinterpretar a cronologia.\n"
         "Não uses placeholders. Não comeces a resposta com frases como 'Aqui está' — devolve apenas o documento.\n"
         f"Aplica este pedido de melhoria: {request.instructions}\n\n"
         f"<VERSAO_ATUAL>\n{_truncate_document_content(base_content, limit=12000)}\n</VERSAO_ATUAL>\n\n"
