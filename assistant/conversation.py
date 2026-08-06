@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import threading
 import time
 import traceback
 import unicodedata
@@ -194,6 +195,11 @@ class AssistantEngine:
         self.debug_performance = debug_performance
         self.debug_ollama_payload = debug_ollama_payload
         self._turn_trace: dict[str, object] | None = None
+        # Cooperative cancellation: each respond() call gets a brand-new Event
+        # (never a reused/reset one), so a stale cancel from a finished
+        # request can never affect a later one -- see begin_request().
+        self._cancel_lock = threading.Lock()
+        self._cancel_event: threading.Event | None = None
         self._pending_ui_events: list[str] = []
         self._last_fast_tools_used: tuple[str, ...] = ()
         self._active_operation_type = ""
@@ -300,6 +306,33 @@ class AssistantEngine:
             return None
         return answer(user_message)
 
+    def begin_request(self) -> None:
+        """Start a brand-new cancellation token for the request about to run.
+
+        A fresh threading.Event is created (never the previous one reset),
+        so a cancel_current_request() call left over from a finished/stale
+        request can never leak into this new one -- is_cancel_requested()
+        can only ever observe the Event object created here.
+        """
+        with self._cancel_lock:
+            self._cancel_event = threading.Event()
+
+    def cancel_current_request(self) -> bool:
+        """Request cooperative cancellation of whatever respond() call is
+        currently active. Returns True if there was an active token to
+        cancel. Safe to call from any thread (e.g. a Qt worker thread)."""
+        with self._cancel_lock:
+            event = self._cancel_event
+        if event is None:
+            return False
+        event.set()
+        return True
+
+    def is_cancel_requested(self) -> bool:
+        with self._cancel_lock:
+            event = self._cancel_event
+        return event.is_set() if event is not None else False
+
     def respond(self, user_message: str) -> str:
         """Public entry point: never lets an internal exception reach the UI.
 
@@ -312,6 +345,7 @@ class AssistantEngine:
         guarded here rather than trusting every call site downstream to
         catch its own errors.
         """
+        self.begin_request()
         try:
             return self._respond_inner(user_message)
         except Exception as exc:  # noqa: BLE001 - last-resort turn guard, see docstring
@@ -1710,6 +1744,7 @@ class AssistantEngine:
             )
             self._last_fast_tools_used = ("read_workspace_document",) if reloaded else ()
             original_content = context.content
+            rewrite_started_at = time.perf_counter()
 
             def _compose_rewrite(prompt: str) -> str:
                 return self.response_composer.compose(
@@ -1728,26 +1763,67 @@ class AssistantEngine:
                     )
                 )
 
+            def _cancelled_response(attempt_1_ms: float, attempt_2_ms: float, regenerated: bool) -> str:
+                self._record_document_trace(
+                    found=True, files_used=files_used, output_created=False,
+                    document_action=action, active_document=context, context_reused=not reloaded,
+                    draft_validation_failed=True,
+                    draft_regeneration_attempted=regenerated,
+                    draft_original_length=len(original_content),
+                    rewrite_attempt_1_latency_ms=attempt_1_ms,
+                    rewrite_attempt_2_latency_ms=attempt_2_ms,
+                    rewrite_total_latency_ms=attempt_1_ms + attempt_2_ms,
+                    cancellation_requested=True,
+                    request_cancelled=True,
+                    rewrite_elapsed_ms_at_cancel=(time.perf_counter() - rewrite_started_at) * 1000,
+                )
+                return "Pedido cancelado."
+
+            # Checkpoint 1: before the first LLM call.
+            prompt = _document_rewrite_prompt(request, context)
+            if self.is_cancel_requested():
+                return _cancelled_response(0.0, 0.0, False)
+
             attempt_1_started_at = time.perf_counter()
-            attempt = _compose_rewrite(_document_rewrite_prompt(request, context))
+            attempt = _compose_rewrite(prompt)
             attempt_1_latency_ms = (time.perf_counter() - attempt_1_started_at) * 1000
+
+            # Checkpoint 2: immediately after the first call.
+            if self.is_cancel_requested():
+                return _cancelled_response(attempt_1_latency_ms, 0.0, False)
+
             valid, reason, cleaned = _validate_rewrite_draft(original_content, attempt)
             preamble_removed = cleaned.strip() != attempt.strip()
             placeholder_detected = reason == "placeholder_detected"
             regenerated = False
             attempt_2_latency_ms = 0.0
+
             if not valid:
+                # Checkpoint 3: before starting the second attempt.
+                if self.is_cancel_requested():
+                    return _cancelled_response(attempt_1_latency_ms, 0.0, False)
+
                 regenerated = True
                 correction_prompt = _document_rewrite_correction_prompt(request, context, attempt, reason)
                 attempt_2_started_at = time.perf_counter()
                 attempt = _compose_rewrite(correction_prompt)
                 attempt_2_latency_ms = (time.perf_counter() - attempt_2_started_at) * 1000
+
+                # Checkpoint 4: immediately after the second call.
+                if self.is_cancel_requested():
+                    return _cancelled_response(attempt_1_latency_ms, attempt_2_latency_ms, True)
+
                 valid, reason, cleaned = _validate_rewrite_draft(original_content, attempt)
                 preamble_removed = preamble_removed or (cleaned.strip() != attempt.strip())
                 placeholder_detected = placeholder_detected or (reason == "placeholder_detected")
             total_latency_ms = attempt_1_latency_ms + attempt_2_latency_ms
 
             if not valid:
+                # Cancellation takes priority over reporting a structural
+                # validation failure -- if the user asked to stop, tell them
+                # that, not why the (now irrelevant) draft was rejected.
+                if self.is_cancel_requested():
+                    return _cancelled_response(attempt_1_latency_ms, attempt_2_latency_ms, regenerated)
                 self._record_document_trace(
                     found=True, files_used=files_used, output_created=False,
                     document_action=action, active_document=context, context_reused=not reloaded,
@@ -1767,6 +1843,13 @@ class AssistantEngine:
                     f"{_rewrite_failure_message(reason)} "
                     "O ficheiro original continua igual — queres que tente outra vez?"
                 )
+
+            # Checkpoints 5 & 6: before creating/saving the draft and before
+            # returning the final (success) response -- checked as one gate
+            # since nothing blocking happens between them, and the draft
+            # must never be created once cancellation is observed.
+            if self.is_cancel_requested():
+                return _cancelled_response(attempt_1_latency_ms, attempt_2_latency_ms, regenerated)
 
             context.draft_content = cleaned
             context.draft_action = action
@@ -2058,6 +2141,9 @@ class AssistantEngine:
         rewrite_total_latency_ms: float = 0.0,
         draft_preamble_removed: bool = False,
         draft_placeholder_detected: bool = False,
+        cancellation_requested: bool = False,
+        request_cancelled: bool = False,
+        rewrite_elapsed_ms_at_cancel: float = 0.0,
     ) -> None:
         if self._turn_trace is None:
             return
@@ -2089,6 +2175,9 @@ class AssistantEngine:
         self._turn_trace["rewrite_total_latency_ms"] = round(float(rewrite_total_latency_ms), 1)
         self._turn_trace["draft_preamble_removed"] = bool(draft_preamble_removed)
         self._turn_trace["draft_placeholder_detected"] = bool(draft_placeholder_detected)
+        self._turn_trace["cancellation_requested"] = bool(cancellation_requested)
+        self._turn_trace["request_cancelled"] = bool(request_cancelled)
+        self._turn_trace["rewrite_elapsed_ms_at_cancel"] = round(float(rewrite_elapsed_ms_at_cancel), 1)
 
     def _fast_agent_context(self) -> AgentContext:
         return AgentContext(
@@ -2629,6 +2718,9 @@ class AssistantEngine:
             "rewrite_total_latency_ms": float(self._turn_trace.get("rewrite_total_latency_ms") or 0.0),
             "draft_preamble_removed": bool(self._turn_trace.get("draft_preamble_removed")),
             "draft_placeholder_detected": bool(self._turn_trace.get("draft_placeholder_detected")),
+            "cancellation_requested": bool(self._turn_trace.get("cancellation_requested")),
+            "request_cancelled": bool(self._turn_trace.get("request_cancelled")),
+            "rewrite_elapsed_ms_at_cancel": float(self._turn_trace.get("rewrite_elapsed_ms_at_cancel") or 0.0),
             "response_grounded": self._turn_trace.get("response_grounded"),
             "unsupported_tool_claim_detected": bool(self._turn_trace.get("unsupported_tool_claim_detected")),
             "unsupported_memory_claim_detected": bool(self._turn_trace.get("unsupported_memory_claim_detected")),
