@@ -386,7 +386,13 @@ class RoutedLLM(ProviderBackedLLM):
             model_source=self.model_source,
             provider=provider,
             model_routing_mode=decision.mode if decision else self.router.config.mode,
-            model_routing_mode_source=decision.override_source if decision else self.router.config.mode_source,
+            # Always the router's own configured mode_source ("user_settings",
+            # "cli", "default", ...) — decision.override_source is a narrower,
+            # per-call concept (only set for an explicit CLI/claude-mode
+            # override) and is empty for the common "automatic"/"local" mode
+            # decisions, which was making configured_model_mode_source go
+            # blank again as soon as an actual LLM call happened.
+            model_routing_mode_source=self.router.config.mode_source,
             model_routing_provider=decision.provider if decision else provider,
             model_routing_model=decision.model if decision else model,
             model_routing_reason_code=decision.reason_code if decision else "",
