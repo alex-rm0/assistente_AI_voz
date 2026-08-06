@@ -1361,3 +1361,66 @@ def test_pending_document_task_bare_stem_no_match_reports_not_found(tmp_path: Pa
     assert telemetry["llm_calls"] == 0
     assert ollama.calls == []
     assert anthropic.calls == []
+
+
+# --- PATCH B: grounded fallback for ambiguous document follow-ups that don't
+# hit any specific _active_document_followup_action marker.
+
+
+def test_active_document_grounded_fallback_for_ambiguous_suggestion_request(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=["Podias mencionar o orçamento aprovado com mais destaque."],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+
+    engine.respond("lê o ficheiro email_resumo_novo e diz exatamente o que lá está escrito")
+    response = engine.respond("tens alguma sugestão para melhorar o mail?")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["selected_path"] == "DOCUMENT_TASK"
+    assert telemetry["document_action"] == "review"
+    assert telemetry["active_document"] is True
+    assert telemetry["grounding_sources"] == ["WORKSPACE_FILE"]
+    assert response == "Podias mencionar o orçamento aprovado com mais destaque."
+    assert "Sanfil" in ollama.calls[0]["messages"][-1]["content"]
+    assert anthropic.calls == []
+
+
+def test_active_document_grounded_fallback_does_not_swallow_unrelated_question(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=["Não tenho essa informação, mas parece que vai estar bom tempo."],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+
+    engine.respond("lê o ficheiro email_resumo_novo")
+    response = engine.respond("achas que vai chover amanhã?")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["selected_path"] != "DOCUMENT_TASK"
+    assert telemetry["grounding_sources"] != ["WORKSPACE_FILE"]
+    assert response == "Não tenho essa informação, mas parece que vai estar bom tempo."
+
+
+def test_active_document_grounded_fallback_respects_topic_shift_clear(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=["Pode ser, o que gostavas de falar?", "Não tenho mais contexto sobre isso."],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+
+    engine.respond("lê o ficheiro email_resumo_novo")
+    engine.respond("vamos falar de outra coisa")
+    response = engine.respond("tens alguma sugestão para melhorar o mail?")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["selected_path"] != "DOCUMENT_TASK"
+    assert telemetry["active_document"] is False
+    assert "email_resumo_novo" not in response

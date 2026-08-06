@@ -559,6 +559,22 @@ class AssistantEngine:
             self._perf_log("resposta total", request_started_at, time.perf_counter())
             return system_state_response
 
+        document_fallback_response = self._try_active_document_grounded_fallback(
+            user_message, _normalize_text(user_message)
+        )
+        if document_fallback_response is not None:
+            document_fallback_response = self._complete_turn(
+                user_message=user_message,
+                response=document_fallback_response,
+                source="DOCUMENT_TASK",
+                remember=True,
+                technical=True,
+                selected_path="DOCUMENT_TASK",
+                tools_used=self._last_fast_tools_used,
+            )
+            self._perf_log("resposta total", request_started_at, time.perf_counter())
+            return document_fallback_response
+
         social_response = self._try_pure_social_turn(user_message)
         if social_response is not None:
             social_response = self._complete_turn(
@@ -1607,6 +1623,67 @@ class AssistantEngine:
                     "Não afirmes que vais ler, abrir ou pesquisar; o conteúdo já está disponível.",
                 ],
                 fallback="Consigo analisar o documento, mas preciso de me basear apenas no texto que li.",
+                language_instruction=self._language_instruction(),
+            )
+        )
+
+    def _try_active_document_grounded_fallback(self, user_message: str, normalized: str) -> str | None:
+        """Last-resort grounding for a document-active turn: runs only after
+        every more specific handler (pending task, explicit follow-up
+        markers, writing task, system/tool intent) has already declined the
+        message. Deliberately narrow — it only claims messages that look like
+        an opinion/suggestion about the document itself (e.g. "tens alguma
+        sugestão para melhorar o mail?"), not just any leftover message,
+        so free topic changes and unrelated questions still fall through to
+        general conversation as before.
+        """
+        if not self.presence.can_use_tools():
+            return None
+        context = self._active_document_context
+        if context is None:
+            return None
+        if _looks_like_document_context_clear(normalized):
+            return None
+        if not _looks_like_ambiguous_document_followup(normalized, context.detected_content_type):
+            return None
+        refresh_result = self._refresh_active_document_context(context)
+        if refresh_result is None:
+            self._active_document_context = None
+            return None
+        context, reloaded = refresh_result
+        context.last_action = "review"
+        context.current_document_task = "review"
+        context.ttl = 8
+        self._active_document_context = context
+        files_used = [_document_context_file_used(context, match_type="active_context")]
+        self._last_fast_tools_used = ("read_workspace_document",) if reloaded else ()
+        self._record_document_trace(
+            found=True,
+            files_used=files_used,
+            output_created=False,
+            document_action="review",
+            active_document=context,
+            context_reused=not reloaded,
+        )
+        request = DocumentTaskRequest(
+            source_files=[context.resolved_file],
+            actions=["read_source", "review"],
+            instructions=user_message,
+            action="review",
+            requested_output=_requested_output_for_document_action("review"),
+        )
+        return self.response_composer.compose(
+            ComposerRequest(
+                intent="document_review",
+                user_message=_active_document_followup_prompt(request, context),
+                history=[],
+                facts=[
+                    f"Documento ativo: {context.resolved_file}.",
+                    f"Tipo detetado: {context.detected_content_type}.",
+                    "Usa apenas o conteúdo real do documento ativo para responder.",
+                    "Não afirmes que vais ler, abrir ou pesquisar; o conteúdo já está disponível.",
+                ],
+                fallback="Consigo comentar o documento, mas preciso de me basear apenas no texto que li.",
                 language_instruction=self._language_instruction(),
             )
         )
@@ -4938,6 +5015,81 @@ def _looks_like_document_context_clear(text: str) -> bool:
             "deixa o documento",
         )
     )
+
+
+# Opinion/suggestion phrasing that plausibly continues a document conversation
+# even without hitting one of _active_document_followup_action's specific
+# markers (e.g. "tens alguma sugestão para melhorar o mail?" — a real
+# paraphrase of "review" that doesn't contain any of its fixed markers).
+# Specific enough on their own (people don't ask to "melhorar"/"corrigir"
+# something without an artifact in mind).
+_DOCUMENT_OPINION_STRONG_MARKERS = (
+    "sugestao",
+    "sugestão",
+    "sugestoes",
+    "sugestões",
+    "melhorar",
+    "melhoria",
+    "corrige",
+    "corrigir",
+    "consegues melhorar",
+    "podes melhorar",
+    "esta bem assim",
+    "está bem assim",
+)
+
+# Generic enough to be about anything ("achas que vai chover?") — only count
+# these when a document-reference word also appears in the same message.
+_DOCUMENT_OPINION_WEAK_MARKERS = (
+    "achas",
+    "acha que",
+    "opiniao",
+    "opinião",
+    "que tal",
+    "parece te",
+    "parece-te",
+    "como fica",
+)
+
+_DOCUMENT_GENERIC_REFERENCE_WORDS = (
+    "mail",
+    "email",
+    "e-mail",
+    "documento",
+    "ficheiro",
+    "texto",
+    "isto",
+    "isso",
+    "nota",
+    "pdf",
+    "docx",
+    "conteudo",
+    "conteúdo",
+)
+
+# Extra positive signal keyed by the document's own detected type, so a bare
+# mention of "mail"/"email" (without any opinion marker) still counts when
+# the active document actually is one.
+_DOCUMENT_TYPE_REFERENCE_WORDS = {
+    "email": ("mail", "email", "e-mail"),
+    "meeting_notes": ("reuniao", "reunião", "ata"),
+}
+
+
+def _looks_like_ambiguous_document_followup(text: str, content_type: str) -> bool:
+    normalized = _normalize_text(text).strip(" .!?")
+    if not normalized:
+        return False
+    if contains_any_phrase(normalized, _DOCUMENT_OPINION_STRONG_MARKERS):
+        return True
+    type_words = _DOCUMENT_TYPE_REFERENCE_WORDS.get(content_type, ())
+    if type_words and contains_any_phrase(normalized, type_words):
+        return True
+    if contains_any_phrase(normalized, _DOCUMENT_OPINION_WEAK_MARKERS) and contains_any_phrase(
+        normalized, _DOCUMENT_GENERIC_REFERENCE_WORDS
+    ):
+        return True
+    return False
 
 
 def _active_document_followup_action(text: str) -> str:
