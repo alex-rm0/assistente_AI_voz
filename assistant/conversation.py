@@ -117,6 +117,15 @@ class ActiveDocumentContext:
     mtime_ns: int = 0
     content: str = ""
     ttl: int = 8
+    # Transitory rewritten version, held in memory only. A real file change
+    # (detected in _refresh_active_document_context) rebuilds the whole
+    # context via _build_active_document_context, which drops these back to
+    # their defaults — a stale draft never survives the original changing.
+    draft_content: str = ""
+    draft_action: str = ""
+    draft_created_from_hash: str = ""
+    draft_saved: bool = False
+    draft_updated_at: str = ""
 
 
 class AssistantEngine:
@@ -1556,6 +1565,21 @@ class AssistantEngine:
             tools = tuple(str(item) for item in pending.get("tools_used", ()) if item)
             self._pending_document_task = None
             return self._create_workspace_txt(output, content, tools_used=tools + ("create_workspace_file",))
+        if pending.get("current_step") == "awaiting_draft_save_confirmation":
+            if not _is_positive_document_confirmation(normalized):
+                return None
+            output_name = str(pending.get("draft_output_name") or "")
+            source_file = str(pending.get("draft_source_file") or "")
+            context = self._active_document_context
+            draft_content = context.draft_content if context and context.resolved_file == source_file else ""
+            self._pending_document_task = None
+            if not output_name or not draft_content:
+                return "Já não tenho essa versão melhorada disponível para guardar."
+            result = self._create_workspace_txt(output_name, draft_content, tools_used=("create_workspace_file",))
+            if context is not None and result.startswith("Criei o ficheiro"):
+                context.draft_saved = True
+                self._active_document_context = context
+            return result
         if pending.get("current_step") == "awaiting_file_choice":
             choice = _choose_candidate_from_message(user_message, [str(item) for item in pending.get("candidates", [])])
             if not choice:
@@ -1594,6 +1618,115 @@ class AssistantEngine:
                 context_reused=not reloaded,
             )
             return f"Aqui está outra vez o conteúdo de '{context.resolved_file}':\n\n{_truncate_document_content(context.content)}"
+
+        if action == "display_draft":
+            self._last_fast_tools_used = ("read_workspace_document",) if reloaded else ()
+            if not context.draft_content:
+                self._record_document_trace(
+                    found=True, files_used=files_used, output_created=False,
+                    document_action=action, active_document=context, context_reused=not reloaded,
+                )
+                return "Ainda não criei nenhuma versão melhorada deste documento. Queres que o reescreva primeiro?"
+            self._record_document_trace(
+                found=True, files_used=files_used, output_created=False,
+                document_action=action, active_document=context, context_reused=not reloaded,
+                draft_reused=True,
+            )
+            saved_note = "" if context.draft_saved else " (ainda não guardei esta versão no ficheiro original)"
+            return f"Aqui está a versão melhorada{saved_note}:\n\n{_truncate_document_content(context.draft_content)}"
+
+        if action == "compare_versions":
+            self._last_fast_tools_used = ("read_workspace_document",) if reloaded else ()
+            self._record_document_trace(
+                found=True, files_used=files_used, output_created=False,
+                document_action=action, active_document=context, context_reused=not reloaded,
+                draft_reused=bool(context.draft_content),
+            )
+            if not context.draft_content:
+                return "Ainda não tenho nenhuma versão melhorada para comparar com o original."
+            return (
+                f"Original de '{context.resolved_file}':\n\n{_truncate_document_content(context.content)}\n\n"
+                "--- versão melhorada (ainda não guardada) ---\n\n"
+                f"{_truncate_document_content(context.draft_content)}"
+            )
+
+        if action == "discard_draft":
+            self._last_fast_tools_used = ("read_workspace_document",) if reloaded else ()
+            had_draft = bool(context.draft_content)
+            context.draft_content = ""
+            context.draft_action = ""
+            context.draft_created_from_hash = ""
+            context.draft_saved = False
+            context.draft_updated_at = ""
+            self._active_document_context = context
+            self._record_document_trace(
+                found=True, files_used=files_used, output_created=False,
+                document_action=action, active_document=context, context_reused=not reloaded,
+            )
+            if not had_draft:
+                return "Não havia nenhuma versão melhorada para descartar."
+            return "Descartei a versão melhorada. Fica só o documento original."
+
+        if action == "save_draft":
+            self._last_fast_tools_used = ("read_workspace_document",) if reloaded else ()
+            self._record_document_trace(
+                found=True, files_used=files_used, output_created=False,
+                document_action=action, active_document=context, context_reused=not reloaded,
+                draft_reused=bool(context.draft_content),
+            )
+            if not context.draft_content:
+                return "Ainda não tenho nenhuma versão melhorada para guardar."
+            stem = Path(context.resolved_file).stem
+            suffix = Path(context.resolved_file).suffix or ".txt"
+            proposed_name = f"{stem} (melhorado){suffix}"
+            self._pending_document_task = {
+                "current_step": "awaiting_draft_save_confirmation",
+                "draft_output_name": proposed_name,
+                "draft_source_file": context.resolved_file,
+            }
+            return (
+                f"Não substituo o ficheiro original automaticamente. Queres que eu guarde a versão melhorada "
+                f"num novo ficheiro, '{proposed_name}', mantendo '{context.resolved_file}' como está? (sim/não)"
+            )
+
+        if action == "rewrite":
+            request = DocumentTaskRequest(
+                source_files=[context.resolved_file],
+                actions=["read_source", action],
+                instructions=user_message,
+                action=action,
+                requested_output=_requested_output_for_document_action(action),
+            )
+            self._last_fast_tools_used = ("read_workspace_document",) if reloaded else ()
+            composed = self.response_composer.compose(
+                ComposerRequest(
+                    intent="document_rewrite",
+                    user_message=_active_document_followup_prompt(request, context),
+                    history=[],
+                    facts=[
+                        f"Documento ativo: {context.resolved_file}.",
+                        f"Tipo detetado: {context.detected_content_type}.",
+                        "Usa apenas o conteúdo real do documento ativo.",
+                        "Devolve o texto reescrito na íntegra, pronto a substituir o original.",
+                        "Não afirmes que vais ler, abrir ou pesquisar; o conteúdo já está disponível.",
+                        "Não digas que já guardaste ou substituíste o ficheiro; ainda não foi guardado.",
+                    ],
+                    fallback="Consigo reescrever o documento, mas preciso de me basear apenas no texto que li.",
+                    language_instruction=self._language_instruction(),
+                )
+            )
+            context.draft_content = composed
+            context.draft_action = action
+            context.draft_created_from_hash = context.content_hash
+            context.draft_saved = False
+            context.draft_updated_at = self.now_provider().isoformat()
+            self._active_document_context = context
+            self._record_document_trace(
+                found=True, files_used=files_used, output_created=False,
+                document_action=action, active_document=context, context_reused=not reloaded,
+                draft_created=True,
+            )
+            return f"{composed}\n\n(Ainda não guardei esta versão — o ficheiro original continua igual.)"
 
         request = DocumentTaskRequest(
             source_files=[context.resolved_file],
@@ -1832,6 +1965,8 @@ class AssistantEngine:
         document_action: str = "",
         active_document: ActiveDocumentContext | None = None,
         context_reused: bool = False,
+        draft_created: bool = False,
+        draft_reused: bool = False,
     ) -> None:
         if self._turn_trace is None:
             return
@@ -1847,6 +1982,9 @@ class AssistantEngine:
         self._turn_trace["document_action"] = document_action or (context.last_action if context else "")
         self._turn_trace["document_context_reused"] = bool(context_reused)
         self._turn_trace["document_grounded"] = bool(found)
+        self._turn_trace["draft_created"] = bool(draft_created)
+        self._turn_trace["draft_saved"] = bool(context.draft_saved) if context else False
+        self._turn_trace["draft_reused"] = bool(draft_reused)
 
     def _fast_agent_context(self) -> AgentContext:
         return AgentContext(
@@ -2373,6 +2511,9 @@ class AssistantEngine:
             "document_action": self._turn_trace.get("document_action") or "",
             "document_context_reused": bool(self._turn_trace.get("document_context_reused")),
             "document_grounded": bool(self._turn_trace.get("document_grounded")),
+            "draft_created": bool(self._turn_trace.get("draft_created")),
+            "draft_saved": bool(self._turn_trace.get("draft_saved")),
+            "draft_reused": bool(self._turn_trace.get("draft_reused")),
             "response_grounded": self._turn_trace.get("response_grounded"),
             "unsupported_tool_claim_detected": bool(self._turn_trace.get("unsupported_tool_claim_detected")),
             "unsupported_memory_claim_detected": bool(self._turn_trace.get("unsupported_memory_claim_detected")),
@@ -5132,7 +5273,23 @@ def _active_document_followup_action(text: str, content_type: str = "") -> str:
         return ""
     if contains_any_phrase(normalized, ("que horas sao", "que dia e", "abre o calendario")):
         return ""
-    if "mostra outra vez" in normalized or _looks_like_full_document_read(normalized):
+    # Draft-related actions are checked before everything else: "voltando ao
+    # email, mostra-me a versão melhorada" would otherwise be swallowed by
+    # the "voltando ao email" catch-all near the bottom of this function and
+    # misclassified as review.
+    if contains_any_phrase(normalized, ("versao melhorada", "mostra o rascunho", "mostra-me o rascunho", "mostra o draft", "mostra-me o draft")):
+        return "display_draft"
+    if contains_any_phrase(normalized, ("compara as duas versoes", "compara as versoes", "compara com o original")):
+        return "compare_versions"
+    if contains_any_phrase(normalized, ("descarta as alteracoes", "descarta o rascunho", "descarta a versao", "descarta o draft")):
+        return "discard_draft"
+    if contains_any_phrase(normalized, ("guarda esta versao", "guarda as alteracoes", "guarda o rascunho", "guarda a versao melhorada")):
+        return "save_draft"
+    if (
+        "mostra outra vez" in normalized
+        or _looks_like_full_document_read(normalized)
+        or contains_any_phrase(normalized, ("mostra o original", "versao original", "texto original"))
+    ):
         return "display"
     # Tie-break order below matters: once a branch matches, later ones are
     # never consulted. Explicit, unambiguous markers are checked first
