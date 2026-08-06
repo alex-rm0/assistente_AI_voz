@@ -1569,7 +1569,7 @@ class AssistantEngine:
         context = self._active_document_context
         if context is None:
             return None
-        action = _active_document_followup_action(normalized)
+        action = _active_document_followup_action(normalized, context.detected_content_type)
         if not action:
             return None
         refresh_result = self._refresh_active_document_context(context)
@@ -5092,21 +5092,53 @@ def _looks_like_ambiguous_document_followup(text: str, content_type: str) -> boo
     return False
 
 
-def _active_document_followup_action(text: str) -> str:
+def _active_document_followup_action(text: str, content_type: str = "") -> str:
     normalized = _normalize_text(text).strip(" .!?")
     if not normalized:
         return ""
-    if any(marker in normalized for marker in ("que horas sao", "que horas são", "que dia e", "que dia é", "abre o calendario", "abre o calendário")):
+    if contains_any_phrase(normalized, ("que horas sao", "que dia e", "abre o calendario")):
         return ""
     if "mostra outra vez" in normalized or _looks_like_full_document_read(normalized):
         return "display"
-    if any(marker in normalized for marker in ("sugeres alguma alteracao", "sugeres alguma alteração", "alguma alteracao", "alguma alteração", "o que mudavas", "revê", "reve", "review")):
+    # Tie-break order below matters: once a branch matches, later ones are
+    # never consulted. "review" is checked first (broadest, opinion-shaped
+    # requests like "tens alguma sugestão para melhorar o mail?" reuse the
+    # same strong/weak marker tables as _try_active_document_grounded_fallback
+    # so both layers agree), then the narrower interpret/summarize/rewrite
+    # intents.
+    if (
+        contains_any_phrase(normalized, ("sugeres alguma alteracao", "alguma alteracao", "o que mudavas", "reve", "review"))
+        or _looks_like_ambiguous_document_followup(normalized, content_type)
+    ):
         return "review"
-    if any(marker in normalized for marker in ("interpreta", "analisa", "o que quer dizer", "diz me tu", "diz-me tu")):
+    if contains_any_phrase(
+        normalized,
+        (
+            "interpreta",
+            "analisa",
+            "o que quer dizer",
+            "diz me tu",
+            "diz-me tu",
+            "o que significa",
+            "explica me",
+            "o que quer isto dizer",
+        ),
+    ):
         return "interpret"
-    if any(marker in normalized for marker in ("resume melhor", "faz um resumo", "resumo melhor", "sintetiza")):
+    if contains_any_phrase(normalized, ("resume melhor", "faz um resumo", "resumo melhor", "sintetiza", "resume outra vez")):
         return "summarize"
-    if any(marker in normalized for marker in ("torna mais formal", "corrige o portugues", "corrige o português", "reescreve", "reescreve isto")):
+    if contains_any_phrase(
+        normalized,
+        (
+            "torna mais formal",
+            "corrige o portugues",
+            "reescreve",
+            "torna mais claro",
+            "torna isto mais claro",
+            "torna o texto mais claro",
+            "escreve melhor",
+        ),
+    ):
         return "rewrite"
     if normalized.startswith(("voltando ao email", "voltando ao documento", "sobre o email", "sobre o documento")):
         return "review"

@@ -1424,3 +1424,52 @@ def test_active_document_grounded_fallback_respects_topic_shift_clear(tmp_path: 
     assert telemetry["selected_path"] != "DOCUMENT_TASK"
     assert telemetry["active_document"] is False
     assert "email_resumo_novo" not in response
+
+
+# --- PATCH C: review/interpret/rewrite marker widening in
+# _active_document_followup_action itself (earlier, more specific stage than
+# the PATCH B grounded fallback), sharing the same opinion-marker tables.
+
+
+def test_active_document_followup_action_classifies_ambiguous_suggestion_as_review() -> None:
+    from assistant.conversation import _active_document_followup_action
+
+    assert _active_document_followup_action("tens alguma sugestão para melhorar o mail?", "email") == "review"
+    assert _active_document_followup_action("achas que vai chover amanhã?", "email") == ""
+
+
+def test_active_document_case_h_resolves_via_followup_action_not_generic_fallback(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=["Podias mencionar o orçamento aprovado com mais destaque."],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+
+    engine.respond("lê o ficheiro email_resumo_novo e diz exatamente o que lá está escrito")
+    response = engine.respond("tens alguma sugestão para melhorar o mail?")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["selected_path"] == "DOCUMENT_TASK"
+    assert telemetry["document_action"] == "review"
+    assert telemetry["execution_path"] == "llm"
+    assert telemetry["grounding_sources"] == ["WORKSPACE_FILE"]
+    assert response == "Podias mencionar o orçamento aprovado com mais destaque."
+    assert anthropic.calls == []
+
+
+def test_active_document_followup_action_widened_interpret_and_rewrite_paraphrases() -> None:
+    from assistant.conversation import _active_document_followup_action
+
+    assert _active_document_followup_action("o que significa isto?", "email") == "interpret"
+    assert _active_document_followup_action("explica me isto", "email") == "interpret"
+    assert _active_document_followup_action("torna isto mais claro", "email") == "rewrite"
+    assert _active_document_followup_action("escreve melhor", "email") == "rewrite"
+
+
+def test_active_document_followup_action_display_still_wins_over_review() -> None:
+    from assistant.conversation import _active_document_followup_action
+
+    assert _active_document_followup_action("mostra tudo", "email") == "display"
+    assert _active_document_followup_action("que horas são?", "email") == ""
