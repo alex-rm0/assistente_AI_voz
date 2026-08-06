@@ -7,6 +7,7 @@ import traceback
 import unicodedata
 import os
 import hashlib
+from collections.abc import Callable
 from difflib import SequenceMatcher
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -200,6 +201,10 @@ class AssistantEngine:
         # request can never affect a later one -- see begin_request().
         self._cancel_lock = threading.Lock()
         self._cancel_event: threading.Event | None = None
+        # Optional live progress callback, set by the UI worker for the
+        # duration of a single respond() call (see set_progress_listener).
+        # Not persisted -- purely in-memory, per-process wiring.
+        self._progress_listener: Callable[[str], None] | None = None
         self._pending_ui_events: list[str] = []
         self._last_fast_tools_used: tuple[str, ...] = ()
         self._active_operation_type = ""
@@ -332,6 +337,22 @@ class AssistantEngine:
         with self._cancel_lock:
             event = self._cancel_event
         return event.is_set() if event is not None else False
+
+    def set_progress_listener(self, listener: Callable[[str], None] | None) -> None:
+        """Register (or clear, with None) a live progress callback for the
+        UI worker thread. Not conversation state -- purely a per-process,
+        in-memory wire between the currently running respond() call and
+        whoever is waiting on it."""
+        self._progress_listener = listener
+
+    def _emit_progress(self, event: str) -> None:
+        listener = self._progress_listener
+        if listener is None:
+            return
+        try:
+            listener(event)
+        except Exception:
+            pass
 
     def respond(self, user_message: str) -> str:
         """Public entry point: never lets an internal exception reach the UI.
@@ -1769,6 +1790,7 @@ class AssistantEngine:
                 )
 
             def _cancelled_response(attempt_1_ms: float, attempt_2_ms: float, regenerated: bool) -> str:
+                self._emit_progress("rewrite_cancelled")
                 self._record_document_trace(
                     found=True, files_used=files_used, output_created=False,
                     document_action=action, active_document=context, context_reused=not reloaded,
@@ -1778,13 +1800,16 @@ class AssistantEngine:
                     rewrite_attempt_1_latency_ms=attempt_1_ms,
                     rewrite_attempt_2_latency_ms=attempt_2_ms,
                     rewrite_total_latency_ms=attempt_1_ms + attempt_2_ms,
+                    rewrite_regeneration_started=regenerated,
                     cancellation_requested=True,
                     request_cancelled=True,
                     rewrite_elapsed_ms_at_cancel=(time.perf_counter() - rewrite_started_at) * 1000,
+                    request_finished_cleanly=True,
                 )
                 return "Pedido cancelado."
 
             def _timeout_response(attempt_1_ms: float, attempt_2_ms: float, regenerated: bool, remaining_seconds: float) -> str:
+                self._emit_progress("rewrite_timeout")
                 self._record_document_trace(
                     found=True, files_used=files_used, output_created=False,
                     document_action=action, active_document=context, context_reused=not reloaded,
@@ -1794,10 +1819,12 @@ class AssistantEngine:
                     rewrite_attempt_1_latency_ms=attempt_1_ms,
                     rewrite_attempt_2_latency_ms=attempt_2_ms,
                     rewrite_total_latency_ms=attempt_1_ms + attempt_2_ms,
+                    rewrite_regeneration_started=regenerated,
                     rewrite_timeout=True,
                     rewrite_timeout_seconds=DOCUMENT_REWRITE_TOTAL_TIMEOUT_SECONDS,
                     rewrite_elapsed_ms_at_timeout=(time.perf_counter() - rewrite_started_at) * 1000,
                     rewrite_remaining_timeout_ms=max(0.0, remaining_seconds * 1000),
+                    request_finished_cleanly=True,
                 )
                 return (
                     "A reescrita demorou mais do que o previsto e foi interrompida. "
@@ -1812,6 +1839,7 @@ class AssistantEngine:
             if remaining_for_attempt_1 < _REWRITE_MIN_SECONDS_FOR_ATTEMPT:
                 return _timeout_response(0.0, 0.0, False, remaining_for_attempt_1)
 
+            self._emit_progress("rewrite_attempt_started")
             attempt_1_started_at = time.perf_counter()
             try:
                 attempt = _compose_rewrite(prompt, timeout_seconds=remaining_for_attempt_1)
@@ -1824,6 +1852,7 @@ class AssistantEngine:
             if self.is_cancel_requested():
                 return _cancelled_response(attempt_1_latency_ms, 0.0, False)
 
+            self._emit_progress("rewrite_validation_started")
             valid, reason, cleaned = _validate_rewrite_draft(original_content, attempt)
             preamble_removed = cleaned.strip() != attempt.strip()
             placeholder_detected = reason == "placeholder_detected"
@@ -1842,6 +1871,7 @@ class AssistantEngine:
                     return _timeout_response(attempt_1_latency_ms, 0.0, False, remaining_for_attempt_2)
 
                 regenerated = True
+                self._emit_progress("rewrite_regeneration_started")
                 correction_prompt = _document_rewrite_correction_prompt(request, context, attempt, reason)
                 attempt_2_started_at = time.perf_counter()
                 try:
@@ -1855,6 +1885,7 @@ class AssistantEngine:
                 if self.is_cancel_requested():
                     return _cancelled_response(attempt_1_latency_ms, attempt_2_latency_ms, True)
 
+                self._emit_progress("rewrite_validation_started")
                 valid, reason, cleaned = _validate_rewrite_draft(original_content, attempt)
                 preamble_removed = preamble_removed or (cleaned.strip() != attempt.strip())
                 placeholder_detected = placeholder_detected or (reason == "placeholder_detected")
@@ -1877,8 +1908,10 @@ class AssistantEngine:
                     rewrite_attempt_1_latency_ms=attempt_1_latency_ms,
                     rewrite_attempt_2_latency_ms=attempt_2_latency_ms,
                     rewrite_total_latency_ms=total_latency_ms,
+                    rewrite_regeneration_started=regenerated,
                     draft_preamble_removed=preamble_removed,
                     draft_placeholder_detected=placeholder_detected,
+                    request_finished_cleanly=True,
                 )
                 return (
                     "Não consegui gerar uma versão reescrita completa e fiável deste documento. "
@@ -1910,8 +1943,10 @@ class AssistantEngine:
                 rewrite_attempt_1_latency_ms=attempt_1_latency_ms,
                 rewrite_attempt_2_latency_ms=attempt_2_latency_ms,
                 rewrite_total_latency_ms=total_latency_ms,
+                rewrite_regeneration_started=regenerated,
                 draft_preamble_removed=preamble_removed,
                 draft_placeholder_detected=placeholder_detected,
+                request_finished_cleanly=True,
             )
             return f"Aqui está a versão reescrita:\n\n{cleaned}\n\n(Ainda não guardei esta versão — o ficheiro original continua igual.)"
 
@@ -2183,13 +2218,15 @@ class AssistantEngine:
         rewrite_total_latency_ms: float = 0.0,
         draft_preamble_removed: bool = False,
         draft_placeholder_detected: bool = False,
+        rewrite_regeneration_started: bool = False,
         cancellation_requested: bool = False,
         request_cancelled: bool = False,
-        rewrite_elapsed_ms_at_cancel: float = 0.0,
         rewrite_timeout: bool = False,
         rewrite_timeout_seconds: float = 0.0,
+        rewrite_elapsed_ms_at_cancel: float = 0.0,
         rewrite_elapsed_ms_at_timeout: float = 0.0,
         rewrite_remaining_timeout_ms: float = 0.0,
+        request_finished_cleanly: bool = True,
     ) -> None:
         if self._turn_trace is None:
             return
@@ -2221,13 +2258,15 @@ class AssistantEngine:
         self._turn_trace["rewrite_total_latency_ms"] = round(float(rewrite_total_latency_ms), 1)
         self._turn_trace["draft_preamble_removed"] = bool(draft_preamble_removed)
         self._turn_trace["draft_placeholder_detected"] = bool(draft_placeholder_detected)
+        self._turn_trace["rewrite_regeneration_started"] = bool(rewrite_regeneration_started)
         self._turn_trace["cancellation_requested"] = bool(cancellation_requested)
         self._turn_trace["request_cancelled"] = bool(request_cancelled)
-        self._turn_trace["rewrite_elapsed_ms_at_cancel"] = round(float(rewrite_elapsed_ms_at_cancel), 1)
         self._turn_trace["rewrite_timeout"] = bool(rewrite_timeout)
         self._turn_trace["rewrite_timeout_seconds"] = float(rewrite_timeout_seconds)
+        self._turn_trace["rewrite_elapsed_ms_at_cancel"] = round(float(rewrite_elapsed_ms_at_cancel), 1)
         self._turn_trace["rewrite_elapsed_ms_at_timeout"] = round(float(rewrite_elapsed_ms_at_timeout), 1)
         self._turn_trace["rewrite_remaining_timeout_ms"] = round(float(rewrite_remaining_timeout_ms), 1)
+        self._turn_trace["request_finished_cleanly"] = bool(request_finished_cleanly)
 
     def _fast_agent_context(self) -> AgentContext:
         return AgentContext(
@@ -2656,6 +2695,10 @@ class AssistantEngine:
             "user_message": user_message,
             "llm_start": self._llm_chat_count(),
             "llm_sources_start": len(getattr(self.llm, "chat_call_sources", ())),
+            # Only flipped to True by _record_document_trace once a turn
+            # reaches a normal exit path -- stays False if the turn instead
+            # ends via _handle_unexpected_error (an uncaught exception).
+            "request_finished_cleanly": False,
         }
 
     def _end_turn_trace(
@@ -2768,13 +2811,15 @@ class AssistantEngine:
             "rewrite_total_latency_ms": float(self._turn_trace.get("rewrite_total_latency_ms") or 0.0),
             "draft_preamble_removed": bool(self._turn_trace.get("draft_preamble_removed")),
             "draft_placeholder_detected": bool(self._turn_trace.get("draft_placeholder_detected")),
+            "rewrite_regeneration_started": bool(self._turn_trace.get("rewrite_regeneration_started")),
             "cancellation_requested": bool(self._turn_trace.get("cancellation_requested")),
             "request_cancelled": bool(self._turn_trace.get("request_cancelled")),
-            "rewrite_elapsed_ms_at_cancel": float(self._turn_trace.get("rewrite_elapsed_ms_at_cancel") or 0.0),
             "rewrite_timeout": bool(self._turn_trace.get("rewrite_timeout")),
             "rewrite_timeout_seconds": float(self._turn_trace.get("rewrite_timeout_seconds") or 0.0),
+            "rewrite_elapsed_ms_at_cancel": float(self._turn_trace.get("rewrite_elapsed_ms_at_cancel") or 0.0),
             "rewrite_elapsed_ms_at_timeout": float(self._turn_trace.get("rewrite_elapsed_ms_at_timeout") or 0.0),
             "rewrite_remaining_timeout_ms": float(self._turn_trace.get("rewrite_remaining_timeout_ms") or 0.0),
+            "request_finished_cleanly": bool(self._turn_trace.get("request_finished_cleanly")),
             "response_grounded": self._turn_trace.get("response_grounded"),
             "unsupported_tool_claim_detected": bool(self._turn_trace.get("unsupported_tool_claim_detected")),
             "unsupported_memory_claim_detected": bool(self._turn_trace.get("unsupported_memory_claim_detected")),

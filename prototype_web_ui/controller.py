@@ -14,6 +14,7 @@ from assistant.secret_storage import sanitize_secret_error
 class EchoRequestWorker(QObject):
     finished = Signal(str)
     failed = Signal(str)
+    progress = Signal(str)
 
     def __init__(self, responder: Callable[[str], str], message: str) -> None:
         super().__init__()
@@ -22,6 +23,10 @@ class EchoRequestWorker(QObject):
 
     @Slot()
     def run(self) -> None:
+        owner = getattr(self.responder, "__self__", None)
+        set_listener = getattr(owner, "set_progress_listener", None)
+        if callable(set_listener):
+            set_listener(self.progress.emit)
         try:
             self.finished.emit(str(self.responder(self.message) or ""))
         except Exception as exc:
@@ -31,6 +36,9 @@ class EchoRequestWorker(QObject):
             print("[ECHO ERROR] user_message=", self.message)
             traceback.print_exc()
             self.failed.emit(str(exc))
+        finally:
+            if callable(set_listener):
+                set_listener(None)
 
 
 class EchoUIController(QObject):
@@ -101,6 +109,7 @@ class EchoUIController(QObject):
         self._thread.started.connect(self._worker.run, Qt.ConnectionType.QueuedConnection)
         self._worker.finished.connect(self._handle_response, Qt.ConnectionType.QueuedConnection)
         self._worker.failed.connect(self._handle_error, Qt.ConnectionType.QueuedConnection)
+        self._worker.progress.connect(self._handle_progress, Qt.ConnectionType.QueuedConnection)
         self._thread.start()
 
     @Slot(str)
@@ -118,8 +127,15 @@ class EchoUIController(QObject):
 
     @Slot()
     def cancelCurrentRequest(self) -> None:
-        # AssistantEngine does not currently expose cooperative cancellation.
-        if self._active:
+        if not self._active:
+            return
+        owner = getattr(self.responder, "__self__", None)
+        cancel = getattr(owner, "cancel_current_request", None)
+        if callable(cancel):
+            cancel()
+            _debug_ui("[Echo UI] cancel_requested=true")
+            self.uiEvent.emit(_json_payload({"type": "cancel_requested"}))
+        else:
             _debug_ui("[Echo UI] cancel_requested=unsupported")
 
     @Slot(str)
@@ -225,6 +241,12 @@ class EchoUIController(QObject):
         self._emit_runtime_telemetry("error", error_text)
         QTimer.singleShot(1200, lambda: self._emit_state("idle"))
         self._cleanup_worker()
+
+    @Slot(str)
+    def _handle_progress(self, event: str) -> None:
+        self._thread_debug("_handle_progress")
+        _debug_ui(f"[Echo UI] progress_event={event}")
+        self.uiEvent.emit(_json_payload({"type": str(event or "")}))
 
     @Slot(int)
     def _enter_speaking(self, token: int) -> None:

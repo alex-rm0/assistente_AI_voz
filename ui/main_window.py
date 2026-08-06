@@ -500,6 +500,21 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "AssistenteIA", f"Falha no microfone: {error}")
         self._focus_input()
 
+    def cancel_current_request(self) -> None:
+        """Cooperatively cancel the in-flight respond() call, if any.
+
+        No cancel button exists in this window yet -- this only prepares the
+        connection (mirrors prototype_web_ui/controller.py's
+        cancelCurrentRequest) so a future control can call it without
+        inventing new layout here.
+        """
+        if self.thread is None:
+            return
+        owner = getattr(self.responder, "__self__", None)
+        cancel = getattr(owner, "cancel_current_request", None)
+        if callable(cancel):
+            cancel()
+
     def _cleanup_worker(self) -> None:
         if self.thread is not None:
             self.thread.quit()
