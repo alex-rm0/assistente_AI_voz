@@ -445,6 +445,7 @@ class RoutedLLM(ProviderBackedLLM):
         temperature: float | None = None,
         num_predict: int | None = None,
         timeout_seconds: float | None = None,
+        task_profile: dict[str, object] | None = None,
     ) -> str:
         messages = [{"role": "system", "content": system_prompt or self.system_prompt}]
         messages.extend(history or [])
@@ -461,6 +462,7 @@ class RoutedLLM(ProviderBackedLLM):
                 context_chars=routing_context_chars,
                 constraint_count=_count_constraints(routing_message),
                 explicit_provider=self.explicit_provider,
+                task_profile=task_profile,
             )
         )
         provider = self.providers.get(decision.provider)

@@ -19,6 +19,7 @@ class ChatModel(Protocol):
         temperature: float | None = None,
         num_predict: int | None = None,
         timeout_seconds: float | None = None,
+        task_profile: dict[str, object] | None = None,
     ) -> str: ...
 
 
@@ -77,6 +78,12 @@ class ComposerRequest:
     # propagates instead of being swallowed into a fallback reply, so the
     # caller can react to it specifically (see compose() below).
     timeout_seconds: float | None = None
+    # Structured task description for the router's automatic-mode provider
+    # choice (currently just document rewrite/refinement) -- see
+    # assistant/model_router.py's ModelRoutingInput.task_profile. Never
+    # forwarded to a provider that doesn't route (ProviderBackedLLM ignores
+    # it); only consumed by RoutedLLM.
+    task_profile: dict[str, object] | None = None
     language_instruction: str = (
         "Preferências de idioma:\n"
         "- idioma_base = pt-PT.\n"
@@ -114,6 +121,8 @@ class ResponseComposer:
             generation_kwargs["num_predict"] = request.num_predict
         if request.timeout_seconds is not None:
             generation_kwargs["timeout_seconds"] = request.timeout_seconds
+        if request.task_profile is not None:
+            generation_kwargs["task_profile"] = request.task_profile
 
         try:
             _mark_llm_source(self.llm, "RESPONSE_COMPOSER")

@@ -292,7 +292,12 @@ class ProviderBackedLLM:
         temperature: float | None = None,
         num_predict: int | None = None,
         timeout_seconds: float | None = None,
+        task_profile: dict[str, object] | None = None,
     ) -> str:
+        # task_profile only matters for RoutedLLM's automatic-mode provider
+        # selection; this class always talks to a single pre-selected
+        # provider (explicit ollama/claude mode), so it's accepted for
+        # interface parity and otherwise ignored.
         messages = [{"role": "system", "content": system_prompt or self.system_prompt}]
         messages.extend(history or [])
         messages.append({"role": "user", "content": user_message})
