@@ -1473,3 +1473,282 @@ def test_active_document_followup_action_display_still_wins_over_review() -> Non
 
     assert _active_document_followup_action("mostra tudo", "email") == "display"
     assert _active_document_followup_action("que horas são?", "email") == ""
+
+
+# --- PATCH C regression fix: natural rewrite phrasing (pronoun-suffixed
+# imperatives), review-vs-rewrite tie-break, draft state, and the
+# topic-shift ambiguity fix.
+
+
+def test_active_document_followup_action_recognizes_natural_rewrite_phrasing() -> None:
+    from assistant.conversation import _active_document_followup_action
+
+    rewrite_cases = (
+        "Torna-o mais formal, mas não guardes ainda.",
+        "torna isto mais formal",
+        "deixa o email mais formal",
+        "reescreve num tom mais formal",
+        "melhora o texto",
+        "faz uma versão melhor",
+        "reformula",
+        "escreve isto de outra forma",
+        "corrige e melhora",
+        "adapta para um tom profissional",
+    )
+    for message in rewrite_cases:
+        assert _active_document_followup_action(message, "email") == "rewrite", message
+
+
+def test_active_document_followup_action_review_vs_rewrite_distinct() -> None:
+    from assistant.conversation import _active_document_followup_action
+
+    assert _active_document_followup_action("sugeres alguma alteração?", "email") == "review"
+    assert _active_document_followup_action("há algo a melhorar?", "email") == "review"
+    assert _active_document_followup_action("o que mudavas?", "email") == "review"
+    assert _active_document_followup_action("torna mais formal", "email") == "rewrite"
+    assert _active_document_followup_action("reescreve", "email") == "rewrite"
+    # "deixa estar" is the unrelated cancel phrase (_is_negative_confirmation)
+    # and must not be misread as a rewrite request just because "deixa" is a
+    # guarded rewrite verb.
+    assert _active_document_followup_action("deixa estar", "email") == ""
+
+
+def test_active_document_followup_action_draft_markers() -> None:
+    from assistant.conversation import _active_document_followup_action
+
+    assert _active_document_followup_action("mostra a versão melhorada", "email") == "display_draft"
+    assert _active_document_followup_action("voltando ao email, mostra-me a versão melhorada", "email") == "display_draft"
+    assert _active_document_followup_action("mostra o original", "email") == "display"
+    assert _active_document_followup_action("compara as duas versões", "email") == "compare_versions"
+    assert _active_document_followup_action("descarta as alterações", "email") == "discard_draft"
+    assert _active_document_followup_action("guarda esta versão", "email") == "save_draft"
+
+
+def test_document_rewrite_creates_unsaved_draft_and_supports_full_followup_sequence(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=[
+            "Podias mencionar o orçamento com mais destaque.",
+            "Prezada Francisca,\n\nSegue, em anexo, o resumo formal da reunião de Direção.\n\n"
+            "- Febrada final de época\n- Protocolo Águas de Coimbra\n- Candidatura COP\n- Sanfil\n\n"
+            "Com os melhores cumprimentos,\nAlexandre",
+        ],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+    original_bytes = (engine.workspace_path / "email_resumo_novo.txt").read_bytes()
+
+    # 1. Ler o email.
+    first = engine.respond("lê o ficheiro email_resumo_novo e diz exatamente o que lá está escrito")
+    assert "Olá Francisca" in first
+
+    # 2. Pedir sugestão (review, não rewrite).
+    engine.respond("Tens alguma sugestão para melhorar este email?")
+    suggestion_telemetry = engine.get_last_turn_telemetry() or {}
+    assert suggestion_telemetry["document_action"] == "review"
+
+    # 3. Rewrite sem guardar.
+    rewritten = engine.respond("Torna-o mais formal, mas não guardes ainda.")
+    rewrite_telemetry = engine.get_last_turn_telemetry() or {}
+
+    # 4. Confirmar que foi devolvido um email completo reescrito.
+    assert "Prezada Francisca" in rewritten
+    assert "Alexandre" in rewritten
+    assert rewrite_telemetry["selected_path"] == "DOCUMENT_TASK"
+    assert rewrite_telemetry["document_action"] == "rewrite"
+    assert rewrite_telemetry["document_context_reused"] is True
+    assert rewrite_telemetry["document_grounded"] is True
+    assert rewrite_telemetry["draft_created"] is True
+    assert rewrite_telemetry["draft_saved"] is False
+    assert rewrite_telemetry["grounding_sources"] == ["WORKSPACE_FILE"]
+    assert rewrite_telemetry["draft_validation_passed"] is True
+    assert rewrite_telemetry["draft_validation_failed"] is False
+    assert rewrite_telemetry["draft_regeneration_attempted"] is False
+    assert rewrite_telemetry["draft_original_length"] > 0
+    assert rewrite_telemetry["draft_generated_length"] > 0
+
+    # 5. Confirmar que o ficheiro original não mudou.
+    assert (engine.workspace_path / "email_resumo_novo.txt").read_bytes() == original_bytes
+
+    # 6. Pergunta lateral não relacionada com o documento.
+    engine.respond("Que horas são?")
+    time_telemetry = engine.get_last_turn_telemetry() or {}
+    assert time_telemetry["selected_path"] == "SYSTEM_DATETIME"
+
+    # 7. Voltar ao email e pedir a versão melhorada.
+    draft_response = engine.respond("Voltando ao email, mostra-me a versão melhorada.")
+    draft_telemetry = engine.get_last_turn_telemetry() or {}
+
+    # 8. Confirmar que devolve exatamente o draft, sem reler nem chamar o LLM.
+    assert draft_telemetry["selected_path"] == "DOCUMENT_TASK"
+    assert draft_telemetry["document_action"] == "display_draft"
+    assert draft_telemetry["draft_reused"] is True
+    assert draft_telemetry["draft_saved"] is False
+    assert draft_telemetry["llm_calls"] == 0
+    assert draft_telemetry["grounding_sources"] == ["WORKSPACE_FILE"]
+    assert "Prezada Francisca" in draft_response
+
+    # 9. Mostra o original.
+    original_response = engine.respond("Mostra o original.")
+    original_telemetry = engine.get_last_turn_telemetry() or {}
+
+    # 10. Confirmar que devolve o texto original, não a versão melhorada.
+    assert original_telemetry["document_action"] == "display"
+    assert "Olá Francisca" in original_response
+    assert "Prezada Francisca" not in original_response
+
+    # 11. Descarta as alterações.
+    engine.respond("Descarta as alterações.")
+    discard_telemetry = engine.get_last_turn_telemetry() or {}
+
+    # 12. Confirmar que draft_content foi limpo.
+    assert discard_telemetry["document_action"] == "discard_draft"
+    assert engine._active_document_context.draft_content == ""
+    assert engine._active_document_context.draft_saved is False
+    assert len(ollama.calls) == 2
+    assert anthropic.calls == []
+
+
+_VALID_FORMAL_REWRITE = (
+    "Prezada Francisca,\n\nSegue, em anexo, o resumo formal da reunião de Direção.\n\n"
+    "- Febrada final de época\n- Protocolo Águas de Coimbra\n- Candidatura COP\n- Sanfil\n\n"
+    "Com os melhores cumprimentos,\nAlexandre"
+)
+
+
+def test_document_rewrite_invalid_first_response_triggers_one_regeneration(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=[
+            "O documento parece pronto para enviar! É para enviar a algum destinatário ou é apenas um resumo interno?",
+            _VALID_FORMAL_REWRITE,
+        ],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+
+    engine.respond("lê o ficheiro email_resumo_novo e diz exatamente o que lá está escrito")
+    response = engine.respond("Torna-o mais formal, mas não guardes ainda.")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["draft_regeneration_attempted"] is True
+    assert telemetry["draft_validation_passed"] is True
+    assert telemetry["draft_validation_failed"] is False
+    assert telemetry["draft_created"] is True
+    assert "pronto para enviar" not in response
+    assert "Prezada Francisca" in response
+    assert engine._active_document_context.draft_content == _VALID_FORMAL_REWRITE
+    assert len(ollama.calls) == 2
+    assert anthropic.calls == []
+
+
+def test_document_rewrite_both_attempts_invalid_creates_no_draft(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=[
+            "O documento parece pronto para enviar! É para enviar a algum destinatário ou é apenas um resumo interno?",
+            "Achas que devia mencionar mais alguma coisa antes de enviar?",
+        ],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+    original_bytes = (engine.workspace_path / "email_resumo_novo.txt").read_bytes()
+
+    engine.respond("lê o ficheiro email_resumo_novo e diz exatamente o que lá está escrito")
+    response = engine.respond("Torna-o mais formal, mas não guardes ainda.")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["draft_created"] is False
+    assert telemetry["draft_validation_failed"] is True
+    assert telemetry["draft_validation_passed"] is False
+    assert telemetry["draft_regeneration_attempted"] is True
+    assert telemetry["draft_validation_reason"]
+    assert engine._active_document_context.draft_content == ""
+    assert "não consegui" in response.lower()
+    assert (engine.workspace_path / "email_resumo_novo.txt").read_bytes() == original_bytes
+    assert len(ollama.calls) == 2
+    assert anthropic.calls == []
+
+
+def test_document_rewrite_rejects_complete_but_short_response_missing_entities(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=["Reunião concluída com sucesso.", "Reunião encerrada."],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+
+    engine.respond("lê o ficheiro email_resumo_novo e diz exatamente o que lá está escrito")
+    engine.respond("Torna-o mais formal, mas não guardes ainda.")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["draft_created"] is False
+    assert telemetry["draft_validation_failed"] is True
+    assert engine._active_document_context.draft_content == ""
+
+
+def test_document_rewrite_valid_first_response_needs_no_regeneration(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=[_VALID_FORMAL_REWRITE],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+
+    engine.respond("lê o ficheiro email_resumo_novo e diz exatamente o que lá está escrito")
+    rewrite_telemetry_response = engine.respond("Torna-o mais formal, mas não guardes ainda.")
+    telemetry = engine.get_last_turn_telemetry() or {}
+    draft_response = engine.respond("Voltando ao email, mostra-me a versão melhorada.")
+    draft_telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["draft_regeneration_attempted"] is False
+    assert telemetry["draft_validation_passed"] is True
+    assert "Prezada Francisca" in rewrite_telemetry_response
+    assert draft_telemetry["llm_calls"] == 0
+    assert draft_response.endswith(_VALID_FORMAL_REWRITE)
+    assert len(ollama.calls) == 1
+    assert anthropic.calls == []
+
+
+def test_document_rewrite_draft_not_written_to_persistent_memory(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=[_VALID_FORMAL_REWRITE],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+
+    engine.respond("lê o ficheiro email_resumo_novo e diz exatamente o que lá está escrito")
+    engine.respond("Torna-o mais formal, mas não guardes ainda.")
+
+    assert engine.long_term_memory.search_results == []
+    assert engine.long_term_memory.context_text == ""
+    assert "Francisca" not in str(engine.long_term_memory.preferences)
+
+
+def test_ambiguous_opinion_question_after_topic_shift_asks_for_context(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=["Pode ser, o que gostavas de falar?"],
+    )
+
+    engine.respond("Vamos falar de outra coisa.")
+    response = engine.respond("O que achas?")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert response == "Sobre o quê?"
+    assert telemetry["selected_path"] == "GENERAL_CONVERSATION"
+    assert telemetry["response_source"] == "CLARIFICATION_DETERMINISTIC"
+    assert telemetry["llm_calls"] == 0
+    assert telemetry["memory_route"] == "NONE"
+    assert "memoria" not in response.lower() and "memória" not in response.lower()
+    assert len(ollama.calls) == 1
+    assert anthropic.calls == []
