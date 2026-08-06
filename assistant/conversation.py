@@ -1727,13 +1727,17 @@ class AssistantEngine:
                 )
 
             attempt = _compose_rewrite(_document_rewrite_prompt(request, context))
-            valid, reason = _validate_rewrite_draft(original_content, attempt)
+            valid, reason, cleaned = _validate_rewrite_draft(original_content, attempt)
+            preamble_removed = cleaned.strip() != attempt.strip()
+            placeholder_detected = reason == "placeholder_detected"
             regenerated = False
             if not valid:
                 regenerated = True
                 correction_prompt = _document_rewrite_correction_prompt(request, context, attempt, reason)
                 attempt = _compose_rewrite(correction_prompt)
-                valid, reason = _validate_rewrite_draft(original_content, attempt)
+                valid, reason, cleaned = _validate_rewrite_draft(original_content, attempt)
+                preamble_removed = preamble_removed or (cleaned.strip() != attempt.strip())
+                placeholder_detected = placeholder_detected or (reason == "placeholder_detected")
 
             if not valid:
                 self._record_document_trace(
@@ -1744,14 +1748,16 @@ class AssistantEngine:
                     draft_validation_reason=reason,
                     draft_original_length=len(original_content),
                     draft_generated_length=len(attempt),
+                    draft_preamble_removed=preamble_removed,
+                    draft_placeholder_detected=placeholder_detected,
                 )
                 return (
-                    "Não consegui gerar uma versão reescrita completa e fiável deste documento "
-                    "(o modelo respondeu com um comentário em vez do texto completo). "
+                    "Não consegui gerar uma versão reescrita completa e fiável deste documento. "
+                    f"{_rewrite_failure_message(reason)} "
                     "O ficheiro original continua igual — queres que tente outra vez?"
                 )
 
-            context.draft_content = attempt
+            context.draft_content = cleaned
             context.draft_action = action
             context.draft_created_from_hash = context.content_hash
             context.draft_saved = False
@@ -1764,9 +1770,11 @@ class AssistantEngine:
                 draft_validation_passed=True,
                 draft_regeneration_attempted=regenerated,
                 draft_original_length=len(original_content),
-                draft_generated_length=len(attempt),
+                draft_generated_length=len(cleaned),
+                draft_preamble_removed=preamble_removed,
+                draft_placeholder_detected=placeholder_detected,
             )
-            return f"Aqui está a versão reescrita:\n\n{attempt}\n\n(Ainda não guardei esta versão — o ficheiro original continua igual.)"
+            return f"Aqui está a versão reescrita:\n\n{cleaned}\n\n(Ainda não guardei esta versão — o ficheiro original continua igual.)"
 
         request = DocumentTaskRequest(
             source_files=[context.resolved_file],
@@ -2031,6 +2039,8 @@ class AssistantEngine:
         draft_validation_reason: str = "",
         draft_original_length: int = 0,
         draft_generated_length: int = 0,
+        draft_preamble_removed: bool = False,
+        draft_placeholder_detected: bool = False,
     ) -> None:
         if self._turn_trace is None:
             return
@@ -2057,6 +2067,8 @@ class AssistantEngine:
         self._turn_trace["draft_validation_reason"] = draft_validation_reason
         self._turn_trace["draft_original_length"] = int(draft_original_length)
         self._turn_trace["draft_generated_length"] = int(draft_generated_length)
+        self._turn_trace["draft_preamble_removed"] = bool(draft_preamble_removed)
+        self._turn_trace["draft_placeholder_detected"] = bool(draft_placeholder_detected)
 
     def _fast_agent_context(self) -> AgentContext:
         return AgentContext(
@@ -2592,6 +2604,8 @@ class AssistantEngine:
             "draft_validation_reason": self._turn_trace.get("draft_validation_reason") or "",
             "draft_original_length": int(self._turn_trace.get("draft_original_length") or 0),
             "draft_generated_length": int(self._turn_trace.get("draft_generated_length") or 0),
+            "draft_preamble_removed": bool(self._turn_trace.get("draft_preamble_removed")),
+            "draft_placeholder_detected": bool(self._turn_trace.get("draft_placeholder_detected")),
             "response_grounded": self._turn_trace.get("response_grounded"),
             "unsupported_tool_claim_detected": bool(self._turn_trace.get("unsupported_tool_claim_detected")),
             "unsupported_memory_claim_detected": bool(self._turn_trace.get("unsupported_memory_claim_detected")),
@@ -5457,42 +5471,120 @@ _REWRITE_INVALID_RESPONSE_MARKERS = (
     "deixa-me analisar",
 )
 
+# A short leading sentence announcing what the model is about to do
+# ("Vou reescrever o documento completo. Aqui está a resposta:") immediately
+# followed by the real document is a preamble, not a refusal — reproduced
+# manually, this alone was enough to reject an otherwise perfect rewrite
+# because it happened to contain "vou reescrever". _strip_rewrite_preamble
+# only ever removes text before the FIRST blank-line paragraph break, and
+# only when that leading text is short and matches one of these markers —
+# it never touches anything that could be real document content.
+_REWRITE_PREAMBLE_MARKERS = (
+    "vou reescrever",
+    "vou analisar",
+    "aqui esta a resposta",
+    "aqui está a resposta",
+    "aqui esta o documento",
+    "aqui está o documento",
+    "segue a versao reescrita",
+    "segue a versão reescrita",
+    "deixa me analisar",
+    "deixa-me analisar",
+)
+_REWRITE_PREAMBLE_MAX_CHARS = 200
 
-def _validate_rewrite_draft(original_content: str, candidate: str) -> tuple[bool, str]:
+
+def _strip_rewrite_preamble(candidate: str) -> str:
+    text = str(candidate or "")
+    if "\n\n" not in text:
+        return text
+    preamble, _, remainder = text.partition("\n\n")
+    preamble = preamble.strip()
+    remainder = remainder.strip()
+    if not preamble or not remainder or len(preamble) > _REWRITE_PREAMBLE_MAX_CHARS:
+        return text
+    if not contains_any_phrase(_normalize_text(preamble), _REWRITE_PREAMBLE_MARKERS):
+        return text
+    return remainder
+
+
+# Generic placeholder patterns ("[nome]", "<nome>", "nome aqui", "sua
+# assinatura", ...) — never a specific person's name, so this stays valid
+# regardless of which document/recipient is active.
+_PLACEHOLDER_PATTERNS = (
+    re.compile(r"\[[^\]]{0,30}nome[^\]]{0,30}\]", re.IGNORECASE),
+    re.compile(r"<[^>]{0,30}nome[^>]{0,30}>", re.IGNORECASE),
+    re.compile(r"\bnome\s+aqui\b", re.IGNORECASE),
+    re.compile(r"\binserir\s+nome\b", re.IGNORECASE),
+    re.compile(r"\bsua\s+assinatura\b", re.IGNORECASE),
+    re.compile(r"\[[^\]]{0,30}assinatura[^\]]{0,30}\]", re.IGNORECASE),
+)
+
+
+def _looks_like_placeholder(text: str) -> bool:
+    normalized = _normalize_text(text)
+    return any(pattern.search(normalized) for pattern in _PLACEHOLDER_PATTERNS)
+
+
+def _validate_rewrite_draft(original_content: str, candidate: str) -> tuple[bool, str, str]:
     """Structural plausibility check for a rewrite draft before it is
     accepted — catches the model answering with a question/comment instead
     of the rewritten document. Anchors are extracted from the ORIGINAL
-    document, never hardcoded to a specific name/project."""
-    candidate_stripped = str(candidate or "").strip()
+    document, never hardcoded to a specific name/project.
+
+    Returns (valid, reason_code, cleaned_content). cleaned_content has any
+    leading meta-commentary preamble stripped and is what should be stored
+    as the draft — the caller should use it instead of the raw candidate
+    regardless of whether validation passed, so a preamble never leaks into
+    a stored draft even on a borderline accept.
+    """
+    cleaned = _strip_rewrite_preamble(str(candidate or ""))
+    candidate_stripped = cleaned.strip()
     if not candidate_stripped:
-        return False, "resposta vazia"
+        return False, "resposta_vazia", cleaned
     anchors = _extract_document_anchors(original_content)
     original_length = int(anchors["length"]) or 1
     if len(candidate_stripped) < original_length * 0.5:
-        return False, "muito mais curto que o original"
+        return False, "muito_curta", cleaned
     last_line = next((line for line in reversed(candidate_stripped.splitlines()) if line.strip()), "")
     if last_line.strip().endswith("?"):
-        return False, "termina numa pergunta"
+        return False, "termina_em_pergunta", cleaned
+    if _looks_like_placeholder(candidate_stripped):
+        return False, "placeholder_detected", cleaned
     normalized_candidate = _normalize_text(candidate_stripped)
     if contains_any_phrase(normalized_candidate, _REWRITE_INVALID_RESPONSE_MARKERS):
-        return False, "parece comentário/pergunta em vez do documento reescrito"
+        return False, "parece_comentario", cleaned
     entity_tokens = anchors["entity_tokens"]
     if entity_tokens:
         present = sum(1 for token in entity_tokens if token.lower() in candidate_stripped.lower())
         if present / len(entity_tokens) < 0.6:
-            return False, "faltam entidades/tópicos importantes do original"
+            return False, "faltam_entidades", cleaned
     bullet_items = anchors["bullet_items"]
     if bullet_items:
         preserved = sum(1 for item in bullet_items if item.lower() in candidate_stripped.lower())
         if preserved / len(bullet_items) < 0.5:
-            return False, "faltam pontos da lista original"
+            return False, "faltam_itens_lista", cleaned
     greeting_name = str(anchors["greeting_name"] or "")
     if greeting_name and greeting_name.lower() not in candidate_stripped.lower():
-        return False, "falta o destinatário/saudação original"
+        return False, "falta_saudacao", cleaned
     closing_name = str(anchors["closing_name"] or "")
     if closing_name and closing_name.lower() not in candidate_stripped.lower():
-        return False, "falta a assinatura original"
-    return True, ""
+        return False, "falta_assinatura", cleaned
+    return True, "", cleaned
+
+
+_REWRITE_FAILURE_MESSAGES = {
+    "placeholder_detected": "A versão gerada ficou incompleta porque continha campos por preencher.",
+    "falta_assinatura": "A versão gerada perdeu elementos importantes do documento.",
+    "falta_saudacao": "A versão gerada perdeu elementos importantes do documento.",
+    "faltam_entidades": "A versão gerada perdeu elementos importantes do documento.",
+    "faltam_itens_lista": "A versão gerada perdeu elementos importantes do documento.",
+}
+_DEFAULT_REWRITE_FAILURE_MESSAGE = "O modelo respondeu com um comentário em vez do documento completo."
+
+
+def _rewrite_failure_message(reason: str) -> str:
+    return _REWRITE_FAILURE_MESSAGES.get(reason, _DEFAULT_REWRITE_FAILURE_MESSAGE)
 
 
 def _document_rewrite_prompt(request: DocumentTaskRequest, context: ActiveDocumentContext) -> str:
