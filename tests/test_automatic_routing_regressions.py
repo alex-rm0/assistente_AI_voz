@@ -27,13 +27,24 @@ class FakeProvider:
     def name(self) -> str:
         return self._name
 
-    def chat(self, messages, *, model=None, response_format=None, tools=None, temperature=None, num_predict=None):
+    def chat(
+        self,
+        messages,
+        *,
+        model=None,
+        response_format=None,
+        tools=None,
+        temperature=None,
+        num_predict=None,
+        timeout_seconds=None,
+    ):
         self.calls.append({
             "messages": messages,
             "model": model,
             "response_format": response_format,
             "temperature": temperature,
             "num_predict": num_predict,
+            "timeout_seconds": timeout_seconds,
         })
         index = min(len(self.calls) - 1, len(self.replies) - 1)
         return ModelResponse(
@@ -1895,3 +1906,326 @@ def test_document_rewrite_failure_message_reflects_real_reason(tmp_path: Path) -
     assert "campos por preencher" in response
     assert "comentário" not in response.lower()
     assert engine._active_document_context.draft_content == ""
+
+
+# --- Rewrite reliability fix #2: cooperative cancellation, total timeout,
+# and progress events. Reproduces a document rewrite no longer looking
+# "stuck" during slow Ollama calls: cancellation is checked at fixed points
+# instead of trying to interrupt an in-flight HTTP call, and a proactive
+# total-timeout budget prevents a second attempt from starting when there's
+# not enough time left for it to plausibly finish.
+
+
+def test_cancel_current_request_returns_false_when_no_active_token(tmp_path: Path) -> None:
+    engine, *_ = make_engine(tmp_path)
+
+    assert engine.cancel_current_request() is False
+    assert engine.is_cancel_requested() is False
+
+
+def test_begin_request_resets_cancellation_between_requests(tmp_path: Path) -> None:
+    engine, *_ = make_engine(tmp_path)
+
+    engine.begin_request()
+    assert engine.cancel_current_request() is True
+    assert engine.is_cancel_requested() is True
+
+    engine.begin_request()
+    assert engine.is_cancel_requested() is False
+
+
+def test_document_rewrite_cancelled_before_first_call_makes_no_llm_calls(tmp_path: Path, monkeypatch) -> None:
+    import assistant.conversation as conversation_module
+
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=[_VALID_FORMAL_REWRITE],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+    engine.respond("lê o ficheiro email_resumo_novo e diz exatamente o que lá está escrito")
+
+    real_prompt_fn = conversation_module._document_rewrite_prompt
+
+    def _prompt_with_cancel(request, context):
+        engine.cancel_current_request()
+        return real_prompt_fn(request, context)
+
+    monkeypatch.setattr(conversation_module, "_document_rewrite_prompt", _prompt_with_cancel)
+
+    response = engine.respond("Torna-o mais formal, mas não guardes ainda.")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert response == "Pedido cancelado."
+    assert telemetry["cancellation_requested"] is True
+    assert telemetry["request_cancelled"] is True
+    assert telemetry["draft_created"] is False
+    assert engine._active_document_context.draft_content == ""
+    assert len(ollama.calls) == 0
+    assert anthropic.calls == []
+
+
+def test_document_rewrite_cancelled_after_first_invalid_attempt_skips_regeneration(tmp_path: Path, monkeypatch) -> None:
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=[
+            "O documento parece pronto para enviar! É para enviar a algum destinatário?",
+            _VALID_FORMAL_REWRITE,
+        ],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+    engine.respond("lê o ficheiro email_resumo_novo e diz exatamente o que lá está escrito")
+
+    real_chat = ollama.chat
+
+    def _chat_then_cancel(*args, **kwargs):
+        result = real_chat(*args, **kwargs)
+        engine.cancel_current_request()
+        return result
+
+    monkeypatch.setattr(ollama, "chat", _chat_then_cancel)
+
+    response = engine.respond("Torna-o mais formal, mas não guardes ainda.")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert response == "Pedido cancelado."
+    assert telemetry["request_cancelled"] is True
+    assert engine._active_document_context.draft_content == ""
+    assert len(ollama.calls) == 1
+    assert anthropic.calls == []
+
+
+def test_document_rewrite_cancelled_after_valid_generation_creates_no_draft(tmp_path: Path, monkeypatch) -> None:
+    import assistant.conversation as conversation_module
+
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=[_VALID_FORMAL_REWRITE],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+    engine.respond("lê o ficheiro email_resumo_novo e diz exatamente o que lá está escrito")
+
+    real_validate = conversation_module._validate_rewrite_draft
+
+    def _validate_then_cancel(original_content, candidate):
+        result = real_validate(original_content, candidate)
+        if result[0]:
+            engine.cancel_current_request()
+        return result
+
+    monkeypatch.setattr(conversation_module, "_validate_rewrite_draft", _validate_then_cancel)
+
+    response = engine.respond("Torna-o mais formal, mas não guardes ainda.")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert response == "Pedido cancelado."
+    assert telemetry["request_cancelled"] is True
+    assert telemetry["draft_created"] is False
+    assert engine._active_document_context.draft_content == ""
+    assert len(ollama.calls) == 1
+
+
+def test_document_rewrite_total_timeout_before_second_attempt(tmp_path: Path, monkeypatch) -> None:
+    import time as time_module
+
+    import assistant.conversation as conversation_module
+
+    monkeypatch.setattr(conversation_module, "DOCUMENT_REWRITE_TOTAL_TIMEOUT_SECONDS", 0.3)
+    monkeypatch.setattr(conversation_module, "_REWRITE_MIN_SECONDS_FOR_ATTEMPT", 0.2)
+
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=[
+            "O documento parece pronto para enviar! É para enviar a algum destinatário?",
+            _VALID_FORMAL_REWRITE,
+        ],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+    original_bytes = (engine.workspace_path / "email_resumo_novo.txt").read_bytes()
+    engine.respond("lê o ficheiro email_resumo_novo e diz exatamente o que lá está escrito")
+
+    real_chat = ollama.chat
+
+    def _slow_chat(*args, **kwargs):
+        time_module.sleep(0.25)
+        return real_chat(*args, **kwargs)
+
+    monkeypatch.setattr(ollama, "chat", _slow_chat)
+
+    response = engine.respond("Torna-o mais formal, mas não guardes ainda.")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["rewrite_timeout"] is True
+    assert telemetry["draft_created"] is False
+    assert telemetry["request_cancelled"] is False
+    assert len(ollama.calls) == 1
+    assert "demorou mais do que o previsto" in response
+    assert (engine.workspace_path / "email_resumo_novo.txt").read_bytes() == original_bytes
+
+
+def test_document_rewrite_timeout_seconds_is_bounded_and_other_calls_unaffected(tmp_path: Path) -> None:
+    from assistant.conversation import DOCUMENT_REWRITE_TOTAL_TIMEOUT_SECONDS
+
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=[_VALID_FORMAL_REWRITE, "Podias mencionar o orçamento com mais destaque."],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+
+    engine.respond("lê o ficheiro email_resumo_novo e diz exatamente o que lá está escrito")
+    engine.respond("Torna-o mais formal, mas não guardes ainda.")
+    engine.respond("Tens alguma sugestão para melhorar este email?")
+
+    assert ollama.calls[0]["timeout_seconds"] is not None
+    assert 0 < ollama.calls[0]["timeout_seconds"] <= DOCUMENT_REWRITE_TOTAL_TIMEOUT_SECONDS
+    # The unrelated "review" call right after must not inherit a bounded
+    # per-call timeout -- it keeps using the provider's own default.
+    assert ollama.calls[1]["timeout_seconds"] is None
+
+
+def test_document_rewrite_success_reports_clean_finish_and_no_cancellation_telemetry(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=[_VALID_FORMAL_REWRITE],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+
+    engine.respond("lê o ficheiro email_resumo_novo e diz exatamente o que lá está escrito")
+    engine.respond("Torna-o mais formal, mas não guardes ainda.")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["cancellation_requested"] is False
+    assert telemetry["request_cancelled"] is False
+    assert telemetry["rewrite_timeout"] is False
+    assert telemetry["rewrite_regeneration_started"] is False
+    assert telemetry["request_finished_cleanly"] is True
+    assert len(ollama.calls) == 1
+
+
+def test_document_rewrite_next_request_after_cancellation_is_not_affected(tmp_path: Path, monkeypatch) -> None:
+    import assistant.conversation as conversation_module
+
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=[_VALID_FORMAL_REWRITE, _VALID_FORMAL_REWRITE],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+    engine.respond("lê o ficheiro email_resumo_novo e diz exatamente o que lá está escrito")
+
+    real_prompt_fn = conversation_module._document_rewrite_prompt
+
+    def _prompt_with_cancel(request, context):
+        engine.cancel_current_request()
+        return real_prompt_fn(request, context)
+
+    monkeypatch.setattr(conversation_module, "_document_rewrite_prompt", _prompt_with_cancel)
+    cancelled_response = engine.respond("Torna-o mais formal, mas não guardes ainda.")
+    assert cancelled_response == "Pedido cancelado."
+    assert len(ollama.calls) == 0
+
+    monkeypatch.setattr(conversation_module, "_document_rewrite_prompt", real_prompt_fn)
+    second_response = engine.respond("Torna-o mais formal, mas não guardes ainda.")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert engine.is_cancel_requested() is False
+    assert second_response != "Pedido cancelado."
+    assert "Prezada Francisca" in second_response
+    assert telemetry["draft_created"] is True
+    assert len(ollama.calls) == 1
+    assert anthropic.calls == []
+
+
+def test_document_rewrite_cancelling_new_request_preserves_prior_valid_draft(tmp_path: Path, monkeypatch) -> None:
+    import assistant.conversation as conversation_module
+
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=[_VALID_FORMAL_REWRITE, _VALID_FORMAL_REWRITE],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+    engine.respond("lê o ficheiro email_resumo_novo e diz exatamente o que lá está escrito")
+    engine.respond("Torna-o mais formal, mas não guardes ainda.")
+
+    assert engine._active_document_context.draft_content == _VALID_FORMAL_REWRITE
+
+    real_prompt_fn = conversation_module._document_rewrite_prompt
+
+    def _prompt_with_cancel(request, context):
+        engine.cancel_current_request()
+        return real_prompt_fn(request, context)
+
+    monkeypatch.setattr(conversation_module, "_document_rewrite_prompt", _prompt_with_cancel)
+    response = engine.respond("Torna-o mais formal outra vez, mas não guardes ainda.")
+
+    assert response == "Pedido cancelado."
+    assert engine._active_document_context.draft_content == _VALID_FORMAL_REWRITE
+
+
+def test_document_rewrite_emits_regeneration_started_progress_event(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=[
+            "O documento parece pronto para enviar! É para enviar a algum destinatário?",
+            _VALID_FORMAL_REWRITE,
+        ],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+    engine.respond("lê o ficheiro email_resumo_novo e diz exatamente o que lá está escrito")
+
+    events: list[str] = []
+    engine.set_progress_listener(events.append)
+    try:
+        engine.respond("Torna-o mais formal, mas não guardes ainda.")
+    finally:
+        engine.set_progress_listener(None)
+
+    assert "rewrite_attempt_started" in events
+    assert "rewrite_regeneration_started" in events
+
+
+def test_document_rewrite_emits_cancelled_progress_event(tmp_path: Path, monkeypatch) -> None:
+    import assistant.conversation as conversation_module
+
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=[_VALID_FORMAL_REWRITE],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+    engine.respond("lê o ficheiro email_resumo_novo e diz exatamente o que lá está escrito")
+
+    real_prompt_fn = conversation_module._document_rewrite_prompt
+
+    def _prompt_with_cancel(request, context):
+        engine.cancel_current_request()
+        return real_prompt_fn(request, context)
+
+    monkeypatch.setattr(conversation_module, "_document_rewrite_prompt", _prompt_with_cancel)
+
+    events: list[str] = []
+    engine.set_progress_listener(events.append)
+    try:
+        response = engine.respond("Torna-o mais formal, mas não guardes ainda.")
+    finally:
+        engine.set_progress_listener(None)
+
+    assert response == "Pedido cancelado."
+    assert "rewrite_cancelled" in events

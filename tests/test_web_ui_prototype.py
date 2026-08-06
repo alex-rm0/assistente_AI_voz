@@ -747,3 +747,133 @@ def test_web_ui_forwards_javascript_console_to_terminal() -> None:
     assert "def javaScriptConsoleMessage" in window
     assert 'print(' in window
     assert "self.setPage(EchoWebPage(self))" in window
+
+
+def test_cancel_current_request_calls_engine_cooperatively_without_terminate() -> None:
+    controller = (PROTOTYPE / "controller.py").read_text(encoding="utf-8")
+
+    assert ".terminate()" not in controller
+    cancel_block = controller[controller.index("def cancelCurrentRequest"):controller.index("def setState")]
+    assert 'getattr(self.responder, "__self__", None)' in cancel_block
+    assert 'getattr(owner, "cancel_current_request", None)' in cancel_block
+    assert "cancel()" in cancel_block
+
+
+def test_worker_wires_and_clears_progress_listener_around_responder_call() -> None:
+    controller = (PROTOTYPE / "controller.py").read_text(encoding="utf-8")
+
+    assert "progress = Signal(str)" in controller
+    run_block = controller[controller.index("def run(self) -> None:"):controller.index("class EchoUIController")]
+    assert 'getattr(self.responder, "__self__", None)' in run_block
+    assert 'getattr(owner, "set_progress_listener", None)' in run_block
+    assert "set_listener(self.progress.emit)" in run_block
+    assert "finally:" in run_block
+    assert "set_listener(None)" in run_block
+    assert "self._worker.progress.connect(self._handle_progress, Qt.ConnectionType.QueuedConnection)" in controller
+
+
+class _FakeEngine:
+    """Stands in for AssistantEngine.respond bound to __self__, matching how
+    EchoRequestWorker/EchoUIController look up cancel_current_request and
+    set_progress_listener via getattr(responder, '__self__')."""
+
+    def __init__(self, reply: str = "Resposta.", progress_events: tuple[str, ...] = ()) -> None:
+        self.reply = reply
+        self.progress_events = progress_events
+        self.cancelled = False
+        self._progress_listener = None
+
+    def set_progress_listener(self, listener) -> None:
+        self._progress_listener = listener
+
+    def cancel_current_request(self) -> bool:
+        self.cancelled = True
+        return True
+
+    def respond(self, message: str) -> str:
+        for event in self.progress_events:
+            if self._progress_listener is not None:
+                self._progress_listener(event)
+        return self.reply
+
+
+def _qt_app():
+    from PySide6.QtCore import QCoreApplication
+
+    app = QCoreApplication.instance()
+    if app is None:
+        app = QCoreApplication([])
+    return app
+
+
+def test_cancel_current_request_invokes_fake_engine_cancellation() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine()
+    controller = EchoUIController(engine.respond)
+    controller._active = True
+
+    controller.cancelCurrentRequest()
+
+    assert engine.cancelled is True
+
+
+def test_cancel_current_request_is_a_noop_when_no_request_is_active() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine()
+    controller = EchoUIController(engine.respond)
+
+    controller.cancelCurrentRequest()
+
+    assert engine.cancelled is False
+
+
+def test_submit_message_reaches_idle_cleans_worker_and_delivers_progress_event() -> None:
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    from prototype_web_ui.controller import EchoUIController
+
+    app = _qt_app()
+    engine = _FakeEngine(reply="Aqui está a versão reescrita.", progress_events=("rewrite_regeneration_started",))
+    controller = EchoUIController(engine.respond, thinking_min_ms=0, speaking_duration_ms=0)
+
+    states: list[str] = []
+    ui_events: list[str] = []
+    finished = {"count": 0}
+    controller.stateChanged.connect(states.append)
+    controller.uiEvent.connect(ui_events.append)
+    controller.requestFinished.connect(lambda: finished.__setitem__("count", finished["count"] + 1))
+
+    # requestFinished (worker/thread cleanup) fires as soon as the response
+    # is handled -- well before the thinking->speaking->idle visual timers
+    # complete -- so the loop must keep running until "idle" actually shows
+    # up in stateChanged, not just quit on the first requestFinished.
+    loop = QEventLoop()
+    controller.stateChanged.connect(lambda state: loop.quit() if state == "idle" else None)
+    controller.submitMessage("Torna-o mais formal, mas não guardes ainda.")
+    QTimer.singleShot(5000, loop.quit)
+    loop.exec()
+
+    assert finished["count"] == 1
+    assert "idle" in states
+    assert controller._thread is None
+    assert controller._worker is None
+    assert controller.has_active_request() is False
+    assert any("rewrite_regeneration_started" in payload for payload in ui_events)
+
+    # A new request right after must work normally -- no leftover state from
+    # the previous one should block or corrupt it.
+    finished["count"] = 0
+    states.clear()
+    loop2 = QEventLoop()
+    controller.stateChanged.connect(lambda state: loop2.quit() if state == "idle" else None)
+    controller.submitMessage("Outra mensagem.")
+    QTimer.singleShot(5000, loop2.quit)
+    loop2.exec()
+
+    assert finished["count"] == 1
+    assert "idle" in states
+    assert controller.has_active_request() is False
