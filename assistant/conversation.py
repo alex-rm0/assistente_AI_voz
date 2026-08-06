@@ -1728,18 +1728,24 @@ class AssistantEngine:
                     )
                 )
 
+            attempt_1_started_at = time.perf_counter()
             attempt = _compose_rewrite(_document_rewrite_prompt(request, context))
+            attempt_1_latency_ms = (time.perf_counter() - attempt_1_started_at) * 1000
             valid, reason, cleaned = _validate_rewrite_draft(original_content, attempt)
             preamble_removed = cleaned.strip() != attempt.strip()
             placeholder_detected = reason == "placeholder_detected"
             regenerated = False
+            attempt_2_latency_ms = 0.0
             if not valid:
                 regenerated = True
                 correction_prompt = _document_rewrite_correction_prompt(request, context, attempt, reason)
+                attempt_2_started_at = time.perf_counter()
                 attempt = _compose_rewrite(correction_prompt)
+                attempt_2_latency_ms = (time.perf_counter() - attempt_2_started_at) * 1000
                 valid, reason, cleaned = _validate_rewrite_draft(original_content, attempt)
                 preamble_removed = preamble_removed or (cleaned.strip() != attempt.strip())
                 placeholder_detected = placeholder_detected or (reason == "placeholder_detected")
+            total_latency_ms = attempt_1_latency_ms + attempt_2_latency_ms
 
             if not valid:
                 self._record_document_trace(
@@ -1750,6 +1756,9 @@ class AssistantEngine:
                     draft_validation_reason=reason,
                     draft_original_length=len(original_content),
                     draft_generated_length=len(attempt),
+                    rewrite_attempt_1_latency_ms=attempt_1_latency_ms,
+                    rewrite_attempt_2_latency_ms=attempt_2_latency_ms,
+                    rewrite_total_latency_ms=total_latency_ms,
                     draft_preamble_removed=preamble_removed,
                     draft_placeholder_detected=placeholder_detected,
                 )
@@ -1773,6 +1782,9 @@ class AssistantEngine:
                 draft_regeneration_attempted=regenerated,
                 draft_original_length=len(original_content),
                 draft_generated_length=len(cleaned),
+                rewrite_attempt_1_latency_ms=attempt_1_latency_ms,
+                rewrite_attempt_2_latency_ms=attempt_2_latency_ms,
+                rewrite_total_latency_ms=total_latency_ms,
                 draft_preamble_removed=preamble_removed,
                 draft_placeholder_detected=placeholder_detected,
             )
@@ -2041,6 +2053,9 @@ class AssistantEngine:
         draft_validation_reason: str = "",
         draft_original_length: int = 0,
         draft_generated_length: int = 0,
+        rewrite_attempt_1_latency_ms: float = 0.0,
+        rewrite_attempt_2_latency_ms: float = 0.0,
+        rewrite_total_latency_ms: float = 0.0,
         draft_preamble_removed: bool = False,
         draft_placeholder_detected: bool = False,
     ) -> None:
@@ -2069,6 +2084,9 @@ class AssistantEngine:
         self._turn_trace["draft_validation_reason"] = draft_validation_reason
         self._turn_trace["draft_original_length"] = int(draft_original_length)
         self._turn_trace["draft_generated_length"] = int(draft_generated_length)
+        self._turn_trace["rewrite_attempt_1_latency_ms"] = round(float(rewrite_attempt_1_latency_ms), 1)
+        self._turn_trace["rewrite_attempt_2_latency_ms"] = round(float(rewrite_attempt_2_latency_ms), 1)
+        self._turn_trace["rewrite_total_latency_ms"] = round(float(rewrite_total_latency_ms), 1)
         self._turn_trace["draft_preamble_removed"] = bool(draft_preamble_removed)
         self._turn_trace["draft_placeholder_detected"] = bool(draft_placeholder_detected)
 
@@ -2606,6 +2624,9 @@ class AssistantEngine:
             "draft_validation_reason": self._turn_trace.get("draft_validation_reason") or "",
             "draft_original_length": int(self._turn_trace.get("draft_original_length") or 0),
             "draft_generated_length": int(self._turn_trace.get("draft_generated_length") or 0),
+            "rewrite_attempt_1_latency_ms": float(self._turn_trace.get("rewrite_attempt_1_latency_ms") or 0.0),
+            "rewrite_attempt_2_latency_ms": float(self._turn_trace.get("rewrite_attempt_2_latency_ms") or 0.0),
+            "rewrite_total_latency_ms": float(self._turn_trace.get("rewrite_total_latency_ms") or 0.0),
             "draft_preamble_removed": bool(self._turn_trace.get("draft_preamble_removed")),
             "draft_placeholder_detected": bool(self._turn_trace.get("draft_placeholder_detected")),
             "response_grounded": self._turn_trace.get("response_grounded"),
