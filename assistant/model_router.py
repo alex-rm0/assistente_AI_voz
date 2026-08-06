@@ -317,8 +317,18 @@ class ModelRouter:
         band = _document_task_complexity_band(score)
         task_type = str(profile.get("task_type") or "")
         attempt_number = int(profile.get("document_regeneration_attempt") or 1)
-        previous_failure = bool(profile.get("document_previous_local_failure"))
-        escalation_considered = band == "high" or previous_failure
+        # A failed previous attempt is not automatically a *local* failure --
+        # attempt 1 can itself already have been escalated to Claude on a
+        # high-complexity profile. previous_local_failure/previous_claude_failure
+        # distinguish Ollama-then-Claude from Claude-then-Claude so the reason
+        # code never claims a local attempt happened when it didn't.
+        previous_local_failure = bool(profile.get("document_previous_local_failure"))
+        previous_validation_failed = bool(profile.get("document_previous_validation_failed"))
+        previous_provider = str(profile.get("document_previous_provider") or "").strip().lower()
+        previous_claude_failure = (
+            previous_validation_failed and not previous_local_failure and previous_provider == "anthropic"
+        )
+        escalation_considered = band == "high" or previous_local_failure or previous_claude_failure
 
         def _decision(
             *, provider: str, reason_code: str, reason: str, paid_call: bool = False,
@@ -348,8 +358,8 @@ class ModelRouter:
                     reason="Primeira tentativa documental fica no modelo local.",
                 )
             return _decision(
-                provider="ollama", reason_code="document_local_validation_failed",
-                reason="Tentativa local falhou a validacao, mas a complexidade nao justifica escalar para Claude.",
+                provider="ollama", reason_code="document_local_regeneration",
+                reason="Tentativa local falhou a validacao; nova tentativa local, complexidade nao justifica Claude.",
             )
 
         estimated_cost = _estimate_prompt_cost_usd(routing_input.prompt_chars)
@@ -367,9 +377,12 @@ class ModelRouter:
                 before=before, after=after, fallback_reason=budget_reason,
             )
 
-        if previous_failure:
+        if previous_local_failure:
             reason_code = "document_escalated_after_local_failure"
             reason = "Tentativa local falhou a validacao; a escalar para Claude dentro do orcamento."
+        elif previous_claude_failure:
+            reason_code = "document_regenerated_with_claude"
+            reason = "Tentativa anterior em Claude falhou a validacao; a repetir com Claude dentro do orcamento."
         elif task_type == "document_refinement":
             reason_code = "iterative_refinement_high_complexity"
             reason = "Refinamento iterativo de alta complexidade; Claude escolhido dentro do orcamento."
