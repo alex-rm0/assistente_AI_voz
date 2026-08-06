@@ -575,7 +575,7 @@ def test_document_task_claude_disabled_blocks_escalation(tmp_path: Path) -> None
     assert decision.reason_code == "automatic_claude_disabled"
 
 
-def test_document_task_local_validation_failed_reason_when_still_medium(tmp_path: Path) -> None:
+def test_document_task_local_regeneration_reason_when_still_medium(tmp_path: Path) -> None:
     """A prior local failure on a trivial-enough document does not
     automatically clear the high-complexity bar -- stays local with a
     distinct reason instead of silently reusing document_local_first."""
@@ -587,7 +587,9 @@ def test_document_task_local_validation_failed_reason_when_still_medium(tmp_path
                 document_named_entity_count=0,
                 document_list_item_count=0,
                 document_chars=0,
+                document_previous_provider="ollama",
                 document_previous_local_failure=True,
+                document_previous_validation_failed=True,
                 document_validation_failure_reason="termina_em_pergunta",
                 document_regeneration_attempt=2,
             ),
@@ -595,7 +597,7 @@ def test_document_task_local_validation_failed_reason_when_still_medium(tmp_path
     )
 
     assert decision.provider == "ollama"
-    assert decision.reason_code == "document_local_validation_failed"
+    assert decision.reason_code == "document_local_regeneration"
     assert decision.task_complexity_band == "medium"
 
 
