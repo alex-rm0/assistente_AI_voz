@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from assistant.anthropic_provider import PAID_CALL_CONFIRMATION_ENV
 from assistant.conversation import AssistantEngine
 from assistant.memory import ConversationMemory
 from assistant.model_provider import ModelResponse
@@ -2327,6 +2328,22 @@ def test_draft_refinement_ainda_consegues_melhor_is_document_task(tmp_path: Path
     assert anthropic.calls == []
 
 
+def test_draft_refinement_ainda_consegues_melhorar_variant_with_r(tmp_path: Path) -> None:
+    """A (variant): the "-ar" verb form used in this task's own manual-test
+    wording ("ainda consegues melhorar") must resolve identically to the
+    adjective form ("ainda consegues melhor")."""
+    engine, ollama, anthropic = _setup_engine_with_draft(
+        tmp_path, [_VALID_FORMAL_REWRITE, _VALID_REFINED_REWRITE]
+    )
+
+    engine.respond("ainda consegues melhorar")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["selected_path"] == "DOCUMENT_TASK"
+    assert telemetry["document_followup_action"] == "iterative_refinement"
+    assert telemetry["draft_revision_number"] == 2
+
+
 def test_draft_refinement_consegues_fazer_melhor(tmp_path: Path) -> None:
     """B: 'consegues fazer melhor?' is also recognized as refinement."""
     engine, ollama, anthropic = _setup_engine_with_draft(
@@ -2534,3 +2551,126 @@ def test_draft_refinement_cancellation_still_works(tmp_path: Path, monkeypatch) 
     assert telemetry["document_followup_action"] == "iterative_refinement"
     assert telemetry["draft_revision_number"] == 1  # unchanged -- cancelled before commit
     assert engine._active_document_context.draft_content == _VALID_FORMAL_REWRITE
+
+
+# --- Automatic-mode escalation for complex document tasks: the router must
+# score the RECONSTRUCTED task (draft presence, revision, prior local
+# failure), not just the literal length of a short follow-up like "ainda
+# consegues melhor". All Anthropic responses here go through FakeProvider --
+# no real network call is ever made, even when paid calls are "authorized".
+
+_PAID_ENV = {"ANTHROPIC_API_KEY": "secret", PAID_CALL_CONFIRMATION_ENV: "true"}
+
+
+def test_escalation_simple_greeting_stays_local_low_complexity(tmp_path: Path) -> None:
+    """A: a plain greeting is local/low-complexity even with paid calls on."""
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path, mode="automatic", claude_enabled=True, env=_PAID_ENV, ollama_replies=["Olá! Como posso ajudar?"],
+    )
+
+    engine.respond("olá")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry.get("llm_calls", 0) == 0
+    assert anthropic.calls == []
+
+
+def test_escalation_show_original_uses_zero_llm_calls(tmp_path: Path) -> None:
+    """B: 'mostra o original' is a deterministic tool lookup -- 0 LLM calls,
+    never Claude, regardless of automatic/paid-call configuration."""
+    engine, _llm, ollama, anthropic = make_engine(tmp_path, mode="automatic", claude_enabled=True, env=_PAID_ENV)
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+
+    engine.respond("lê o ficheiro email_resumo_novo e mostra tudo sem resumir")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["llm_calls"] == 0
+    assert telemetry["selected_path"] == "DOCUMENT_TASK"
+    assert ollama.calls == []
+    assert anthropic.calls == []
+
+
+def test_escalation_simple_short_rewrite_stays_on_ollama(tmp_path: Path) -> None:
+    """C: a small, structurally simple first-time rewrite is Ollama-
+    preferred (local-first) even with Claude fully authorized."""
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path, mode="automatic", claude_enabled=True, env=_PAID_ENV, ollama_replies=[_VALID_FORMAL_REWRITE],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+    engine.respond("lê o ficheiro email_resumo_novo e mostra tudo sem resumir")
+
+    engine.respond("Torna-o mais formal, mas não guardes ainda.")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["final_provider"] == "ollama"
+    assert telemetry["escalation_selected"] is False
+    assert len(ollama.calls) == 1
+    assert anthropic.calls == []
+
+
+def test_escalation_iterative_refinement_selects_claude_when_authorized(tmp_path: Path) -> None:
+    """D + M: 'ainda consegues melhor' with an active draft reconstructs a
+    high-complexity task (task_complexity_score computed from the profile,
+    not the 3-word message) and escalates to Claude -- simulated via
+    FakeProvider, no real Anthropic call."""
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=True,
+        env=_PAID_ENV,
+        ollama_replies=[_VALID_FORMAL_REWRITE],
+        anthropic_replies=[_VALID_REFINED_REWRITE],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+    engine.respond("lê o ficheiro email_resumo_novo e mostra tudo sem resumir")
+    engine.respond("Torna-o mais formal, mas não guardes ainda.")
+
+    response = engine.respond("ainda consegues melhor")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["selected_path"] == "DOCUMENT_TASK"
+    assert telemetry["final_provider"] == "anthropic"
+    assert telemetry["escalation_selected"] is True
+    assert telemetry["escalation_reason"] == "iterative_refinement_high_complexity"
+    assert telemetry["task_complexity_score"] > 40.0
+    assert telemetry["document_task_type"] == "document_refinement"
+    assert telemetry["draft_revision_number"] == 2
+    assert "WORKSPACE_FILE" in telemetry["grounding_sources"]
+    assert engine._active_document_context.draft_content == _VALID_REFINED_REWRITE
+    assert "Alexandre" in response
+    assert len(anthropic.calls) == 1
+    # Attempt 1 of the refinement itself never touched Ollama -- only the
+    # earlier plain rewrite did.
+    assert len(ollama.calls) == 1
+
+
+def test_escalation_blocked_without_paid_calls_confirmed(tmp_path: Path) -> None:
+    """E: the same high-complexity refinement, but paid calls are not
+    confirmed -- stays on Ollama with a clear blocked reason_code."""
+    env = {"ANTHROPIC_API_KEY": "secret"}
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=True,
+        env=env,
+        ollama_replies=[_VALID_FORMAL_REWRITE, _VALID_REFINED_REWRITE],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+    engine.respond("lê o ficheiro email_resumo_novo e mostra tudo sem resumir")
+    engine.respond("Torna-o mais formal, mas não guardes ainda.")
+
+    engine.respond("ainda consegues melhor")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["final_provider"] == "ollama"
+    assert telemetry["escalation_selected"] is False
+    assert anthropic.calls == []
+
+
+def test_escalation_no_real_anthropic_provider_ever_used(tmp_path: Path) -> None:
+    """O: across every scenario above, the ONLY Anthropic stand-in is
+    FakeProvider -- confirms make_engine never wires a real AnthropicProvider
+    capable of a network call."""
+    _engine, llm, _ollama, _anthropic = make_engine(tmp_path, mode="automatic", claude_enabled=True, env=_PAID_ENV)
+
+    assert type(llm.providers["anthropic"]).__name__ == "FakeProvider"
