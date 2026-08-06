@@ -22,6 +22,22 @@ Actualizado em 2026-07-22:
 - A telemetry passa a expor `model_source`.
 - Não foi criada baseline oficial nova porque existem alterações de código/documentação ainda por commitar.
 
+## Atualização — Diagnóstico E Patches Do Subsistema Documental
+
+Atualizado em 2026-08-06:
+
+O `AssistantEngine` ganhou, numa sessão anterior a este registo, um subsistema documental completo: leitura, resumo e criação de ficheiros de workspace (`.txt`/`.md`/`.pdf`/`.docx`) com pending tasks (`PendingWritingTask`, `DocumentTaskRequest`), contexto de documento ativo (`ActiveDocumentContext`, com TTL e cache por mtime/tamanho) e pesquisa fuzzy de ficheiros (`_workspace_search`). Este subsistema ainda não estava descrito nas secções seguintes deste checkpoint; foi commitado como baseline em `1b36661`.
+
+Foi feito um diagnóstico dedicado (pedidos muito semelhantes seguiam caminhos diferentes; `ActiveDocumentContext` parecia perder-se em follow-ups ambíguos) e implementados três patches independentes, cada um em commit isolado:
+
+- **PATCH A** (`6a9b471`) — Resolução determinística de leitura/display/conteúdo integral. Corrigiu: `_explicit_summary_request` cego a negação (tratava "sem resumir" como pedido de resumo); vocabulário de paráfrases de conteúdo integral demasiado estreito no follow-up face à primeira leitura; `_extract_semantic_file_reference` a capturar fragmentos relacionais ("que está") em vez do nome real do ficheiro; resposta do tipo "lê o ficheiro" → "email_resumo_novo" (stem nu, sem extensão) a entrar em loop por falta de resolução fuzzy.
+- **PATCH B** (`4457abe`) — Fallback grounded para o `ActiveDocumentContext`. Adicionou `_try_active_document_grounded_fallback`: quando nenhum marcador específico de follow-up é reconhecido mas a mensagem parece uma opinião/sugestão sobre o documento ativo, a resposta continua grounded no ficheiro (`grounding_sources=['WORKSPACE_FILE']`) em vez de cair em `GENERAL_CONVERSATION`. Corre só depois de todos os handlers mais específicos (pending task, follow-up explícito, writing task, fast route, topic shift, research, system/tool intent) terem decidido não reclamar o turno, preservando a limpeza de contexto em mudança de assunto ("vamos falar de outra coisa").
+- **PATCH C** (`15ca0ad`) — Alargamento dos marcadores review/interpret/rewrite em `_active_document_followup_action`, partilhando as tabelas de sinónimos introduzidas no PATCH B em vez de duplicar listas fixas. Mensagens como "tens alguma sugestão para melhorar o mail?" passam a ser classificadas como `review` já neste estágio inicial, não só pelo fallback genérico do PATCH B.
+
+Validação: suite de testes cresceu de 719 para 726 (`pytest` completo), sem falhas; zero chamadas Anthropic reais durante o diagnóstico e implementação (só `ollama`/`llama3.1:8b` e `FakeProvider` nos testes); frontend e `config/settings.json` não foram tocados.
+
+Dívida ainda por resolver, fora do âmbito destes três patches: telemetria `composer_call_count` continua a ser um rótulo estático da rota escolhida, não prova de chamada LLM concluída; `configured_model_mode_source` continua a ler de `self.llm.settings` em vez de `self.model_runtime`, ficando vazio nos caminhos que passam pelo Composer.
+
 ## 1. Visão Atual Do Echo
 
 O Echo já deixou de ser apenas uma janela de chat com Ollama. O repositório contém uma arquitetura local com:
@@ -153,6 +169,7 @@ Componentes relevantes:
 - `_try_memory_write_command()`;
 - `_try_memory_recall_question()`;
 - `_try_general_knowledge_query()`;
+- `_try_document_task()` / `_try_pending_document_task()` / `_try_active_document_followup()` / `_try_active_document_grounded_fallback()`;
 - `_run_cognitive_loop()`;
 - `_complete_turn()`;
 - `get_last_turn_telemetry()`.
@@ -169,7 +186,8 @@ Routing determinístico existente:
 - tarefas;
 - presença;
 - linguagem;
-- briefing/session continuity.
+- briefing/session continuity;
+- leitura/resumo/criação de ficheiros da workspace, grounded em conteúdo real (subsistema documental, ver "Atualização — Diagnóstico E Patches Do Subsistema Documental").
 
 Limitações:
 
