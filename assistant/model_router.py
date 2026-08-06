@@ -463,6 +463,12 @@ def _complexity_reason_for_claude(routing_input: ModelRoutingInput) -> str:
         return "professional_writing"
     if _looks_like_structured_summary(text):
         return "structured_summary"
+    if "acao documental: review" in text or "ação documental: review" in text:
+        return "document_review"
+    if "acao documental: interpret" in text or "ação documental: interpret" in text:
+        return "document_interpret"
+    if "acao documental: rewrite" in text or "ação documental: rewrite" in text:
+        return "document_rewrite"
     if _looks_like_document_synthesis(text):
         return "document_synthesis"
     if _looks_like_complex_planning(text):
