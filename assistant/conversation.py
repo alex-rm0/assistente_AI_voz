@@ -1810,12 +1810,57 @@ class AssistantEngine:
             next_revision = context.draft_revision + 1 if is_refinement else 1
             rewrite_started_at = time.perf_counter()
             rewrite_deadline = rewrite_started_at + DOCUMENT_REWRITE_TOTAL_TIMEOUT_SECONDS
+            document_anchors = _extract_document_anchors(original_content)
+            routing_decisions: list[dict[str, object]] = []
+            last_task_profile: dict[str, object] = {}
 
             def _remaining_seconds() -> float:
                 return rewrite_deadline - time.perf_counter()
 
-            def _compose_rewrite(prompt: str, *, timeout_seconds: float) -> str:
-                return self.response_composer.compose(
+            def _build_task_profile(attempt_number: int, previous_failure_reason: str) -> dict[str, object]:
+                # Structured description of the RECONSTRUCTED task, not the
+                # literal user message -- a short follow-up like "ainda
+                # consegues melhor" carries none of this on its own. Never
+                # includes the document's actual content (see
+                # assistant/model_router.py's _document_task_complexity_score).
+                profile = {
+                    "task_type": "document_refinement" if is_refinement else "document_rewrite",
+                    "document_chars": len(base_content),
+                    "document_has_draft": is_refinement,
+                    "document_revision_number": context.draft_revision,
+                    "document_structure_count": len(document_anchors["bullet_items"]),
+                    "document_named_entity_count": len(document_anchors["entity_tokens"]),
+                    "document_list_item_count": len(document_anchors["bullet_items"]),
+                    "document_requires_fidelity": True,
+                    "document_requires_full_output": True,
+                    "document_previous_local_failure": bool(previous_failure_reason),
+                    "document_validation_failure_reason": previous_failure_reason,
+                    "document_regeneration_attempt": attempt_number,
+                    # Always "auto" -- the router stays the sole authority on
+                    # provider choice; this flow never hardcodes a provider.
+                    "preferred_provider": "auto",
+                }
+                nonlocal last_task_profile
+                last_task_profile = profile
+                return profile
+
+            def _capture_routing_decision() -> None:
+                decision = getattr(self.llm, "last_routing_decision", None)
+                if decision is None:
+                    return
+                routing_decisions.append(
+                    {
+                        "provider": decision.provider,
+                        "reason_code": decision.reason_code,
+                        "paid_call": bool(decision.paid_call),
+                        "task_complexity_score": float(getattr(decision, "task_complexity_score", 0.0) or 0.0),
+                        "task_complexity_band": getattr(decision, "task_complexity_band", "") or "",
+                        "escalation_considered": bool(getattr(decision, "escalation_considered", False)),
+                    }
+                )
+
+            def _compose_rewrite(prompt: str, *, timeout_seconds: float, task_profile: dict[str, object]) -> str:
+                reply = self.response_composer.compose(
                     ComposerRequest(
                         intent="document_rewrite",
                         user_message=prompt,
@@ -1829,8 +1874,32 @@ class AssistantEngine:
                         temperature=_REWRITE_TEMPERATURE,
                         num_predict=_REWRITE_MAX_OUTPUT_TOKENS,
                         timeout_seconds=timeout_seconds,
+                        task_profile=task_profile,
                     )
                 )
+                _capture_routing_decision()
+                return reply
+
+            def _routing_telemetry_kwargs() -> dict[str, object]:
+                initial_provider = str(routing_decisions[0]["provider"]) if routing_decisions else ""
+                final_provider = str(routing_decisions[-1]["provider"]) if routing_decisions else ""
+                sequence = [str(d["provider"]) for d in routing_decisions]
+                escalation_reason = next(
+                    (str(d["reason_code"]) for d in routing_decisions if d["provider"] == "anthropic"), ""
+                )
+                return {
+                    "task_complexity_score": routing_decisions[-1]["task_complexity_score"] if routing_decisions else 0.0,
+                    "task_complexity_band": routing_decisions[-1]["task_complexity_band"] if routing_decisions else "",
+                    "document_task_type": str(last_task_profile.get("task_type") or ""),
+                    "document_routing_features": dict(last_task_profile),
+                    "escalation_considered": any(bool(d["escalation_considered"]) for d in routing_decisions),
+                    "escalation_selected": "anthropic" in sequence,
+                    "escalation_reason": escalation_reason,
+                    "initial_provider": initial_provider,
+                    "final_provider": final_provider,
+                    "provider_attempt_sequence": sequence,
+                    "paid_call_authorized": any(bool(d["paid_call"]) for d in routing_decisions),
+                }
 
             def _cancelled_response(attempt_1_ms: float, attempt_2_ms: float, regenerated: bool) -> str:
                 self._emit_progress("rewrite_cancelled")
@@ -1853,6 +1922,8 @@ class AssistantEngine:
                     previous_draft_present=is_refinement,
                     refinement_regeneration_started=regenerated if is_refinement else False,
                     draft_revision_number=context.draft_revision,
+                    local_failure_reason=local_failure_reason,
+                    **_routing_telemetry_kwargs(),
                 )
                 return "Pedido cancelado."
 
@@ -1878,6 +1949,8 @@ class AssistantEngine:
                     previous_draft_present=is_refinement,
                     refinement_regeneration_started=regenerated if is_refinement else False,
                     draft_revision_number=context.draft_revision,
+                    local_failure_reason=local_failure_reason,
+                    **_routing_telemetry_kwargs(),
                 )
                 return (
                     "A reescrita demorou mais do que o previsto e foi interrompida. "
@@ -1886,6 +1959,8 @@ class AssistantEngine:
 
             def _check_noop(candidate: str) -> bool:
                 return is_refinement and _is_noop_refinement(base_content, candidate)
+
+            local_failure_reason = ""
 
             # Checkpoint 1: before the first LLM call.
             prompt = (
@@ -1902,7 +1977,9 @@ class AssistantEngine:
             self._emit_progress("rewrite_attempt_started")
             attempt_1_started_at = time.perf_counter()
             try:
-                attempt = _compose_rewrite(prompt, timeout_seconds=remaining_for_attempt_1)
+                attempt = _compose_rewrite(
+                    prompt, timeout_seconds=remaining_for_attempt_1, task_profile=_build_task_profile(1, "")
+                )
             except ProviderTimeoutError:
                 attempt_1_latency_ms = (time.perf_counter() - attempt_1_started_at) * 1000
                 return _timeout_response(attempt_1_latency_ms, 0.0, False, _remaining_seconds())
@@ -1933,6 +2010,7 @@ class AssistantEngine:
                     return _timeout_response(attempt_1_latency_ms, 0.0, False, remaining_for_attempt_2)
 
                 regenerated = True
+                local_failure_reason = reason
                 self._emit_progress("rewrite_regeneration_started")
                 correction_prompt = (
                     _document_refinement_correction_prompt(request, context, base_content, attempt, reason)
@@ -1941,7 +2019,11 @@ class AssistantEngine:
                 )
                 attempt_2_started_at = time.perf_counter()
                 try:
-                    attempt = _compose_rewrite(correction_prompt, timeout_seconds=remaining_for_attempt_2)
+                    attempt = _compose_rewrite(
+                        correction_prompt,
+                        timeout_seconds=remaining_for_attempt_2,
+                        task_profile=_build_task_profile(2, local_failure_reason),
+                    )
                 except ProviderTimeoutError:
                     attempt_2_latency_ms = (time.perf_counter() - attempt_2_started_at) * 1000
                     return _timeout_response(attempt_1_latency_ms, attempt_2_latency_ms, True, _remaining_seconds())
@@ -1986,6 +2068,8 @@ class AssistantEngine:
                     refinement_changed_content=False,
                     refinement_regeneration_started=regenerated if is_refinement else False,
                     draft_revision_number=context.draft_revision,
+                    local_failure_reason=local_failure_reason,
+                    **_routing_telemetry_kwargs(),
                 )
                 fallback_note = (
                     "O ficheiro original continua igual — queres que tente outra vez?"
@@ -2037,6 +2121,8 @@ class AssistantEngine:
                 refinement_changed_content=is_refinement,
                 refinement_regeneration_started=regenerated if is_refinement else False,
                 draft_revision_number=next_revision,
+                local_failure_reason=local_failure_reason,
+                **_routing_telemetry_kwargs(),
             )
             intro = "Aqui está uma versão ainda melhor" if is_refinement else "Aqui está a versão reescrita"
             return f"{intro}:\n\n{cleaned}\n\n(Ainda não guardei esta versão — o ficheiro original continua igual.)"
@@ -2324,6 +2410,18 @@ class AssistantEngine:
         refinement_changed_content: bool = False,
         refinement_regeneration_started: bool = False,
         draft_revision_number: int = 0,
+        task_complexity_score: float = 0.0,
+        task_complexity_band: str = "",
+        document_task_type: str = "",
+        document_routing_features: dict[str, object] | None = None,
+        escalation_considered: bool = False,
+        escalation_selected: bool = False,
+        escalation_reason: str = "",
+        initial_provider: str = "",
+        final_provider: str = "",
+        provider_attempt_sequence: list[str] | None = None,
+        local_failure_reason: str = "",
+        paid_call_authorized: bool = False,
     ) -> None:
         if self._turn_trace is None:
             return
@@ -2370,6 +2468,20 @@ class AssistantEngine:
         self._turn_trace["refinement_changed_content"] = bool(refinement_changed_content)
         self._turn_trace["refinement_regeneration_started"] = bool(refinement_regeneration_started)
         self._turn_trace["draft_revision_number"] = int(draft_revision_number)
+        # Router-escalation telemetry (see assistant/model_router.py) --
+        # booleans/scores/short codes only, never document content.
+        self._turn_trace["task_complexity_score"] = float(task_complexity_score)
+        self._turn_trace["task_complexity_band"] = task_complexity_band
+        self._turn_trace["document_task_type"] = document_task_type
+        self._turn_trace["document_routing_features"] = dict(document_routing_features or {})
+        self._turn_trace["escalation_considered"] = bool(escalation_considered)
+        self._turn_trace["escalation_selected"] = bool(escalation_selected)
+        self._turn_trace["escalation_reason"] = escalation_reason
+        self._turn_trace["initial_provider"] = initial_provider
+        self._turn_trace["final_provider"] = final_provider
+        self._turn_trace["provider_attempt_sequence"] = list(provider_attempt_sequence or [])
+        self._turn_trace["local_failure_reason"] = local_failure_reason
+        self._turn_trace["paid_call_authorized"] = bool(paid_call_authorized)
 
     def _fast_agent_context(self) -> AgentContext:
         return AgentContext(
@@ -2929,6 +3041,18 @@ class AssistantEngine:
             "refinement_changed_content": bool(self._turn_trace.get("refinement_changed_content")),
             "refinement_regeneration_started": bool(self._turn_trace.get("refinement_regeneration_started")),
             "draft_revision_number": int(self._turn_trace.get("draft_revision_number") or 0),
+            "task_complexity_score": float(self._turn_trace.get("task_complexity_score") or 0.0),
+            "task_complexity_band": self._turn_trace.get("task_complexity_band") or "",
+            "document_task_type": self._turn_trace.get("document_task_type") or "",
+            "document_routing_features": self._turn_trace.get("document_routing_features") or {},
+            "escalation_considered": bool(self._turn_trace.get("escalation_considered")),
+            "escalation_selected": bool(self._turn_trace.get("escalation_selected")),
+            "escalation_reason": self._turn_trace.get("escalation_reason") or "",
+            "initial_provider": self._turn_trace.get("initial_provider") or "",
+            "final_provider": self._turn_trace.get("final_provider") or "",
+            "provider_attempt_sequence": self._turn_trace.get("provider_attempt_sequence") or [],
+            "local_failure_reason": self._turn_trace.get("local_failure_reason") or "",
+            "paid_call_authorized": bool(self._turn_trace.get("paid_call_authorized")),
             "response_grounded": self._turn_trace.get("response_grounded"),
             "unsupported_tool_claim_detected": bool(self._turn_trace.get("unsupported_tool_claim_detected")),
             "unsupported_memory_claim_detected": bool(self._turn_trace.get("unsupported_memory_claim_detected")),
@@ -5709,7 +5833,10 @@ def _looks_like_rewrite_request(text: str) -> bool:
 # so this never invents a document context on its own.
 _DRAFT_REFINEMENT_STANDALONE_PHRASES = (
     "ainda consegues melhor",
+    "ainda consegues melhorar",
     "consegues fazer melhor",
+    "consegues melhorar isto",
+    "consegues melhorar isso",
     "tenta melhorar",
     "refina mais",
     "refina isto",
