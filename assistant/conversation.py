@@ -128,6 +128,13 @@ class ActiveDocumentContext:
     draft_created_from_hash: str = ""
     draft_saved: bool = False
     draft_updated_at: str = ""
+    # Revision counter for draft_content: 0 = no draft yet, 1 = first
+    # rewrite, 2+ = each successful iterative refinement after that.
+    # previous_draft_content/_revision hold exactly one step of undo history
+    # (not an unlimited list) -- restore_previous_draft is the only consumer.
+    draft_revision: int = 0
+    previous_draft_content: str = ""
+    previous_draft_revision: int = 0
 
 
 class AssistantEngine:
@@ -1659,7 +1666,7 @@ class AssistantEngine:
         context = self._active_document_context
         if context is None:
             return None
-        action = _active_document_followup_action(normalized, context.detected_content_type)
+        action = _active_document_followup_action(normalized, context.detected_content_type, bool(context.draft_content))
         if not action:
             return None
         refresh_result = self._refresh_active_document_context(context)
@@ -1697,6 +1704,7 @@ class AssistantEngine:
                 found=True, files_used=files_used, output_created=False,
                 document_action=action, active_document=context, context_reused=not reloaded,
                 draft_reused=True,
+                draft_revision_number=context.draft_revision,
             )
             saved_note = "" if context.draft_saved else " (ainda não guardei esta versão no ficheiro original)"
             return f"Aqui está a versão melhorada{saved_note}:\n\n{_truncate_document_content(context.draft_content)}"
@@ -1707,6 +1715,7 @@ class AssistantEngine:
                 found=True, files_used=files_used, output_created=False,
                 document_action=action, active_document=context, context_reused=not reloaded,
                 draft_reused=bool(context.draft_content),
+                draft_revision_number=context.draft_revision,
             )
             if not context.draft_content:
                 return "Ainda não tenho nenhuma versão melhorada para comparar com o original."
@@ -1724,6 +1733,9 @@ class AssistantEngine:
             context.draft_created_from_hash = ""
             context.draft_saved = False
             context.draft_updated_at = ""
+            context.draft_revision = 0
+            context.previous_draft_content = ""
+            context.previous_draft_revision = 0
             self._active_document_context = context
             self._record_document_trace(
                 found=True, files_used=files_used, output_created=False,
@@ -1732,6 +1744,29 @@ class AssistantEngine:
             if not had_draft:
                 return "Não havia nenhuma versão melhorada para descartar."
             return "Descartei a versão melhorada. Fica só o documento original."
+
+        if action == "restore_previous_draft":
+            self._last_fast_tools_used = ("read_workspace_document",) if reloaded else ()
+            if not context.previous_draft_content:
+                self._record_document_trace(
+                    found=True, files_used=files_used, output_created=False,
+                    document_action=action, active_document=context, context_reused=not reloaded,
+                )
+                return "Não há nenhuma versão anterior guardada para restaurar."
+            context.draft_content = context.previous_draft_content
+            context.draft_revision = context.previous_draft_revision
+            context.previous_draft_content = ""
+            context.previous_draft_revision = 0
+            context.draft_saved = False
+            context.draft_updated_at = self.now_provider().isoformat()
+            self._active_document_context = context
+            self._record_document_trace(
+                found=True, files_used=files_used, output_created=False,
+                document_action=action, active_document=context, context_reused=not reloaded,
+                draft_reused=True,
+                draft_revision_number=context.draft_revision,
+            )
+            return f"Restaurei a versão anterior (revisão {context.draft_revision}):\n\n{_truncate_document_content(context.draft_content)}"
 
         if action == "save_draft":
             self._last_fast_tools_used = ("read_workspace_document",) if reloaded else ()
@@ -1765,6 +1800,14 @@ class AssistantEngine:
             )
             self._last_fast_tools_used = ("read_workspace_document",) if reloaded else ()
             original_content = context.content
+            # A rewrite follow-up while a draft already exists is an
+            # iterative refinement of that draft, not a fresh rewrite of the
+            # pristine original -- "não voltar sempre ao original".
+            is_refinement = bool(context.draft_content)
+            base_content = context.draft_content if is_refinement else original_content
+            document_followup_action = "iterative_refinement" if is_refinement else "rewrite"
+            document_refinement_source = "draft" if is_refinement else "original"
+            next_revision = context.draft_revision + 1 if is_refinement else 1
             rewrite_started_at = time.perf_counter()
             rewrite_deadline = rewrite_started_at + DOCUMENT_REWRITE_TOTAL_TIMEOUT_SECONDS
 
@@ -1805,6 +1848,11 @@ class AssistantEngine:
                     request_cancelled=True,
                     rewrite_elapsed_ms_at_cancel=(time.perf_counter() - rewrite_started_at) * 1000,
                     request_finished_cleanly=True,
+                    document_followup_action=document_followup_action,
+                    document_refinement_source=document_refinement_source,
+                    previous_draft_present=is_refinement,
+                    refinement_regeneration_started=regenerated if is_refinement else False,
+                    draft_revision_number=context.draft_revision,
                 )
                 return "Pedido cancelado."
 
@@ -1825,14 +1873,26 @@ class AssistantEngine:
                     rewrite_elapsed_ms_at_timeout=(time.perf_counter() - rewrite_started_at) * 1000,
                     rewrite_remaining_timeout_ms=max(0.0, remaining_seconds * 1000),
                     request_finished_cleanly=True,
+                    document_followup_action=document_followup_action,
+                    document_refinement_source=document_refinement_source,
+                    previous_draft_present=is_refinement,
+                    refinement_regeneration_started=regenerated if is_refinement else False,
+                    draft_revision_number=context.draft_revision,
                 )
                 return (
                     "A reescrita demorou mais do que o previsto e foi interrompida. "
                     "O ficheiro original continua igual."
                 )
 
+            def _check_noop(candidate: str) -> bool:
+                return is_refinement and _is_noop_refinement(base_content, candidate)
+
             # Checkpoint 1: before the first LLM call.
-            prompt = _document_rewrite_prompt(request, context)
+            prompt = (
+                _document_refinement_prompt(request, context, base_content)
+                if is_refinement
+                else _document_rewrite_prompt(request, context)
+            )
             if self.is_cancel_requested():
                 return _cancelled_response(0.0, 0.0, False)
             remaining_for_attempt_1 = _remaining_seconds()
@@ -1854,6 +1914,8 @@ class AssistantEngine:
 
             self._emit_progress("rewrite_validation_started")
             valid, reason, cleaned = _validate_rewrite_draft(original_content, attempt)
+            if valid and _check_noop(cleaned):
+                valid, reason = False, "no_op_detected"
             preamble_removed = cleaned.strip() != attempt.strip()
             placeholder_detected = reason == "placeholder_detected"
             regenerated = False
@@ -1872,7 +1934,11 @@ class AssistantEngine:
 
                 regenerated = True
                 self._emit_progress("rewrite_regeneration_started")
-                correction_prompt = _document_rewrite_correction_prompt(request, context, attempt, reason)
+                correction_prompt = (
+                    _document_refinement_correction_prompt(request, context, base_content, attempt, reason)
+                    if is_refinement
+                    else _document_rewrite_correction_prompt(request, context, attempt, reason)
+                )
                 attempt_2_started_at = time.perf_counter()
                 try:
                     attempt = _compose_rewrite(correction_prompt, timeout_seconds=remaining_for_attempt_2)
@@ -1887,6 +1953,8 @@ class AssistantEngine:
 
                 self._emit_progress("rewrite_validation_started")
                 valid, reason, cleaned = _validate_rewrite_draft(original_content, attempt)
+                if valid and _check_noop(cleaned):
+                    valid, reason = False, "no_op_detected"
                 preamble_removed = preamble_removed or (cleaned.strip() != attempt.strip())
                 placeholder_detected = placeholder_detected or (reason == "placeholder_detected")
             total_latency_ms = attempt_1_latency_ms + attempt_2_latency_ms
@@ -1912,12 +1980,24 @@ class AssistantEngine:
                     draft_preamble_removed=preamble_removed,
                     draft_placeholder_detected=placeholder_detected,
                     request_finished_cleanly=True,
+                    document_followup_action=document_followup_action,
+                    document_refinement_source=document_refinement_source,
+                    previous_draft_present=is_refinement,
+                    refinement_changed_content=False,
+                    refinement_regeneration_started=regenerated if is_refinement else False,
+                    draft_revision_number=context.draft_revision,
                 )
-                return (
-                    "Não consegui gerar uma versão reescrita completa e fiável deste documento. "
-                    f"{_rewrite_failure_message(reason)} "
+                fallback_note = (
                     "O ficheiro original continua igual — queres que tente outra vez?"
+                    if not is_refinement
+                    else "A versão anterior continua ativa — queres que tente melhorar outra vez?"
                 )
+                intro = (
+                    "Não consegui gerar uma versão reescrita completa e fiável deste documento."
+                    if not is_refinement
+                    else "Não consegui melhorar a versão atual de forma fiável."
+                )
+                return f"{intro} {_rewrite_failure_message(reason)} {fallback_note}"
 
             # Checkpoints 5 & 6: before creating/saving the draft and before
             # returning the final (success) response -- checked as one gate
@@ -1926,11 +2006,15 @@ class AssistantEngine:
             if self.is_cancel_requested():
                 return _cancelled_response(attempt_1_latency_ms, attempt_2_latency_ms, regenerated)
 
+            if is_refinement:
+                context.previous_draft_content = context.draft_content
+                context.previous_draft_revision = context.draft_revision
             context.draft_content = cleaned
             context.draft_action = action
             context.draft_created_from_hash = context.content_hash
             context.draft_saved = False
             context.draft_updated_at = self.now_provider().isoformat()
+            context.draft_revision = next_revision
             self._active_document_context = context
             self._record_document_trace(
                 found=True, files_used=files_used, output_created=False,
@@ -1947,8 +2031,15 @@ class AssistantEngine:
                 draft_preamble_removed=preamble_removed,
                 draft_placeholder_detected=placeholder_detected,
                 request_finished_cleanly=True,
+                document_followup_action=document_followup_action,
+                document_refinement_source=document_refinement_source,
+                previous_draft_present=is_refinement,
+                refinement_changed_content=is_refinement,
+                refinement_regeneration_started=regenerated if is_refinement else False,
+                draft_revision_number=next_revision,
             )
-            return f"Aqui está a versão reescrita:\n\n{cleaned}\n\n(Ainda não guardei esta versão — o ficheiro original continua igual.)"
+            intro = "Aqui está uma versão ainda melhor" if is_refinement else "Aqui está a versão reescrita"
+            return f"{intro}:\n\n{cleaned}\n\n(Ainda não guardei esta versão — o ficheiro original continua igual.)"
 
         request = DocumentTaskRequest(
             source_files=[context.resolved_file],
@@ -2227,6 +2318,12 @@ class AssistantEngine:
         rewrite_elapsed_ms_at_timeout: float = 0.0,
         rewrite_remaining_timeout_ms: float = 0.0,
         request_finished_cleanly: bool = True,
+        document_followup_action: str = "",
+        document_refinement_source: str = "",
+        previous_draft_present: bool = False,
+        refinement_changed_content: bool = False,
+        refinement_regeneration_started: bool = False,
+        draft_revision_number: int = 0,
     ) -> None:
         if self._turn_trace is None:
             return
@@ -2267,6 +2364,12 @@ class AssistantEngine:
         self._turn_trace["rewrite_elapsed_ms_at_timeout"] = round(float(rewrite_elapsed_ms_at_timeout), 1)
         self._turn_trace["rewrite_remaining_timeout_ms"] = round(float(rewrite_remaining_timeout_ms), 1)
         self._turn_trace["request_finished_cleanly"] = bool(request_finished_cleanly)
+        self._turn_trace["document_followup_action"] = document_followup_action
+        self._turn_trace["document_refinement_source"] = document_refinement_source
+        self._turn_trace["previous_draft_present"] = bool(previous_draft_present)
+        self._turn_trace["refinement_changed_content"] = bool(refinement_changed_content)
+        self._turn_trace["refinement_regeneration_started"] = bool(refinement_regeneration_started)
+        self._turn_trace["draft_revision_number"] = int(draft_revision_number)
 
     def _fast_agent_context(self) -> AgentContext:
         return AgentContext(
@@ -2820,6 +2923,12 @@ class AssistantEngine:
             "rewrite_elapsed_ms_at_timeout": float(self._turn_trace.get("rewrite_elapsed_ms_at_timeout") or 0.0),
             "rewrite_remaining_timeout_ms": float(self._turn_trace.get("rewrite_remaining_timeout_ms") or 0.0),
             "request_finished_cleanly": bool(self._turn_trace.get("request_finished_cleanly")),
+            "document_followup_action": self._turn_trace.get("document_followup_action") or "",
+            "document_refinement_source": self._turn_trace.get("document_refinement_source") or "",
+            "previous_draft_present": bool(self._turn_trace.get("previous_draft_present")),
+            "refinement_changed_content": bool(self._turn_trace.get("refinement_changed_content")),
+            "refinement_regeneration_started": bool(self._turn_trace.get("refinement_regeneration_started")),
+            "draft_revision_number": int(self._turn_trace.get("draft_revision_number") or 0),
             "response_grounded": self._turn_trace.get("response_grounded"),
             "unsupported_tool_claim_detected": bool(self._turn_trace.get("unsupported_tool_claim_detected")),
             "unsupported_memory_claim_detected": bool(self._turn_trace.get("unsupported_memory_claim_detected")),
@@ -5594,6 +5703,38 @@ def _looks_like_rewrite_request(text: str) -> bool:
     return bool(find_near_pair_span(normalized, _REWRITE_GUARDED_VERBS, _REWRITE_QUALITY_WORDS, max_gap=40))
 
 
+# Elliptical/comparative continuations of an open draft thread -- no
+# explicit rewrite verb, just "still not good enough" phrasing. Only ever
+# consulted when a draft already exists (see _active_document_followup_action),
+# so this never invents a document context on its own.
+_DRAFT_REFINEMENT_STANDALONE_PHRASES = (
+    "ainda consegues melhor",
+    "consegues fazer melhor",
+    "tenta melhorar",
+    "refina mais",
+    "refina isto",
+    "refina a versao",
+    "melhora mais um pouco",
+    "podes melhorar mais",
+    "faz uma versao ainda melhor",
+    "outra versao mas melhor",
+    "nao esta suficientemente formal",
+    "nao ficou suficientemente formal",
+    "quero algo mais profissional",
+)
+_DRAFT_REFINEMENT_COMPARATIVE_WORDS = ("ainda", "mais", "outra vez", "de novo", "um pouco")
+_DRAFT_REFINEMENT_QUALITY_WORDS = ("melhor", "formal", "profissional", "claro", "simples", "conciso", "elegante")
+
+
+def _looks_like_draft_refinement_request(text: str) -> bool:
+    normalized = _normalize_text(text)
+    if contains_any_phrase(normalized, _DRAFT_REFINEMENT_STANDALONE_PHRASES):
+        return True
+    return bool(
+        find_near_pair_span(normalized, _DRAFT_REFINEMENT_COMPARATIVE_WORDS, _DRAFT_REFINEMENT_QUALITY_WORDS, max_gap=40)
+    )
+
+
 _GREETING_LINE_PATTERN = re.compile(
     r"^(?:ol[áa]|caro|cara|prezad[oa]s?|estimad[oa]s?|exm[oa]s?)\b[,:]?\s*([A-ZÀ-Ý][\wÀ-ÿ'-]*)?",
     re.IGNORECASE,
@@ -5814,12 +5955,32 @@ _REWRITE_FAILURE_MESSAGES = {
     "falta_saudacao": "A versão gerada perdeu elementos importantes do documento.",
     "faltam_entidades": "A versão gerada perdeu elementos importantes do documento.",
     "faltam_itens_lista": "A versão gerada perdeu elementos importantes do documento.",
+    "no_op_detected": "A nova versão ficou demasiado parecida com a anterior — não houve uma melhoria real.",
 }
 _DEFAULT_REWRITE_FAILURE_MESSAGE = "O modelo respondeu com um comentário em vez do documento completo."
 
 
 def _rewrite_failure_message(reason: str) -> str:
     return _REWRITE_FAILURE_MESSAGES.get(reason, _DEFAULT_REWRITE_FAILURE_MESSAGE)
+
+
+# Deliberately simple: no embeddings, no semantic model -- just a plain-text
+# similarity ratio (stdlib difflib, already imported). Only used to catch a
+# refinement pass that came back practically unchanged; a small genuine edit
+# must not be flagged, so the threshold is high (>=0.97) and exact match is
+# checked first for the common case.
+_NOOP_REFINEMENT_SIMILARITY_THRESHOLD = 0.97
+
+
+def _is_noop_refinement(base_content: str, candidate: str) -> bool:
+    base_normalized = " ".join(_normalize_text(base_content).split())
+    candidate_normalized = " ".join(_normalize_text(candidate).split())
+    if not base_normalized or not candidate_normalized:
+        return False
+    if base_normalized == candidate_normalized:
+        return True
+    ratio = SequenceMatcher(None, base_normalized, candidate_normalized).ratio()
+    return ratio >= _NOOP_REFINEMENT_SIMILARITY_THRESHOLD
 
 
 def _document_rewrite_prompt(request: DocumentTaskRequest, context: ActiveDocumentContext) -> str:
@@ -5854,6 +6015,55 @@ def _document_rewrite_correction_prompt(
     )
 
 
+def _document_refinement_prompt(request: DocumentTaskRequest, context: ActiveDocumentContext, base_content: str) -> str:
+    """Prompt for improving an EXISTING draft further -- not the first
+    rewrite. The model must understand it's iterating on its own prior
+    output, not repeating the original transformation from scratch."""
+    return (
+        "TAREFA: melhorar ainda mais a versão já reescrita abaixo. Não é a primeira reescrita — é um refinamento "
+        "de uma versão que já foi produzida antes.\n"
+        "SAÍDA OBRIGATÓRIA: apenas o documento completo melhorado, do início ao fim.\n"
+        "Não faças perguntas. Não analises. Não resumas. Não omitas nenhuma secção.\n"
+        "Mantém todos os factos, nomes, destinatário, assunto, listas e assinatura.\n"
+        "Não uses placeholders. Não digas que não tens acesso ao documento. "
+        "Não digas que o documento está pronto, nem que vais enviar ou guardar algo.\n"
+        "Não comeces a resposta com frases como 'Aqui está' — devolve apenas o documento.\n"
+        "Produz uma melhoria real e percetível (estilo, clareza ou tom) — não repitas a versão atual quase sem alterações.\n"
+        f"Aplica este pedido de melhoria: {request.instructions}\n\n"
+        f"<VERSAO_ATUAL>\n{_truncate_document_content(base_content, limit=12000)}\n</VERSAO_ATUAL>\n\n"
+        f"<DOCUMENTO_ORIGINAL_REFERENCIA>\n{_truncate_document_content(context.content, limit=12000)}\n</DOCUMENTO_ORIGINAL_REFERENCIA>\n\n"
+        f"<USER_TRANSFORMATION>\n{request.instructions}\n</USER_TRANSFORMATION>"
+    )
+
+
+def _document_refinement_correction_prompt(
+    request: DocumentTaskRequest,
+    context: ActiveDocumentContext,
+    base_content: str,
+    invalid_response: str,
+    reason: str,
+) -> str:
+    if reason == "no_op_detected":
+        problem = "A tua resposta anterior ficou praticamente igual à versão atual — isso não é uma melhoria."
+        instruction = "Melhora de forma mais evidente (estilo, clareza ou tom), sem alterar nenhum facto."
+    else:
+        problem = f"A tua resposta anterior não cumpriu o pedido ({reason})."
+        instruction = "Parte apenas da versão atual abaixo, não da resposta anterior."
+    return (
+        f"{problem} {instruction}\n"
+        "TAREFA: melhorar ainda mais a versão já reescrita abaixo, do início ao fim.\n"
+        "SAÍDA OBRIGATÓRIA: apenas o documento completo melhorado.\n"
+        "Não faças perguntas. Não analises. Não comentes. Não omitas nenhuma secção.\n"
+        "Mantém todos os factos, nomes, destinatário, assunto, listas e assinatura.\n"
+        "Não uses placeholders. Não comeces a resposta com frases como 'Aqui está' — devolve apenas o documento.\n"
+        f"Aplica este pedido de melhoria: {request.instructions}\n\n"
+        f"<VERSAO_ATUAL>\n{_truncate_document_content(base_content, limit=12000)}\n</VERSAO_ATUAL>\n\n"
+        f"<DOCUMENTO_ORIGINAL_REFERENCIA>\n{_truncate_document_content(context.content, limit=12000)}\n</DOCUMENTO_ORIGINAL_REFERENCIA>\n\n"
+        f"<USER_TRANSFORMATION>\n{request.instructions}\n</USER_TRANSFORMATION>\n\n"
+        f"<RESPOSTA_INVALIDA_ANTERIOR razao=\"{reason}\">\n{_truncate_document_content(invalid_response, limit=2000)}\n</RESPOSTA_INVALIDA_ANTERIOR>"
+    )
+
+
 _BARE_OPINION_QUESTION_MARKERS = ("achas", "que tal", "concordas", "o que dizes", "que dizes")
 
 
@@ -5869,7 +6079,7 @@ def _is_referentially_ambiguous_opinion_question(text: str) -> bool:
     return contains_any_phrase(normalized, _BARE_OPINION_QUESTION_MARKERS)
 
 
-def _active_document_followup_action(text: str, content_type: str = "") -> str:
+def _active_document_followup_action(text: str, content_type: str = "", has_draft: bool = False) -> str:
     normalized = _normalize_text(text).strip(" .!?")
     if not normalized:
         return ""
@@ -5883,6 +6093,8 @@ def _active_document_followup_action(text: str, content_type: str = "") -> str:
         return "display_draft"
     if contains_any_phrase(normalized, ("compara as duas versoes", "compara as versoes", "compara com o original")):
         return "compare_versions"
+    if contains_any_phrase(normalized, ("volta a versao anterior", "volta para a versao anterior", "restaura a versao anterior", "volta atras")):
+        return "restore_previous_draft"
     if contains_any_phrase(normalized, ("descarta as alteracoes", "descarta o rascunho", "descarta a versao", "descarta o draft")):
         return "discard_draft"
     if contains_any_phrase(normalized, ("guarda esta versao", "guarda as alteracoes", "guarda o rascunho", "guarda a versao melhorada")):
@@ -5922,6 +6134,14 @@ def _active_document_followup_action(text: str, content_type: str = "") -> str:
     if contains_any_phrase(normalized, ("resume melhor", "faz um resumo", "resumo melhor", "sintetiza", "resume outra vez")):
         return "summarize"
     if _looks_like_rewrite_request(normalized):
+        return "rewrite"
+    # Elliptical/comparative continuations of an already-open draft thread
+    # ("ainda consegues melhor", "mais formal", "consegues fazer melhor?")
+    # have no explicit rewrite verb, so _looks_like_rewrite_request alone
+    # never catches them. Only trust this reading when a draft already
+    # exists -- without one, these phrases must not invent a document
+    # context (they fall through to normal conversation instead).
+    if has_draft and _looks_like_draft_refinement_request(normalized):
         return "rewrite"
     if _looks_like_ambiguous_document_followup(normalized, content_type):
         return "review"
