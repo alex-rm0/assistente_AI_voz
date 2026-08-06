@@ -2163,13 +2163,16 @@ def test_document_rewrite_cancelling_new_request_preserves_prior_valid_draft(tmp
 
     assert engine._active_document_context.draft_content == _VALID_FORMAL_REWRITE
 
-    real_prompt_fn = conversation_module._document_rewrite_prompt
+    # A second rewrite request while a draft already exists is now a
+    # refinement of that draft (not a fresh rewrite of the original), so it
+    # builds its first-attempt prompt via _document_refinement_prompt.
+    real_prompt_fn = conversation_module._document_refinement_prompt
 
-    def _prompt_with_cancel(request, context):
+    def _prompt_with_cancel(request, context, base_content):
         engine.cancel_current_request()
-        return real_prompt_fn(request, context)
+        return real_prompt_fn(request, context, base_content)
 
-    monkeypatch.setattr(conversation_module, "_document_rewrite_prompt", _prompt_with_cancel)
+    monkeypatch.setattr(conversation_module, "_document_refinement_prompt", _prompt_with_cancel)
     response = engine.respond("Torna-o mais formal outra vez, mas não guardes ainda.")
 
     assert response == "Pedido cancelado."
@@ -2272,3 +2275,262 @@ def test_document_rewrite_progress_events_never_reach_conversation_history(tmp_p
     for fragment in forbidden_fragments:
         assert fragment not in history_text
 
+# --- Iterative document refinement fix: "ainda consegues melhor" and other
+# elliptical/comparative continuations of an open draft thread must be
+# recognized as "improve the current draft further", not fall through to
+# GENERAL_CONVERSATION. Reproduces the reported regression exactly.
+
+_VALID_REFINED_REWRITE = (
+    "Exma. Senhora Francisca,\n\nVenho por este meio apresentar o resumo formal da reunião de Direção, "
+    "conforme solicitado anteriormente.\n\n"
+    "- Conclusão da febrada final de época\n- Protocolo Águas de Coimbra\n- Candidatura COP\n- Sanfil\n\n"
+    "Com os melhores cumprimentos,\nAlexandre"
+)
+
+
+def _setup_engine_with_draft(tmp_path, ollama_replies):
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=ollama_replies,
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+    engine.respond("lê o ficheiro email_resumo_novo e diz exatamente o que lá está escrito")
+    engine.respond("Torna-o mais formal, mas não guardes ainda.")
+    first_telemetry = engine.get_last_turn_telemetry() or {}
+    assert first_telemetry["draft_revision_number"] == 1
+    return engine, ollama, anthropic
+
+
+def test_draft_refinement_ainda_consegues_melhor_is_document_task(tmp_path: Path) -> None:
+    """A: draft ativo + 'ainda consegues melhor' -> DOCUMENT_TASK, usa o
+    draft como base, não GENERAL_CONVERSATION, cria revision 2."""
+    engine, ollama, anthropic = _setup_engine_with_draft(
+        tmp_path, [_VALID_FORMAL_REWRITE, _VALID_REFINED_REWRITE]
+    )
+
+    response = engine.respond("ainda consegues melhor")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["selected_path"] == "DOCUMENT_TASK"
+    assert telemetry["response_source"] == "DOCUMENT_TASK"
+    assert "WORKSPACE_FILE" in telemetry["grounding_sources"]
+    assert telemetry["memory_route"] == "NONE"
+    assert telemetry["document_followup_action"] == "iterative_refinement"
+    assert telemetry["document_refinement_source"] == "draft"
+    assert telemetry["previous_draft_present"] is True
+    assert telemetry["draft_revision_number"] == 2
+    assert engine._active_document_context.draft_content == _VALID_REFINED_REWRITE
+    assert "Alexandre" in response
+    assert len(ollama.calls) == 2  # 1 from the initial rewrite (setup) + 1 for this refinement
+    assert anthropic.calls == []
+
+
+def test_draft_refinement_consegues_fazer_melhor(tmp_path: Path) -> None:
+    """B: 'consegues fazer melhor?' is also recognized as refinement."""
+    engine, ollama, anthropic = _setup_engine_with_draft(
+        tmp_path, [_VALID_FORMAL_REWRITE, _VALID_REFINED_REWRITE]
+    )
+
+    telemetry = engine.get_last_turn_telemetry() or {}
+    engine.respond("consegues fazer melhor?")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["selected_path"] == "DOCUMENT_TASK"
+    assert telemetry["document_followup_action"] == "iterative_refinement"
+    assert telemetry["draft_revision_number"] == 2
+
+
+def test_draft_refinement_mais_formal_with_draft(tmp_path: Path) -> None:
+    """C: 'mais formal' alone is refinement when a draft already exists."""
+    engine, ollama, anthropic = _setup_engine_with_draft(
+        tmp_path, [_VALID_FORMAL_REWRITE, _VALID_REFINED_REWRITE]
+    )
+
+    engine.respond("mais formal")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["selected_path"] == "DOCUMENT_TASK"
+    assert telemetry["document_followup_action"] == "iterative_refinement"
+
+
+def test_draft_refinement_phrase_without_draft_does_not_invent_context(tmp_path: Path) -> None:
+    """D: the same phrase, with no active document/draft, must not invent a
+    document context -- it should NOT become DOCUMENT_TASK."""
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=["O Alexandre está sempre a procurar formas de melhoria, não é?"],
+    )
+
+    response = engine.respond("ainda consegues melhor")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["selected_path"] != "DOCUMENT_TASK"
+    assert telemetry.get("document_followup_action") in ("", None)
+    assert engine._active_document_context is None
+    assert response
+
+
+def test_draft_refinement_uses_draft_not_original_as_prompt_base(tmp_path: Path, monkeypatch) -> None:
+    """E: the refinement prompt is built from the current draft, and the
+    original file on disk is never touched."""
+    import assistant.conversation as conversation_module
+
+    engine, ollama, anthropic = _setup_engine_with_draft(
+        tmp_path, [_VALID_FORMAL_REWRITE, _VALID_REFINED_REWRITE]
+    )
+    original_bytes = (engine.workspace_path / "email_resumo_novo.txt").read_bytes()
+
+    seen_base_content = {}
+    real_prompt_fn = conversation_module._document_refinement_prompt
+
+    def _capture(request, context, base_content):
+        seen_base_content["value"] = base_content
+        return real_prompt_fn(request, context, base_content)
+
+    monkeypatch.setattr(conversation_module, "_document_refinement_prompt", _capture)
+    engine.respond("ainda consegues melhor")
+
+    assert seen_base_content["value"] == _VALID_FORMAL_REWRITE
+    assert (engine.workspace_path / "email_resumo_novo.txt").read_bytes() == original_bytes
+    assert engine._active_document_context.content == REAL_EMAIL_SUMMARY
+
+
+def test_draft_refinement_rejects_noop_and_regenerates_once(tmp_path: Path) -> None:
+    """F: a structurally valid but practically identical "improvement" is
+    rejected as a no-op; exactly one regeneration is attempted."""
+    engine, ollama, anthropic = _setup_engine_with_draft(
+        tmp_path, [_VALID_FORMAL_REWRITE, _VALID_FORMAL_REWRITE, _VALID_FORMAL_REWRITE]
+    )
+
+    response = engine.respond("ainda consegues melhor")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["draft_validation_failed"] is True
+    assert telemetry["draft_validation_reason"] == "no_op_detected"
+    assert telemetry["draft_regeneration_attempted"] is True
+    assert telemetry["refinement_changed_content"] is False
+    assert telemetry["draft_revision_number"] == 1
+    assert engine._active_document_context.draft_content == _VALID_FORMAL_REWRITE
+    assert "não houve uma melhoria real" in response
+    # 1 (first rewrite) + 2 (refinement attempt + its regeneration) = 3 total.
+    assert len(ollama.calls) == 3
+
+
+def test_draft_refinement_accepts_second_attempt_when_genuinely_different(tmp_path: Path) -> None:
+    """G: if the first refinement attempt is a no-op but the regenerated
+    second attempt is a real change, it is accepted and the draft updates."""
+    engine, ollama, anthropic = _setup_engine_with_draft(
+        tmp_path, [_VALID_FORMAL_REWRITE, _VALID_FORMAL_REWRITE, _VALID_REFINED_REWRITE]
+    )
+
+    response = engine.respond("ainda consegues melhor")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["draft_validation_passed"] is True
+    assert telemetry["draft_regeneration_attempted"] is True
+    assert telemetry["refinement_regeneration_started"] is True
+    assert telemetry["refinement_changed_content"] is True
+    assert telemetry["draft_revision_number"] == 2
+    assert engine._active_document_context.draft_content == _VALID_REFINED_REWRITE
+    assert "Alexandre" in response
+    assert len(ollama.calls) == 3  # H: never more than 2 calls per turn (1 + 2)
+
+
+def test_show_improved_version_returns_revision_2_without_llm_call(tmp_path: Path) -> None:
+    """I: 'mostra a versão melhorada' returns the latest revision with 0 LLM
+    calls -- pure lookup, no generation."""
+    engine, ollama, anthropic = _setup_engine_with_draft(
+        tmp_path, [_VALID_FORMAL_REWRITE, _VALID_REFINED_REWRITE]
+    )
+    engine.respond("ainda consegues melhor")
+
+    response = engine.respond("mostra a versão melhorada")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["llm_calls"] == 0
+    assert _VALID_REFINED_REWRITE in response
+    assert telemetry["draft_revision_number"] == 2
+
+
+def test_show_original_returns_untouched_original(tmp_path: Path) -> None:
+    """J: 'mostra o original' always returns the real original file,
+    unaffected by however many refinements happened."""
+    engine, ollama, anthropic = _setup_engine_with_draft(
+        tmp_path, [_VALID_FORMAL_REWRITE, _VALID_REFINED_REWRITE]
+    )
+    engine.respond("ainda consegues melhor")
+    original_bytes = (engine.workspace_path / "email_resumo_novo.txt").read_bytes()
+
+    response = engine.respond("mostra o original")
+
+    assert "Febrada final de época" in response
+    assert "Olá Francisca" in response
+    assert (engine.workspace_path / "email_resumo_novo.txt").read_bytes() == original_bytes
+
+
+def test_compare_versions_compares_original_with_revision_2(tmp_path: Path) -> None:
+    """K: 'compara as versões' compares the true original with the current
+    (revision 2) draft."""
+    engine, ollama, anthropic = _setup_engine_with_draft(
+        tmp_path, [_VALID_FORMAL_REWRITE, _VALID_REFINED_REWRITE]
+    )
+    engine.respond("ainda consegues melhor")
+
+    response = engine.respond("compara as versões")
+
+    assert "Olá Francisca" in response
+    assert _VALID_REFINED_REWRITE in response
+
+
+def test_draft_refinement_survives_unrelated_side_question(tmp_path: Path) -> None:
+    """L: a side question in between still lets a later refinement request
+    use the active draft when the reference is clear."""
+    engine, ollama, anthropic = _setup_engine_with_draft(
+        tmp_path, [_VALID_FORMAL_REWRITE, _VALID_REFINED_REWRITE]
+    )
+
+    engine.respond("Que horas são?")
+    engine.respond("ainda consegues melhor")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["selected_path"] == "DOCUMENT_TASK"
+    assert telemetry["document_followup_action"] == "iterative_refinement"
+    assert telemetry["draft_revision_number"] == 2
+    assert engine._active_document_context.draft_content == _VALID_REFINED_REWRITE
+
+
+def test_draft_refinement_cancellation_still_works(tmp_path: Path, monkeypatch) -> None:
+    """M: progress events and cancellation continue to work for a
+    refinement turn, not just a plain first-time rewrite."""
+    import assistant.conversation as conversation_module
+
+    engine, ollama, anthropic = _setup_engine_with_draft(
+        tmp_path, [_VALID_FORMAL_REWRITE, _VALID_REFINED_REWRITE]
+    )
+
+    real_prompt_fn = conversation_module._document_refinement_prompt
+
+    def _prompt_with_cancel(request, context, base_content):
+        engine.cancel_current_request()
+        return real_prompt_fn(request, context, base_content)
+
+    monkeypatch.setattr(conversation_module, "_document_refinement_prompt", _prompt_with_cancel)
+
+    events: list[str] = []
+    engine.set_progress_listener(events.append)
+    try:
+        response = engine.respond("ainda consegues melhor")
+    finally:
+        engine.set_progress_listener(None)
+
+    telemetry = engine.get_last_turn_telemetry() or {}
+    assert response == "Pedido cancelado."
+    assert "rewrite_cancelled" in events
+    assert telemetry["request_cancelled"] is True
+    assert telemetry["document_followup_action"] == "iterative_refinement"
+    assert telemetry["draft_revision_number"] == 1  # unchanged -- cancelled before commit
+    assert engine._active_document_context.draft_content == _VALID_FORMAL_REWRITE
