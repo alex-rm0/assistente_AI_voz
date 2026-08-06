@@ -16,6 +16,8 @@ class ChatModel(Protocol):
         history: list[dict[str, str]] | None = None,
         system_prompt: str | None = None,
         response_format: str | None = None,
+        temperature: float | None = None,
+        num_predict: int | None = None,
     ) -> str: ...
 
 
@@ -64,6 +66,11 @@ class ComposerRequest:
     next_goal: str = ""
     context: str = ""
     intent_instruction: str = ""
+    # Only set by callers that need tighter, more deterministic generation
+    # (currently just document rewrite) — every other intent leaves these
+    # None and the provider's own defaults apply, unchanged.
+    temperature: float | None = None
+    num_predict: int | None = None
     language_instruction: str = (
         "Preferências de idioma:\n"
         "- idioma_base = pt-PT.\n"
@@ -91,12 +98,22 @@ class ResponseComposer:
         if not request.user_message.strip() and not request.facts and not request.context and not request.history:
             return _simple_fallback(request)
 
+        # Only passed through at all when a caller actually set them (currently
+        # just document rewrite) — every other intent's chat-model stub in
+        # tests never had to know about these kwargs, and still doesn't.
+        generation_kwargs: dict[str, object] = {}
+        if request.temperature is not None:
+            generation_kwargs["temperature"] = request.temperature
+        if request.num_predict is not None:
+            generation_kwargs["num_predict"] = request.num_predict
+
         try:
             _mark_llm_source(self.llm, "RESPONSE_COMPOSER")
             reply = self.llm.chat(
                 self._user_prompt(request),
                 history=request.history,
                 system_prompt=_system_prompt_for(request),
+                **generation_kwargs,
             )
         except ProviderConfigurationError:
             raise

@@ -55,6 +55,7 @@ class ModelProvider(Protocol):
         response_format: dict | str | None = None,
         tools: list[dict] | None = None,
         temperature: float | None = None,
+        num_predict: int | None = None,
     ) -> ModelResponse: ...
 
 
@@ -174,14 +175,20 @@ class OllamaProvider:
         response_format: dict | str | None = None,
         tools: list[dict] | None = None,
         temperature: float | None = None,
+        num_predict: int | None = None,
     ) -> ModelResponse:
         resolved_model = model or self.model
         url = f"{self.base_url.rstrip('/')}/api/chat"
         payload: dict[str, Any] = {"model": resolved_model, "messages": messages, "stream": False}
         if response_format is not None:
             payload["format"] = response_format
+        options: dict[str, Any] = {}
         if temperature is not None:
-            payload["options"] = {"temperature": temperature}
+            options["temperature"] = temperature
+        if num_predict is not None:
+            options["num_predict"] = num_predict
+        if options:
+            payload["options"] = options
 
         started_at = time.perf_counter()
         try:
@@ -256,13 +263,15 @@ class ProviderBackedLLM:
         system_prompt: str | None = None,
         response_format: str | None = None,
         source: str | None = None,
+        temperature: float | None = None,
+        num_predict: int | None = None,
     ) -> str:
         messages = [{"role": "system", "content": system_prompt or self.system_prompt}]
         messages.extend(history or [])
         messages.append({"role": "user", "content": user_message})
         source_name = str(source or self._next_call_source or "OTHER").strip() or "OTHER"
         self._next_call_source = ""
-        result = self.provider.chat(messages, response_format=response_format)
+        result = self.provider.chat(messages, response_format=response_format, temperature=temperature, num_predict=num_predict)
         self.last_response = result
         self.responses.append(result)
         self._call_sources.append(source_name)

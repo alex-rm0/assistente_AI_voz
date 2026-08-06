@@ -1723,6 +1723,8 @@ class AssistantEngine:
                         ],
                         fallback="Consigo reescrever o documento, mas preciso de me basear apenas no texto que li.",
                         language_instruction=self._language_instruction(),
+                        temperature=_REWRITE_TEMPERATURE,
+                        num_predict=_REWRITE_MAX_OUTPUT_TOKENS,
                     )
                 )
 
@@ -5322,6 +5324,16 @@ def _looks_like_ambiguous_document_followup(text: str, content_type: str) -> boo
         return True
     return False
 
+
+# Rewriting a document faithfully is a low-creativity, high-fidelity task —
+# a lower temperature reduces the odds of the model refusing, adding a
+# chatty preamble, or drifting from the original's facts. num_predict caps
+# worst-case generation length/latency while staying generous enough for a
+# full rewritten document (observed real responses were 90-370 tokens).
+# Applied only to this composer call — every other LLM call keeps using the
+# provider's defaults.
+_REWRITE_TEMPERATURE = 0.2
+_REWRITE_MAX_OUTPUT_TOKENS = 1200
 
 # Verbs that, on their own, unambiguously mean "transform the active
 # document now" (produce a full rewritten version) rather than something

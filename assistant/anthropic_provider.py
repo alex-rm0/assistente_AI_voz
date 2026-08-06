@@ -57,7 +57,11 @@ class AnthropicProvider:
         response_format: dict | str | None = None,
         tools: list[dict] | None = None,
         temperature: float | None = None,
+        num_predict: int | None = None,
     ) -> ModelResponse:
+        # num_predict is Ollama-specific (options.num_predict); Anthropic has
+        # no equivalent wired up yet, so it's accepted-and-ignored here only
+        # to keep the ModelProvider interface uniform across providers.
         resolved_model = model or self.model
         api_key = str(self.api_key_getter() if self.api_key_getter is not None else self.api_key or "").strip()
         if not api_key:
