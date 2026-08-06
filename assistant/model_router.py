@@ -386,6 +386,7 @@ class RoutedLLM(ProviderBackedLLM):
             model_source=self.model_source,
             provider=provider,
             model_routing_mode=decision.mode if decision else self.router.config.mode,
+            model_routing_mode_source=decision.override_source if decision else self.router.config.mode_source,
             model_routing_provider=decision.provider if decision else provider,
             model_routing_model=decision.model if decision else model,
             model_routing_reason_code=decision.reason_code if decision else "",
@@ -407,6 +408,7 @@ class _RoutedSettings:
     model_source: str
     provider: str
     model_routing_mode: str = ""
+    model_routing_mode_source: str = ""
     model_routing_provider: str = ""
     model_routing_model: str = ""
     model_routing_reason_code: str = ""
