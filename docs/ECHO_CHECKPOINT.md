@@ -36,7 +36,41 @@ Foi feito um diagnóstico dedicado (pedidos muito semelhantes seguiam caminhos d
 
 Validação: suite de testes cresceu de 719 para 726 (`pytest` completo), sem falhas; zero chamadas Anthropic reais durante o diagnóstico e implementação (só `ollama`/`llama3.1:8b` e `FakeProvider` nos testes); frontend e `config/settings.json` não foram tocados.
 
-Dívida ainda por resolver, fora do âmbito destes três patches: telemetria `composer_call_count` continua a ser um rótulo estático da rota escolhida, não prova de chamada LLM concluída; `configured_model_mode_source` continua a ler de `self.llm.settings` em vez de `self.model_runtime`, ficando vazio nos caminhos que passam pelo Composer.
+Dívida ainda por resolver, fora do âmbito destes três patches: telemetria `composer_call_count` continua a ser um rótulo estático da rota escolhida, não prova de chamada LLM concluída; `configured_model_mode_source` continua a ler de `self.llm.settings` em vez de `self.model_runtime`, ficando vazio nos caminhos que passam pelo Composer. (Nota: este segundo ponto foi corrigido em `2a05588` — ver secção seguinte. `composer_call_count` continua por resolver.)
+
+## Atualização — Fluxo De Rewrite Com Draft Transitório E Validação Estrutural
+
+Atualizado em 2026-08-06 (continuação):
+
+Uma regressão encontrada em validação manual — pedidos naturais de rewrite como "Torna-o mais formal, mas não guardes ainda." caíam em `GENERAL_CONVERSATION`, porque `_active_document_followup_action` só reconhecia frases exatas ("torna mais formal"), quebrando com pronomes presos por hífen ("torna-o") — foi corrigida e o fluxo de rewrite foi reforçado em seis commits isolados:
+
+- **`c88a55c`** — Deteção natural de rewrite (`_looks_like_rewrite_request`: verbo+qualidade por proximidade via `find_near_pair_span`, em vez de frases exatas). `corrige`/`corrigir` movidos dos marcadores de review para rewrite (estavam em ambas as listas; review, verificado primeiro, ganhava sempre).
+- **`e430175`** — Estado de draft transitório: `ActiveDocumentContext` ganha `draft_content`/`draft_action`/`draft_created_from_hash`/`draft_saved`/`draft_updated_at`. Novas ações de follow-up: `display_draft`, `compare_versions`, `discard_draft`, `save_draft` (pede confirmação e grava num ficheiro novo, nunca sobrescreve o original).
+- **`69da610`** — Validação estrutural do draft antes de o aceitar. `_extract_document_anchors` extrai assunto/saudação/assinatura/itens de lista/entidades do documento **original**, de forma genérica (sem nomes hardcoded). `_validate_rewrite_draft` rejeita respostas vazias, demasiado curtas, terminadas em pergunta, com frases de comentário/recusa, ou que percam entidades/listas/saudação/assinatura importantes. Uma regeneração corretiva é tentada se a 1ª resposta falhar a validação; se a 2ª também falhar, não é criado draft nenhum.
+- **`2ee79f5`** — Perguntas de opinião curtas e sem antecedente ("O que achas?" depois de "Vamos falar de outra coisa.") passam a receber "Sobre o quê?" deterministicamente, evitando uma resposta adivinhada que o guard de memória depois substituía por uma frase enlatada.
+- **`2a05588`** — `configured_model_mode_source` deixa de ficar vazio em turnos com chamada LLM real em modo `local`/`automatic`.
+- **`38271a9`** — Testes cobrindo tudo o que precede.
+
+Fluxo documental atual:
+
+- Leitura integral determinística do ficheiro ativo (zero chamadas LLM).
+- Continuidade via `ActiveDocumentContext` entre turnos (TTL, cache por mtime/tamanho).
+- `review` (sugestões), `interpret` (explicação) e `rewrite` (texto completo reescrito) são ações distintas, cada uma com deteção de linguagem natural própria.
+- `rewrite` cria sempre um draft transitório em memória — nunca escreve no disco automaticamente.
+- "mostra a versão melhorada" devolve o draft; "mostra o original" devolve sempre o conteúdo original; "compara as duas versões" mostra ambos; "descarta as alterações" limpa o draft.
+- "guarda esta versão" pede confirmação explícita e, só se aceite, grava num ficheiro novo — o original nunca é sobrescrito automaticamente.
+- Um rewrite só é aceite depois de validado estruturalmente contra âncoras extraídas do original; uma resposta inválida tem direito a uma regeneração corretiva; se ambas falharem, a falha é comunicada honestamente e nenhum draft é criado.
+- O draft nunca é escrito em `long_term_memory`/SQLite — existe só em `ActiveDocumentContext`, em memória.
+- Perguntas de opinião curtas sem contexto recebem uma clarificação simples em vez de uma resposta adivinhada.
+
+Limitações atuais:
+
+- O draft existe apenas durante a sessão/processo atual — não sobrevive a um reinício do `AssistantEngine`.
+- Paráfrases muito agressivas do modelo podem ser rejeitadas pela validação estrutural mesmo sendo uma reescrita válida — os limiares são heurísticos (proporção de comprimento, entidades, listas), não uma comparação de significado.
+- Guardar cria sempre uma nova versão (`"<nome> (melhorado)<ext>"`); não existe mecanismo para substituir o ficheiro original.
+- `ActiveDocumentContext` (incluindo o draft) não é persistido entre reinícios da aplicação.
+
+Validação: `tests/test_automatic_routing_regressions.py` — 89 passed; `tests/test_memory_verbalization.py` — 18 passed; `pytest` completo — 736 passed, 0 failed. Zero chamadas Anthropic reais; frontend e `config/settings.json` não tocados.
 
 ## 1. Visão Atual Do Echo
 
