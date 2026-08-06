@@ -53,7 +53,7 @@ from assistant.response_composer import ComposerRequest, ResponseComposer
 from assistant.security import check_user_request
 from assistant.session_manager import SessionManager
 from assistant.text_encoding import debug_text_encoding, has_mojibake_markers
-from assistant.text_matching import contains_any_phrase
+from assistant.text_matching import contains_any_phrase, find_near_pair_span
 from assistant.tool_registry import ToolRegistry
 from assistant.tools import (
     cancel_task as cancel_task_tool,
@@ -5030,8 +5030,6 @@ _DOCUMENT_OPINION_STRONG_MARKERS = (
     "sugestões",
     "melhorar",
     "melhoria",
-    "corrige",
-    "corrigir",
     "consegues melhorar",
     "podes melhorar",
     "esta bem assim",
@@ -5092,6 +5090,42 @@ def _looks_like_ambiguous_document_followup(text: str, content_type: str) -> boo
     return False
 
 
+# Verbs that, on their own, unambiguously mean "transform the active
+# document now" (produce a full rewritten version) rather than something
+# else. Word-boundary-safe matching already treats a hyphenated pronoun
+# suffix ("torna-o", "melhora-o") as a separate token bounded by the hyphen,
+# so no need to enumerate pronoun forms explicitly — "torna" alone matches
+# inside "torna-o" too.
+_REWRITE_STANDALONE_VERBS = ("reescreve", "reformula", "corrige", "adapta", "melhora")
+
+# These need a paired quality/target word nearby to disambiguate from other
+# meanings: "deixa estar" is a cancel phrase (_is_negative_confirmation),
+# "escreve um email" is a brand-new composition request
+# (_explicit_email_composition_request), and "torna" alone isn't a complete
+# instruction.
+_REWRITE_GUARDED_VERBS = ("torna", "deixa", "escreve")
+_REWRITE_QUALITY_WORDS = ("formal", "claro", "profissional", "melhor")
+
+_REWRITE_EXPLICIT_PHRASES = (
+    "reescreve num tom mais formal",
+    "faz uma versao melhor",
+    "escreve isto de outra forma",
+    "escreve de outra forma",
+    "corrige e melhora",
+    "adapta para um tom profissional",
+    "adapta para um tom mais profissional",
+)
+
+
+def _looks_like_rewrite_request(text: str) -> bool:
+    normalized = _normalize_text(text)
+    if contains_any_phrase(normalized, _REWRITE_EXPLICIT_PHRASES):
+        return True
+    if contains_any_phrase(normalized, _REWRITE_STANDALONE_VERBS):
+        return True
+    return bool(find_near_pair_span(normalized, _REWRITE_GUARDED_VERBS, _REWRITE_QUALITY_WORDS, max_gap=40))
+
+
 def _active_document_followup_action(text: str, content_type: str = "") -> str:
     normalized = _normalize_text(text).strip(" .!?")
     if not normalized:
@@ -5101,15 +5135,16 @@ def _active_document_followup_action(text: str, content_type: str = "") -> str:
     if "mostra outra vez" in normalized or _looks_like_full_document_read(normalized):
         return "display"
     # Tie-break order below matters: once a branch matches, later ones are
-    # never consulted. "review" is checked first (broadest, opinion-shaped
-    # requests like "tens alguma sugestão para melhorar o mail?" reuse the
-    # same strong/weak marker tables as _try_active_document_grounded_fallback
-    # so both layers agree), then the narrower interpret/summarize/rewrite
-    # intents.
-    if (
-        contains_any_phrase(normalized, ("sugeres alguma alteracao", "alguma alteracao", "o que mudavas", "reve", "review"))
-        or _looks_like_ambiguous_document_followup(normalized, content_type)
-    ):
+    # never consulted. Explicit, unambiguous markers are checked first
+    # (review's own fixed phrases, then interpret, summarize, rewrite);
+    # _looks_like_ambiguous_document_followup is the broadest catch-all (a
+    # bare mention of "mail"/"email" already counts) so it is deliberately
+    # checked LAST among these — otherwise a rewrite request that happens to
+    # mention "o email" ("deixa o email mais formal") would be swallowed by
+    # the generic review fallback before ever reaching the rewrite check.
+    # "corrige"/"corrigir" belong to rewrite (not review) — asking to fix
+    # something means producing corrected text, not just suggestions.
+    if contains_any_phrase(normalized, ("sugeres alguma alteracao", "alguma alteracao", "o que mudavas", "reve", "review")):
         return "review"
     if contains_any_phrase(
         normalized,
@@ -5127,19 +5162,10 @@ def _active_document_followup_action(text: str, content_type: str = "") -> str:
         return "interpret"
     if contains_any_phrase(normalized, ("resume melhor", "faz um resumo", "resumo melhor", "sintetiza", "resume outra vez")):
         return "summarize"
-    if contains_any_phrase(
-        normalized,
-        (
-            "torna mais formal",
-            "corrige o portugues",
-            "reescreve",
-            "torna mais claro",
-            "torna isto mais claro",
-            "torna o texto mais claro",
-            "escreve melhor",
-        ),
-    ):
+    if _looks_like_rewrite_request(normalized):
         return "rewrite"
+    if _looks_like_ambiguous_document_followup(normalized, content_type):
+        return "review"
     if normalized.startswith(("voltando ao email", "voltando ao documento", "sobre o email", "sobre o documento")):
         return "review"
     return ""
