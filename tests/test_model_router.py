@@ -29,8 +29,14 @@ class FakeProvider:
     def name(self) -> str:
         return self._name
 
-    def chat(self, messages, *, model=None, response_format=None, tools=None, temperature=None):
-        self.calls.append({"messages": messages, "model": model, "response_format": response_format})
+    def chat(self, messages, *, model=None, response_format=None, tools=None, temperature=None, num_predict=None):
+        self.calls.append({
+            "messages": messages,
+            "model": model,
+            "response_format": response_format,
+            "temperature": temperature,
+            "num_predict": num_predict,
+        })
         if self._name == "anthropic" and self.text == "missing-key":
             raise ProviderConfigurationError(
                 "O provider Anthropic esta selecionado, mas falta configurar ANTHROPIC_API_KEY.",

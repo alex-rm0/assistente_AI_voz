@@ -27,8 +27,14 @@ class FakeProvider:
     def name(self) -> str:
         return self._name
 
-    def chat(self, messages, *, model=None, response_format=None, tools=None, temperature=None):
-        self.calls.append({"messages": messages, "model": model, "response_format": response_format})
+    def chat(self, messages, *, model=None, response_format=None, tools=None, temperature=None, num_predict=None):
+        self.calls.append({
+            "messages": messages,
+            "model": model,
+            "response_format": response_format,
+            "temperature": temperature,
+            "num_predict": num_predict,
+        })
         index = min(len(self.calls) - 1, len(self.replies) - 1)
         return ModelResponse(
             text=self.replies[index],
@@ -1752,3 +1758,140 @@ def test_ambiguous_opinion_question_after_topic_shift_asks_for_context(tmp_path:
     assert "memoria" not in response.lower() and "memória" not in response.lower()
     assert len(ollama.calls) == 1
     assert anthropic.calls == []
+
+
+# --- Rewrite reliability fix: preamble stripping, placeholder detection,
+# honest failure message, and temperature/num_predict for the rewrite call
+# only. Reproduces the manually observed false positive: "Vou reescrever o
+# documento completo... Aqui está a resposta:" immediately followed by an
+# otherwise-perfect rewrite was rejected only because it matched
+# "vou reescrever".
+
+_PREAMBLE_PLUS_VALID_REWRITE = (
+    "Vou reescrever o documento completo sem perguntas e sem análise, mantendo todos os factos. "
+    "Aqui está a resposta:\n\n"
+    "ASSUNTO: Resumo da Reunião de Direção - 19 de junho\n\n"
+    "Francisca,\n\n"
+    "Segue o resumo da reunião de Direção.\n\n"
+    "- Febrada final de época\n"
+    "- Protocolo Águas de Coimbra\n"
+    "- Candidatura COP\n"
+    "- Sanfil"
+)
+
+
+def test_rewrite_strips_preamble_and_accepts_valid_document_after_it(tmp_path: Path) -> None:
+    from assistant.conversation import _validate_rewrite_draft
+
+    valid, reason, cleaned = _validate_rewrite_draft(REAL_EMAIL_SUMMARY, _PREAMBLE_PLUS_VALID_REWRITE)
+
+    assert valid is True
+    assert reason == ""
+    assert cleaned.startswith("ASSUNTO:")
+    assert "vou reescrever" not in cleaned.lower()
+    assert "aqui está a resposta" not in cleaned.lower()
+
+
+def test_rewrite_bare_preamble_without_document_is_still_rejected() -> None:
+    from assistant.conversation import _validate_rewrite_draft
+
+    valid, reason, _cleaned = _validate_rewrite_draft(REAL_EMAIL_SUMMARY, "Vou reescrever isto para ti em breve.")
+
+    assert valid is False
+    assert reason != ""
+
+
+def test_rewrite_rejects_placeholder_with_specific_reason() -> None:
+    from assistant.conversation import _validate_rewrite_draft
+
+    candidate = (
+        "ASSUNTO: Resumo da Reunião de Direção - 19 de junho\n\n"
+        "Francisca,\n\n"
+        "Segue o resumo da reunião de Direção.\n\n"
+        "- Febrada final de época\n"
+        "- Protocolo Águas de Coimbra\n"
+        "- Candidatura COP\n"
+        "- Sanfil\n\n"
+        "Atenciosamente,\n[Tu o nome]"
+    )
+    valid, reason, _cleaned = _validate_rewrite_draft(REAL_EMAIL_SUMMARY, candidate)
+
+    assert valid is False
+    assert reason == "placeholder_detected"
+
+
+def test_document_rewrite_first_attempt_invalid_second_has_preamble_accepted(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=[
+            "O documento parece pronto para enviar! É para enviar a algum destinatário?",
+            _PREAMBLE_PLUS_VALID_REWRITE,
+        ],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+
+    engine.respond("lê o ficheiro email_resumo_novo e diz exatamente o que lá está escrito")
+    response = engine.respond("Torna-o mais formal, mas não guardes ainda.")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["draft_validation_passed"] is True
+    assert telemetry["draft_regeneration_attempted"] is True
+    assert telemetry["draft_preamble_removed"] is True
+    assert telemetry["draft_placeholder_detected"] is False
+    assert "vou reescrever" not in engine._active_document_context.draft_content.lower()
+    assert engine._active_document_context.draft_content.startswith("ASSUNTO:")
+    assert "Francisca" in response
+    assert len(ollama.calls) == 2
+    assert anthropic.calls == []
+
+
+def test_document_rewrite_uses_low_temperature_and_bounded_num_predict(tmp_path: Path) -> None:
+    from assistant.conversation import _REWRITE_TEMPERATURE, _REWRITE_MAX_OUTPUT_TOKENS
+
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=[_VALID_FORMAL_REWRITE, "Podias mencionar o orçamento com mais destaque."],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+
+    engine.respond("lê o ficheiro email_resumo_novo e diz exatamente o que lá está escrito")
+    engine.respond("Torna-o mais formal, mas não guardes ainda.")
+    engine.respond("Tens alguma sugestão para melhorar este email?")
+
+    assert ollama.calls[0]["temperature"] == _REWRITE_TEMPERATURE
+    assert ollama.calls[0]["num_predict"] == _REWRITE_MAX_OUTPUT_TOKENS
+    # The unrelated "review" call right after must not inherit the rewrite's
+    # tighter generation parameters.
+    assert ollama.calls[1]["temperature"] is None
+    assert ollama.calls[1]["num_predict"] is None
+
+
+def test_document_rewrite_failure_message_reflects_real_reason(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=[
+            "ASSUNTO: Resumo da Reunião de Direção - 19 de junho\n\nFrancisca,\n\nSegue o resumo.\n\n"
+            "- Febrada final de época\n- Protocolo Águas de Coimbra\n- Candidatura COP\n- Sanfil\n\n"
+            "Atenciosamente,\n[nome]",
+            "ASSUNTO: Resumo da Reunião de Direção - 19 de junho\n\nFrancisca,\n\nSegue o resumo.\n\n"
+            "- Febrada final de época\n- Protocolo Águas de Coimbra\n- Candidatura COP\n- Sanfil\n\n"
+            "Atenciosamente,\n<nome>",
+        ],
+    )
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+
+    engine.respond("lê o ficheiro email_resumo_novo e diz exatamente o que lá está escrito")
+    response = engine.respond("Torna-o mais formal, mas não guardes ainda.")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["draft_validation_failed"] is True
+    assert telemetry["draft_validation_reason"] == "placeholder_detected"
+    assert "campos por preencher" in response
+    assert "comentário" not in response.lower()
+    assert engine._active_document_context.draft_content == ""
