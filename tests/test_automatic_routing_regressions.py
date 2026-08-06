@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -60,6 +61,19 @@ class MemoryStub:
 
     def pending_tasks(self, *args, **kwargs) -> str:
         return ""
+
+
+class ContextObserverStub:
+    def __init__(self, snapshot=None) -> None:
+        self.snapshot = snapshot
+        self.observe_calls = 0
+
+    def observe_once(self):
+        self.observe_calls += 1
+        return self.snapshot
+
+    def latest_snapshot(self):
+        return self.snapshot
 
 
 def make_engine(
@@ -214,6 +228,153 @@ def test_calendar_claim_without_calendar_tool_is_blocked(tmp_path: Path) -> None
 
     assert "calendário está atualizado" not in response.lower()
     assert telemetry["unsupported_tool_claim_detected"] is True
+    assert telemetry["llm_calls"] == 0
+    assert ollama.calls == []
+    assert anthropic.calls == []
+
+
+def test_incomplete_email_request_starts_writing_task_not_memory(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(tmp_path, mode="automatic")
+
+    response = engine.respond("Preciso de ajuda a escrever um email a um professor.")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["selected_path"] == "WRITING_TASK"
+    assert telemetry["response_source"] == "WRITING_WORKFLOW"
+    assert telemetry["model_routing_reason_code"] == "writing_workflow"
+    assert telemetry["execution_path"] == "writing_workflow"
+    assert telemetry["execution_provider"] == "local"
+    assert telemetry["memory_route"] == "NONE"
+    assert telemetry["llm_calls"] == 0
+    assert "o que queres pedir" in response.lower()
+    assert ollama.calls == []
+    assert anthropic.calls == []
+
+
+def test_writing_followup_does_not_assume_project_from_vague_reference(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(tmp_path, mode="automatic")
+
+    engine.respond("Preciso de ajuda a escrever um email.")
+    engine.respond("É para um potencial patrocinador.")
+    response = engine.respond("É sobre um projeto que estou a desenvolver.")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["selected_path"] == "WRITING_TASK"
+    assert telemetry["writing_project"] == "unknown"
+    assert telemetry["writing_workflow_active"] is True
+    assert telemetry["memory_route"] == "NONE"
+    assert telemetry["llm_calls"] == 0
+    assert "qual é o projeto" in response.lower()
+    assert "assistenteia" not in response.lower()
+    assert "echo" not in response.lower()
+    assert ollama.calls == []
+    assert anthropic.calls == []
+
+
+def test_social_presence_question_uses_fast_path_without_llm(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(tmp_path, mode="automatic")
+
+    response = engine.respond("Estás aí?")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert response == "Sim, estou aqui."
+    assert telemetry["selected_path"] == "SOCIAL_PATH"
+    assert telemetry["execution_path"] == "social_fast_path"
+    assert telemetry["llm_calls"] == 0
+    assert ollama.calls == []
+    assert anthropic.calls == []
+
+
+def test_social_thanks_uses_fast_path_without_llm(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(tmp_path, mode="automatic")
+
+    response = engine.respond("Ok, obrigado.")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert response == "De nada."
+    assert telemetry["selected_path"] == "SOCIAL_PATH"
+    assert telemetry["llm_calls"] == 0
+    assert ollama.calls == []
+    assert anthropic.calls == []
+
+
+def test_child_social_personality_is_playful_without_claiming_feelings(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(tmp_path, mode="automatic")
+
+    response = engine.respond("É a minha irmã de 7 anos a perguntar a tua cor preferida.")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert "azul" in response.lower()
+    assert "luzes" in response.lower()
+    assert "sinto" not in response.lower()
+    assert telemetry["selected_path"] == "SOCIAL_PATH"
+    assert telemetry["llm_calls"] == 0
+    assert ollama.calls == []
+    assert anthropic.calls == []
+
+
+def test_system_context_status_is_local_and_grounded(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(tmp_path, mode="automatic")
+
+    response = engine.respond("Estás a guardar contexto?")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["selected_path"] == "SYSTEM_CONTEXT_STATUS"
+    assert telemetry["response_source"] == "SYSTEM_CONTEXT_STATUS"
+    assert telemetry["execution_path"] == "system_context_status"
+    assert telemetry["execution_provider"] == "local"
+    assert telemetry["configured_model_mode_source"] == "test"
+    assert telemetry["response_grounded"] is True
+    assert "histórico" in response.lower()
+    assert "memória" in response.lower()
+    assert telemetry["llm_calls"] == 0
+    assert ollama.calls == []
+    assert anthropic.calls == []
+
+
+def test_specific_application_activity_uses_context_observer_not_general_summary(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(tmp_path, mode="automatic")
+    snapshot = SimpleNamespace(
+        active_app="chrome.exe",
+        active_window="Pesquisa Echo - Google Chrome",
+        open_windows=[
+            SimpleNamespace(title="Pesquisa Echo - Google Chrome", process_name="chrome.exe", is_active=True),
+            SimpleNamespace(title="AssistenteIA - Visual Studio Code", process_name="Code.exe", is_active=False),
+        ],
+    )
+    engine.context_observer = ContextObserverStub(snapshot)
+
+    response = engine.respond("O que estou a fazer no Google Chrome?")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["selected_path"] == "TOOL_PATH"
+    assert telemetry["tools_used"] == ["get_application_activity"]
+    assert telemetry["grounding_sources"] == ["CONTEXT_OBSERVER"]
+    assert "chrome" in response.lower()
+    assert "pesquisa echo" in response.lower()
+    assert "conteúdo exato" in response.lower()
+    assert "ficheiros modificados" not in response.lower()
+    assert "git" not in response.lower()
+    assert ollama.calls == []
+    assert anthropic.calls == []
+
+
+def test_unsupported_notes_check_claim_is_blocked_without_tool(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(tmp_path, mode="local")
+    engine._begin_turn_trace("Tenho notas sobre isto?")
+
+    response = engine._complete_turn(
+        "Tenho notas sobre isto?",
+        "Estava a verificar as notas e encontrei alguma coisa.",
+        "RESPONSE_COMPOSER",
+        selected_path="GENERAL_CONVERSATION",
+        tools_used=(),
+    )
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert "estava a verificar as notas" not in response.lower()
+    assert telemetry["unsupported_tool_claim_detected"] is True
+    assert telemetry["final_response_source"] == "TOOL_CLAIM_BLOCKED"
     assert telemetry["llm_calls"] == 0
     assert ollama.calls == []
     assert anthropic.calls == []
@@ -510,6 +671,281 @@ def test_pdf_named_request_enters_document_task_without_false_found_claim(tmp_pa
     assert telemetry["selected_path"] == "DOCUMENT_TASK"
     assert telemetry["workspace_file_found"] is False
     assert "encontrei o ficheiro" not in response.lower()
+    assert ollama.calls == []
+    assert anthropic.calls == []
+
+
+REAL_EMAIL_SUMMARY = (
+    "ASSUNTO: Resumo da Reunião de Direção - 19 de junho\n\n"
+    "Olá Francisca,\n\n"
+    "Segue o resumo da reunião de Direção.\n\n"
+    "- Febrada final de época\n"
+    "- Protocolo Águas de Coimbra\n"
+    "- Candidatura COP\n"
+    "- Sanfil\n"
+)
+
+
+def test_document_task_reads_real_email_summary_without_extension_or_llm(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(tmp_path, mode="automatic")
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+
+    response = engine.respond("preciso que leias o documento email_resumo_novo e me digas o que está lá escrito")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["selected_path"] == "DOCUMENT_TASK"
+    assert telemetry["execution_path"] == "document_task"
+    assert telemetry["execution_provider"] == "tool"
+    assert telemetry["execution_model"] == "NONE"
+    assert telemetry["llm_calls"] == 0
+    assert telemetry["tools_used"] == ["workspace_search", "read_workspace_document"]
+    assert telemetry["grounding_sources"] == ["WORKSPACE_FILE"]
+    assert telemetry["workspace_file_found"] is True
+    assert telemetry["workspace_files_used"][0]["name"] == "email_resumo_novo.txt"
+    assert "Olá Francisca" in response
+    assert "Sanfil" in response
+    assert "benefícios esperados" not in response.lower()
+    assert "requisitos para o patrocinador" not in response.lower()
+    assert ollama.calls == []
+    assert anthropic.calls == []
+
+
+def test_document_task_multiturn_full_contents_reuses_resolved_file(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(tmp_path, mode="automatic")
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+
+    first = engine.respond("preciso que leias o documento email_resumo_novo")
+    first_telemetry = engine.get_last_turn_telemetry() or {}
+    second = engine.respond("quero saber na íntegra o que está lá escrito")
+    second_telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert first_telemetry["selected_path"] == "DOCUMENT_TASK"
+    assert second_telemetry["selected_path"] == "DOCUMENT_TASK"
+    assert second_telemetry["tools_used"] == []
+    assert second_telemetry["grounding_sources"] == ["WORKSPACE_FILE"]
+    assert second_telemetry["document_context_reused"] is True
+    assert second_telemetry["llm_calls"] == 0
+    assert "Olá Francisca" in first
+    assert "Olá Francisca" in second
+    assert "Sanfil" in second
+    assert "benefícios esperados" not in second.lower()
+    assert ollama.calls == []
+    assert anthropic.calls == []
+
+
+def test_document_review_and_interpret_continue_from_active_document_context(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        env={"ANTHROPIC_API_KEY": "secret", "ECHO_ALLOW_PAID_MODEL_CALLS": "true"},
+        anthropic_replies=[
+            "O email é para a Francisca e resume a reunião de Direção. Eu melhorava a clareza dos pontos Sanfil, COP e Águas de Coimbra.",
+            "É um email de resumo da reunião de Direção de 19 de junho, com pontos sobre febrada, Águas de Coimbra, COP e Sanfil.",
+        ],
+    )
+    engine.long_term_memory.search_results = []
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+
+    first = engine.respond("lê o ficheiro email_resumo_novo e diz exatamente o que lá está escrito")
+    review = engine.respond("sugeres alguma alteração ao email?")
+    review_telemetry = engine.get_last_turn_telemetry() or {}
+    interpret = engine.respond("interpreta o que está no documento e diz-me tu")
+    interpret_telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert "Olá Francisca" in first
+    assert review_telemetry["selected_path"] == "DOCUMENT_TASK"
+    assert review_telemetry["active_document"] is True
+    assert review_telemetry["active_document_name"] == "email_resumo_novo.txt"
+    assert review_telemetry["document_action"] == "review"
+    assert review_telemetry["document_context_reused"] is True
+    assert review_telemetry["document_grounded"] is True
+    assert review_telemetry["grounding_sources"] == ["WORKSPACE_FILE"]
+    assert review_telemetry["tools_used"] == []
+    assert review_telemetry["model_routing_reason_code"] == "document_review"
+    assert "Francisca" in review
+    assert "destinatário" not in review.lower()
+    assert "propósito" not in review.lower()
+    assert "Francisca" in anthropic.calls[0]["messages"][-1]["content"]
+    assert "Sanfil" in anthropic.calls[0]["messages"][-1]["content"]
+    assert interpret_telemetry["selected_path"] == "DOCUMENT_TASK"
+    assert interpret_telemetry["document_action"] == "interpret"
+    assert interpret_telemetry["grounding_sources"] == ["WORKSPACE_FILE"]
+    assert interpret_telemetry["tools_used"] == []
+    assert "futebol" not in interpret.lower()
+    assert "vou começar" not in interpret.lower()
+    assert "Direção" in interpret
+    assert ollama.calls == []
+
+
+def test_active_document_display_followup_does_not_call_llm(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(tmp_path, mode="automatic")
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+
+    engine.respond("lê o ficheiro email_resumo_novo")
+    response = engine.respond("mostra tudo")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["selected_path"] == "DOCUMENT_TASK"
+    assert telemetry["document_action"] == "display"
+    assert telemetry["document_context_reused"] is True
+    assert telemetry["llm_calls"] == 0
+    assert "Olá Francisca" in response
+    assert ollama.calls == []
+    assert anthropic.calls == []
+
+
+def test_active_document_side_question_does_not_clear_context_and_can_resume(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 26, 10, 30)
+    engine, _llm, ollama, anthropic = make_engine(tmp_path, mode="automatic", now_provider=lambda: now)
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+
+    engine.respond("lê o ficheiro email_resumo_novo")
+    side = engine.respond("que horas são?")
+    resumed = engine.respond("voltando ao email, o que mudavas?")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert "10:30" in side
+    assert telemetry["selected_path"] == "DOCUMENT_TASK"
+    assert telemetry["document_action"] == "review"
+    assert telemetry["grounding_sources"] == ["WORKSPACE_FILE"]
+    assert "ficheiro da workspace" not in resumed.lower()
+
+
+def test_active_document_clear_on_topic_shift(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(tmp_path, mode="automatic")
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+
+    engine.respond("lê o ficheiro email_resumo_novo")
+    engine.respond("vamos falar de outra coisa")
+    response = engine.respond("sugeres alguma alteração?")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["selected_path"] != "DOCUMENT_TASK"
+    assert telemetry["active_document"] is False
+    assert "email_resumo_novo" not in response
+
+
+def test_active_document_rereads_when_file_changes(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="local",
+        ollama_replies=["A versão atualizada menciona Sanfil e uma nota nova."],
+    )
+    file_path = engine.workspace_path / "email_resumo_novo.txt"
+    file_path.write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+
+    engine.respond("lê o ficheiro email_resumo_novo")
+    file_path.write_text(REAL_EMAIL_SUMMARY + "\nNota nova adicionada.\n", encoding="utf-8")
+    response = engine.respond("interpreta o que está no documento")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["selected_path"] == "DOCUMENT_TASK"
+    assert telemetry["document_action"] == "interpret"
+    assert telemetry["document_context_reused"] is False
+    assert telemetry["tools_used"] == ["read_workspace_document"]
+    assert "Nota nova adicionada." in ollama.calls[0]["messages"][-1]["content"]
+    assert "nota nova" in response.lower()
+    assert anthropic.calls == []
+
+
+def test_active_document_context_is_not_written_to_persistent_memory(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(tmp_path, mode="automatic")
+    (engine.workspace_path / "email_resumo_novo.txt").write_text(REAL_EMAIL_SUMMARY, encoding="utf-8")
+
+    engine.respond("lê o ficheiro email_resumo_novo")
+
+    assert engine.long_term_memory.search_results == []
+    assert engine.long_term_memory.context_text == ""
+    assert ollama.calls == []
+    assert anthropic.calls == []
+
+
+def test_document_task_omitted_extension_exact_stem_reads_txt(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(tmp_path, mode="automatic")
+    (engine.workspace_path / "nota simples.txt").write_text("Texto real da nota simples.", encoding="utf-8")
+
+    response = engine.respond("mostra-me o conteúdo de nota simples")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["selected_path"] == "DOCUMENT_TASK"
+    assert telemetry["workspace_files_used"][0]["name"] == "nota simples.txt"
+    assert "Texto real da nota simples." in response
+    assert telemetry["llm_calls"] == 0
+    assert ollama.calls == []
+    assert anthropic.calls == []
+
+
+def test_document_task_multiple_matches_asks_for_choice(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(tmp_path, mode="automatic")
+    (engine.workspace_path / "relatorio.txt").write_text("A", encoding="utf-8")
+    (engine.workspace_path / "relatorio.md").write_text("B", encoding="utf-8")
+
+    response = engine.respond("lê o ficheiro relatorio")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["selected_path"] == "DOCUMENT_TASK"
+    assert telemetry["workspace_file_found"] is False
+    assert "mais do que uma possibilidade" in response.lower()
+    assert "relatorio.txt" in response
+    assert "relatorio.md" in response
+    assert telemetry["llm_calls"] == 0
+    assert ollama.calls == []
+    assert anthropic.calls == []
+
+
+def test_document_task_missing_file_does_not_fall_back_to_llm(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(tmp_path, mode="automatic")
+
+    response = engine.respond("diz-me o que está no ficheiro inexistente")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["selected_path"] == "DOCUMENT_TASK"
+    assert telemetry["workspace_file_found"] is False
+    assert "não encontrei" in response.lower()
+    assert telemetry["llm_calls"] == 0
+    assert ollama.calls == []
+    assert anthropic.calls == []
+
+
+def test_document_task_read_vs_summarize_are_distinct(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(
+        tmp_path,
+        mode="automatic",
+        claude_enabled=False,
+        ollama_replies=["Resumo curto das notas."],
+    )
+    (engine.workspace_path / "notas.txt").write_text("Conteúdo longo real das notas.", encoding="utf-8")
+
+    read_response = engine.respond("lê o ficheiro notas")
+    read_telemetry = engine.get_last_turn_telemetry() or {}
+    summary_response = engine.respond("resume o ficheiro notas")
+    summary_telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert "Conteúdo longo real das notas." in read_response
+    assert read_telemetry["llm_calls"] == 0
+    assert summary_response == "Resumo curto das notas."
+    assert summary_telemetry["llm_calls"] == 1
+    assert ollama.calls
+    assert anthropic.calls == []
+
+
+def test_document_false_read_claim_without_tool_is_blocked(tmp_path: Path) -> None:
+    engine, _llm, ollama, anthropic = make_engine(tmp_path, mode="local")
+    engine._begin_turn_trace("Leste o ficheiro?")
+
+    response = engine._complete_turn(
+        "Leste o ficheiro?",
+        "Já estou a lê-lo e aqui está o conteúdo.",
+        "RESPONSE_COMPOSER",
+        selected_path="GENERAL_CONVERSATION",
+        tools_used=(),
+    )
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert "já estou a lê-lo" not in response.lower()
+    assert telemetry["unsupported_tool_claim_detected"] is True
+    assert telemetry["final_response_source"] == "TOOL_CLAIM_BLOCKED"
+    assert telemetry["llm_calls"] == 0
     assert ollama.calls == []
     assert anthropic.calls == []
 

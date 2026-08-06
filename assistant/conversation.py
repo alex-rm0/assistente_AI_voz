@@ -5,6 +5,7 @@ import time
 import traceback
 import unicodedata
 import os
+import hashlib
 from difflib import SequenceMatcher
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -75,6 +76,46 @@ from assistant.workspace import WorkspaceGuard
 if TYPE_CHECKING:
     from assistant.context_observer import ContextObserver
     from assistant.llm import OllamaClient
+
+
+@dataclass
+class PendingWritingTask:
+    task_type: str = "compose_email"
+    recipient: str = ""
+    recipient_type: str = ""
+    purpose: str = ""
+    subject: str = ""
+    project: str = "unknown"
+    known_facts: list[str] = field(default_factory=list)
+    missing_fields: list[str] = field(default_factory=list)
+    current_step: str = "collecting_context"
+    ttl: int = 4
+
+
+@dataclass
+class DocumentIntent:
+    action: str = ""
+    file_reference: str = ""
+    requested_output: str = ""
+    output_file: str = ""
+    needs_clarification: bool = False
+
+
+@dataclass
+class ActiveDocumentContext:
+    resolved_file: str = ""
+    file_type: str = ""
+    content_reference: str = ""
+    content_hash: str = ""
+    content_length: int = 0
+    file_size: int = 0
+    detected_content_type: str = ""
+    last_action: str = ""
+    current_document_task: str = ""
+    available_followups: list[str] = field(default_factory=list)
+    mtime_ns: int = 0
+    content: str = ""
+    ttl: int = 8
 
 
 class AssistantEngine:
@@ -150,7 +191,9 @@ class AssistantEngine:
         self._active_operation_id = ""
         self._active_operation_ttl = 0
         self._pending_user_intent: dict[str, str] | None = None
+        self._pending_writing_task: PendingWritingTask | None = None
         self._pending_document_task: dict[str, object] | None = None
+        self._active_document_context: ActiveDocumentContext | None = None
         self._conversation_segment_start = 0
         self.presence = presence_manager or PresenceManager()
         self.context_observer = context_observer
@@ -360,6 +403,10 @@ class AssistantEngine:
                 self._active_operation_type = ""
                 self._active_operation_topic = ""
                 self._active_operation_id = ""
+        if self._active_document_context is not None:
+            self._active_document_context.ttl -= 1
+            if self._active_document_context.ttl <= 0:
+                self._active_document_context = None
         pending_intent_response = self._try_pending_user_intent(user_message)
         if pending_intent_response is not None:
             pending_intent_response = self._complete_turn(
@@ -370,6 +417,31 @@ class AssistantEngine:
             )
             self._perf_log("resposta total", request_started_at, time.perf_counter())
             return pending_intent_response
+
+        document_response = self._try_document_task(user_message)
+        if document_response is not None:
+            document_response = self._complete_turn(
+                user_message=user_message,
+                response=document_response,
+                source="DOCUMENT_TASK",
+                remember=True,
+                technical=True,
+                selected_path="DOCUMENT_TASK",
+                tools_used=self._last_fast_tools_used,
+            )
+            self._perf_log("resposta total", request_started_at, time.perf_counter())
+            return document_response
+
+        writing_workflow_response = self._try_writing_workflow(user_message)
+        if writing_workflow_response is not None:
+            writing_workflow_response = self._complete_turn(
+                user_message,
+                writing_workflow_response,
+                "WRITING_WORKFLOW",
+                selected_path="WRITING_TASK",
+            )
+            self._perf_log("resposta total", request_started_at, time.perf_counter())
+            return writing_workflow_response
         # An explicit write command ("Regista que...") is re-extracted from
         # its own stripped content in _try_memory_write_command below, so the
         # passive path is skipped here to avoid writing the same fact twice
@@ -444,19 +516,33 @@ class AssistantEngine:
             self._perf_log("resposta total", request_started_at, time.perf_counter())
             return research_response
 
-        document_response = self._try_document_task(user_message)
-        if document_response is not None:
-            document_response = self._complete_turn(
-                user_message=user_message,
-                response=document_response,
-                source="DOCUMENT_TASK",
+        context_status_response = self._try_system_context_status(user_message)
+        if context_status_response is not None:
+            context_status_response = self._complete_turn(
+                user_message,
+                context_status_response,
+                "SYSTEM_CONTEXT_STATUS",
                 remember=True,
                 technical=True,
-                selected_path="DOCUMENT_TASK",
+                selected_path="SYSTEM_CONTEXT_STATUS",
+                tools_used=("system_context_status",),
+            )
+            self._perf_log("resposta total", request_started_at, time.perf_counter())
+            return context_status_response
+
+        application_activity_response = self._try_application_activity_query(user_message)
+        if application_activity_response is not None:
+            application_activity_response = self._complete_turn(
+                user_message=user_message,
+                response=application_activity_response,
+                source="TOOL_RESULT",
+                remember=True,
+                technical=True,
+                selected_path="TOOL_PATH",
                 tools_used=self._last_fast_tools_used,
             )
             self._perf_log("resposta total", request_started_at, time.perf_counter())
-            return document_response
+            return application_activity_response
 
         system_state_response = self._try_system_state_tool_query(user_message)
         if system_state_response is not None:
@@ -852,6 +938,10 @@ class AssistantEngine:
         self._active_memory_topic = ""
         self._active_memory_entity_id = None
         self._active_memory_recall_ttl = 0
+        self._pending_writing_task = None
+        self._pending_user_intent = None
+        self._pending_document_task = None
+        self._active_document_context = None
         self.active_contexts = []
         self.last_context_debug = ""
         self.last_cognitive_reasoning = None
@@ -1012,6 +1102,62 @@ class AssistantEngine:
 
         return route.response
 
+    def _try_writing_workflow(self, user_message: str) -> str | None:
+        normalized = _normalize_text(user_message)
+        if _looks_like_complete_writing_request(normalized):
+            return None
+
+        if self._pending_writing_task is None:
+            if not _looks_like_incomplete_writing_request(normalized):
+                return None
+            task = PendingWritingTask()
+            _update_pending_writing_task(task, user_message)
+            task.missing_fields = _missing_writing_fields(task)
+            self._pending_writing_task = task
+            self._record_writing_workflow_trace(task)
+            return _writing_workflow_question(task)
+
+        task = self._pending_writing_task
+        if not _looks_like_writing_followup(normalized, task):
+            task.ttl -= 1
+            if task.ttl <= 0:
+                self._pending_writing_task = None
+            return None
+
+        _update_pending_writing_task(task, user_message)
+        task.ttl = 4
+        task.missing_fields = _missing_writing_fields(task)
+        self._pending_writing_task = task
+        self._record_writing_workflow_trace(task)
+        if task.missing_fields:
+            return _writing_workflow_question(task)
+
+        self._pending_writing_task = None
+        return self.response_composer.compose(
+            ComposerRequest(
+                intent="writing_task",
+                user_message=_writing_task_prompt(task),
+                history=[],
+                fallback=_writing_task_local_fallback(task),
+                intent_instruction=(
+                    "Escreve diretamente o email pedido. Usa apenas os factos recolhidos no workflow. "
+                    "Nao assumas projeto, destinatario, apoio ou contexto que nao esteja indicado."
+                ),
+                language_instruction=self._language_instruction(),
+            )
+        )
+
+    def _record_writing_workflow_trace(self, task: PendingWritingTask) -> None:
+        if self._turn_trace is None:
+            return
+        self._turn_trace["writing_workflow_active"] = True
+        self._turn_trace["writing_task_type"] = task.task_type
+        self._turn_trace["writing_recipient_type"] = task.recipient_type
+        self._turn_trace["writing_project"] = task.project
+        self._turn_trace["writing_missing_fields"] = list(task.missing_fields)
+        self._turn_trace["response_grounded"] = True
+        self._turn_trace["grounding_sources"] = ["TRANSIENT_WORKFLOW"]
+
     def _quick_sites_for_fast_router(self) -> dict[str, str]:
         sites = load_quick_sites()
         default_email = str(self.desktop_config.get("default_email", "")).lower()
@@ -1160,13 +1306,93 @@ class AssistantEngine:
             self._turn_trace["grounding_sources"] = ["CONTEXT_OBSERVER"]
         return result.response
 
+    def _try_system_context_status(self, user_message: str) -> str | None:
+        text = _normalize_text(user_message).strip(" .,!?:;")
+        if not _asks_system_context_status(text):
+            return None
+
+        history_count = len(self.memory.load()) if self.presence.can_store_memory() else 0
+        has_persistent_memory = _has_persistent_memory_data(self.long_term_memory)
+        observer_available = self.context_observer is not None
+        snapshot_available = False
+        if self.context_observer is not None:
+            latest_snapshot = getattr(self.context_observer, "latest_snapshot", None)
+            if callable(latest_snapshot):
+                snapshot_available = latest_snapshot() is not None
+
+        workflow_bits: list[str] = []
+        if self._pending_writing_task is not None:
+            workflow_bits.append("um pedido de escrita em curso")
+        if self._pending_document_task is not None:
+            workflow_bits.append("uma tarefa de documento em curso")
+        if self.agent.has_pending_confirmation():
+            workflow_bits.append("uma acao pendente de confirmacao")
+
+        lines = ["Sim. O que tenho neste momento é isto:"]
+        lines.append(f"- histórico desta conversa: {'ativo' if history_count else 'sem mensagens úteis nesta sessão'}")
+        lines.append(f"- memória permanente: {'ativa' if has_persistent_memory else 'sem dados relevantes encontrados agora'}")
+        lines.append(f"- observação do computador: {'com snapshot disponível' if snapshot_available else 'sem dados suficientes neste momento'}")
+        if workflow_bits:
+            lines.append("- workflows transitórios: " + ", ".join(workflow_bits))
+        else:
+            lines.append("- workflows transitórios: nenhum pedido em curso")
+        if observer_available and not snapshot_available:
+            lines.append("Consigo tentar observar o computador, mas posso não ter dados suficientes ainda.")
+
+        if self._turn_trace is not None:
+            self._turn_trace["response_grounded"] = True
+            self._turn_trace["grounding_sources"] = ["SYSTEM_STATE"]
+        return "\n".join(lines)
+
+    def _try_application_activity_query(self, user_message: str) -> str | None:
+        app_name = _extract_application_activity_name(user_message)
+        if not app_name:
+            return None
+        self._last_fast_tools_used = ("get_application_activity",)
+        if self.context_observer is None:
+            if self._turn_trace is not None:
+                self._turn_trace["response_grounded"] = False
+                self._turn_trace["grounding_sources"] = []
+            return "Neste momento não tenho acesso a essa informação."
+
+        snapshot = _fresh_or_latest_context_snapshot(self.context_observer)
+        if snapshot is None:
+            if self._turn_trace is not None:
+                self._turn_trace["response_grounded"] = False
+                self._turn_trace["grounding_sources"] = []
+            return "Consigo tentar observar o computador, mas ainda não tenho dados suficientes. Experimenta mudar de janela ou aguardar alguns segundos."
+
+        result = _application_activity_from_snapshot(snapshot, app_name)
+        if self._turn_trace is not None:
+            self._turn_trace["response_grounded"] = bool(result["application_found"])
+            self._turn_trace["grounding_sources"] = ["CONTEXT_OBSERVER"] if result["application_found"] else []
+        if not result["application_found"]:
+            return f"Não detetei {result['application_name']} aberto neste momento."
+        titles = list(result["window_titles"])
+        active_text = " Está ativa agora." if result["active"] else ""
+        if not titles:
+            return f"Detetei que {result['application_name']} está aberto, mas não consigo determinar com segurança o que estás a fazer nele.{active_text}"
+        title_text = "; ".join(titles[:3])
+        return (
+            f"Detetei que {result['application_name']} está aberto.{active_text} "
+            f"Vejo estas janelas: {title_text}. "
+            "Não consigo determinar com segurança o conteúdo exato sem mais contexto."
+        )
+
     def _try_document_task(self, user_message: str) -> str | None:
         if not self.presence.can_use_tools():
             return None
         normalized = _normalize_text(user_message)
+        if _looks_like_document_context_clear(normalized):
+            self._active_document_context = None
+            self._pending_document_task = None
+            return None
         pending_response = self._try_pending_document_task(user_message, normalized)
         if pending_response is not None:
             return pending_response
+        active_response = self._try_active_document_followup(user_message, normalized)
+        if active_response is not None:
+            return active_response
         request = _parse_document_task_request(user_message)
         if not _looks_like_document_task(normalized, request):
             return None
@@ -1189,6 +1415,8 @@ class AssistantEngine:
                 return "Claro. Que texto queres guardar nesse ficheiro?"
             self._pending_document_task = {
                 "requested_output": output_name,
+                "document_requested_output": request.requested_output,
+                "document_action": request.action,
                 "output_format": request.output_format or "",
                 "recipient": request.recipient or "",
                 "requested_actions": request.actions,
@@ -1209,6 +1437,8 @@ class AssistantEngine:
         if not candidates:
             self._pending_document_task = {
                 "requested_output": output_name,
+                "document_requested_output": request.requested_output,
+                "document_action": request.action,
                 "output_format": request.output_format or "",
                 "recipient": request.recipient or "",
                 "requested_actions": request.actions,
@@ -1223,6 +1453,8 @@ class AssistantEngine:
             names = "\n".join(f"- {path.name}" for path in candidates[:8])
             self._pending_document_task = {
                 "requested_output": output_name or "",
+                "document_requested_output": request.requested_output,
+                "document_action": request.action,
                 "output_format": request.output_format or "",
                 "recipient": request.recipient or "",
                 "requested_actions": request.actions,
@@ -1245,6 +1477,8 @@ class AssistantEngine:
             self._pending_document_task = None
             self._last_fast_tools_used = ()
             return "Está bem, não criei nada."
+        if pending.get("current_step") == "read_completed":
+            return None
         if pending.get("current_step") == "awaiting_content":
             output = str(pending.get("requested_output") or "")
             self._pending_document_task = None
@@ -1304,6 +1538,87 @@ class AssistantEngine:
             return self._run_document_task_with_file(choice, request, "choice")
         return None
 
+    def _try_active_document_followup(self, user_message: str, normalized: str) -> str | None:
+        context = self._active_document_context
+        if context is None:
+            return None
+        action = _active_document_followup_action(normalized)
+        if not action:
+            return None
+        refresh_result = self._refresh_active_document_context(context)
+        if refresh_result is None:
+            self._active_document_context = None
+            return "Não consegui voltar a aceder ao documento anterior na workspace."
+        context, reloaded = refresh_result
+        context.last_action = action
+        context.current_document_task = action
+        context.ttl = 8
+        self._active_document_context = context
+        files_used = [_document_context_file_used(context, match_type="active_context")]
+
+        if action in {"display", "read"}:
+            self._last_fast_tools_used = ("read_workspace_document",) if reloaded else ()
+            self._record_document_trace(
+                found=True,
+                files_used=files_used,
+                output_created=False,
+                document_action=action,
+                active_document=context,
+                context_reused=not reloaded,
+            )
+            return f"Aqui está outra vez o conteúdo de '{context.resolved_file}':\n\n{_truncate_document_content(context.content)}"
+
+        request = DocumentTaskRequest(
+            source_files=[context.resolved_file],
+            actions=["read_source", action],
+            instructions=user_message,
+            action=action,
+            requested_output=_requested_output_for_document_action(action),
+        )
+        self._last_fast_tools_used = ("read_workspace_document",) if reloaded else ()
+        self._record_document_trace(
+            found=True,
+            files_used=files_used,
+            output_created=False,
+            document_action=action,
+            active_document=context,
+            context_reused=not reloaded,
+        )
+        return self.response_composer.compose(
+            ComposerRequest(
+                intent=f"document_{action}",
+                user_message=_active_document_followup_prompt(request, context),
+                history=[],
+                facts=[
+                    f"Documento ativo: {context.resolved_file}.",
+                    f"Tipo detetado: {context.detected_content_type}.",
+                    "Usa apenas o conteúdo real do documento ativo.",
+                    "Não afirmes que vais ler, abrir ou pesquisar; o conteúdo já está disponível.",
+                ],
+                fallback="Consigo analisar o documento, mas preciso de me basear apenas no texto que li.",
+                language_instruction=self._language_instruction(),
+            )
+        )
+
+    def _refresh_active_document_context(self, context: ActiveDocumentContext) -> tuple[ActiveDocumentContext, bool] | None:
+        path = (self.workspace_path / context.resolved_file).resolve()
+        try:
+            path.relative_to(self.workspace_path.resolve())
+        except ValueError:
+            return None
+        if not path.exists() or not path.is_file():
+            return None
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        if stat.st_mtime_ns == context.mtime_ns and stat.st_size == context.file_size:
+            return context, False
+        read_result = read_workspace_file_content(context.resolved_file, self.workspace_path)
+        if read_result.error is not None or not read_result.content.strip():
+            return None
+        return _build_active_document_context(read_result.filename, read_result.content, self.workspace_path, context.last_action), True
+
     def _run_document_task_with_file(self, filename: str, request: DocumentTaskRequest, match_type: str = "exact") -> str:
         read_result = read_workspace_file_content(filename, self.workspace_path)
         files_used = [
@@ -1323,11 +1638,35 @@ class AssistantEngine:
             self._record_document_trace(found=True, files_used=files_used, output_created=False)
             return f"O ficheiro '{read_result.filename}' está vazio ou não tem texto extraível."
 
+        active_context = _build_active_document_context(
+            read_result.filename,
+            read_result.content,
+            self.workspace_path,
+            request.action or ("summarize" if "summarize" in request.actions else "read"),
+        )
+        self._active_document_context = active_context
         normalized = _normalize_text(request.instructions)
-        if _asks_to_read_file(normalized) and not _looks_like_summary_or_email(normalized) and not request.output_file:
+        full_contents_requested = request.requested_output == "full_contents" or _asks_to_read_file(normalized)
+        if full_contents_requested and not _looks_like_summary_or_email(normalized) and not request.output_file:
             self._last_fast_tools_used = ("workspace_search", "read_workspace_document")
-            self._record_document_trace(found=True, files_used=files_used, output_created=False)
-            return f"Li '{read_result.filename}'.\n\n{_truncate_document_content(read_result.content)}"
+            self._record_document_trace(
+                found=True,
+                files_used=files_used,
+                output_created=False,
+                document_action="read",
+                active_document=active_context,
+                context_reused=False,
+            )
+            self._pending_document_task = {
+                "source_file": read_result.filename,
+                "resolved_file": read_result.filename,
+                "document_requested_output": "full_contents",
+                "document_action": "read",
+                "requested_actions": ["locate_source", "read_source"],
+                "current_step": "read_completed",
+                "last_read_content_reference": read_result.filename,
+            }
+            return f"Aqui está o conteúdo de '{read_result.filename}':\n\n{_truncate_document_content(read_result.content)}"
 
         composed = self.response_composer.compose(
             ComposerRequest(
@@ -1344,7 +1683,15 @@ class AssistantEngine:
             )
         )
         self._last_fast_tools_used = ("workspace_search", "read_workspace_document")
-        self._record_document_trace(found=True, files_used=files_used, output_created=False)
+        document_action = request.action or ("summarize" if "summarize" in request.actions else "read")
+        self._record_document_trace(
+            found=True,
+            files_used=files_used,
+            output_created=False,
+            document_action=document_action,
+            active_document=active_context,
+            context_reused=False,
+        )
 
         if request.output_file:
             return self._create_workspace_txt(
@@ -1394,6 +1741,9 @@ class AssistantEngine:
         files_used: list[dict[str, object]],
         output_created: bool,
         output_file_path: str = "",
+        document_action: str = "",
+        active_document: ActiveDocumentContext | None = None,
+        context_reused: bool = False,
     ) -> None:
         if self._turn_trace is None:
             return
@@ -1403,6 +1753,12 @@ class AssistantEngine:
         self._turn_trace["workspace_files_used"] = files_used
         self._turn_trace["output_file_created"] = bool(output_created)
         self._turn_trace["output_file_path"] = output_file_path
+        context = active_document or self._active_document_context
+        self._turn_trace["active_document"] = bool(context)
+        self._turn_trace["active_document_name"] = context.resolved_file if context else ""
+        self._turn_trace["document_action"] = document_action or (context.last_action if context else "")
+        self._turn_trace["document_context_reused"] = bool(context_reused)
+        self._turn_trace["document_grounded"] = bool(found)
 
     def _fast_agent_context(self) -> AgentContext:
         return AgentContext(
@@ -1453,6 +1809,18 @@ class AssistantEngine:
             return "Boa noite."
         if text in {"obrigado", "obrigada", "muito obrigado", "muito obrigada"}:
             return "De nada."
+        if text in {"ok obrigado", "ok obrigada", "esta bem obrigado", "estÃ¡ bem obrigado"}:
+            return "De nada."
+        if text in {"estas ai", "estÃ¡s ai", "estas aÃ­", "estÃ¡s aÃ­"}:
+            return "Sim, estou aqui."
+        if text in {"como te chamas", "qual e o teu nome", "qual Ã© o teu nome"}:
+            return "Chamo-me Echo."
+        if "cor preferida" in text:
+            if any(marker in text for marker in ("irma de 7 anos", "irmÃ£ de 7 anos", "crianca", "crianÃ§a")):
+                return "Eu escolhia azul, porque parece a cor das minhas luzes."
+            return "Se tivesse de escolher uma, dizia azul — combina comigo."
+        if "clube" in text and any(marker in text for marker in ("qual", "tens", "preferido")):
+            return "Não tenho clube, mas posso escolher um só para brincar contigo."
         return "Estou bem. E tu?"
 
     def _try_casual_social_share(self, user_message: str) -> str | None:
@@ -1867,6 +2235,7 @@ class AssistantEngine:
             "final_response": final_response,
             "selected_path": selected_path,
             "response_source": response_source,
+            "final_response_source": self._turn_trace.get("final_response_source") or response_source,
             "configured_model_mode": configured_mode,
             "configured_model_mode_source": configured_source,
             "execution_path": execution_path,
@@ -1900,6 +2269,7 @@ class AssistantEngine:
             "llm_call_sources": turn_sources,
             "llm_call_details": llm_call_details,
             "tools_used": list(tools_used),
+            "memory_route": selected_path if selected_path in ("MEMORY_WRITE", "MEMORY_RECALL") else "NONE",
             "memory_recall_detected": bool(self._turn_trace.get("memory_recall_detected")),
             "selected_memory_ids": self._turn_trace.get("selected_memory_ids") or [],
             "persistent_memory_matches": self._turn_trace.get("persistent_memory_matches"),
@@ -1910,6 +2280,11 @@ class AssistantEngine:
             "workspace_files_used": self._turn_trace.get("workspace_files_used") or [],
             "output_file_created": self._turn_trace.get("output_file_created"),
             "output_file_path": self._turn_trace.get("output_file_path") or "",
+            "active_document": bool(self._turn_trace.get("active_document")),
+            "active_document_name": self._turn_trace.get("active_document_name") or "",
+            "document_action": self._turn_trace.get("document_action") or "",
+            "document_context_reused": bool(self._turn_trace.get("document_context_reused")),
+            "document_grounded": bool(self._turn_trace.get("document_grounded")),
             "response_grounded": self._turn_trace.get("response_grounded"),
             "unsupported_tool_claim_detected": bool(self._turn_trace.get("unsupported_tool_claim_detected")),
             "unsupported_memory_claim_detected": bool(self._turn_trace.get("unsupported_memory_claim_detected")),
@@ -1923,6 +2298,11 @@ class AssistantEngine:
             "agent_route_confidence": self._turn_trace.get("agent_route_confidence"),
             "exception_type": self._turn_trace.get("exception_type"),
             "exception_message": self._turn_trace.get("exception_message"),
+            "writing_workflow_active": bool(self._turn_trace.get("writing_workflow_active")),
+            "writing_task_type": self._turn_trace.get("writing_task_type") or "",
+            "writing_recipient_type": self._turn_trace.get("writing_recipient_type") or "",
+            "writing_project": self._turn_trace.get("writing_project") or "",
+            "writing_missing_fields": self._turn_trace.get("writing_missing_fields") or [],
         }
         self._turn_trace = None
 
@@ -3368,8 +3748,23 @@ def is_pure_social_turn(message: str) -> bool:
         "boa noite",
         "obrigado",
         "obrigada",
+        "ok obrigado",
+        "ok obrigada",
+        "esta bem obrigado",
+        "estÃ¡ bem obrigado",
         "muito obrigado",
         "muito obrigada",
+        "estas ai",
+        "estÃ¡s ai",
+        "estas aÃ­",
+        "estÃ¡s aÃ­",
+        "como te chamas",
+        "qual e o teu nome",
+        "qual Ã© o teu nome",
+        "qual e a tua cor preferida",
+        "qual Ã© a tua cor preferida",
+        "e a minha irma de 7 anos a perguntar a tua cor preferida",
+        "Ã© a minha irmÃ£ de 7 anos a perguntar a tua cor preferida",
         "como estas",
         "como estás",
         "tudo bem",
@@ -3642,6 +4037,10 @@ def _execution_path_for_turn(selected_path: str, response_source: str, llm_calls
         return "social_fast_path"
     if path == "SYSTEM_DATETIME":
         return "system_datetime"
+    if path == "SYSTEM_CONTEXT_STATUS":
+        return "system_context_status"
+    if path == "WRITING_TASK":
+        return "writing_workflow"
     if "MEMORY" in path:
         return "memory_recall"
     if path == "DOCUMENT_TASK":
@@ -3731,7 +4130,9 @@ def _local_reason_code_for_path(selected_path: str) -> str:
     mapping = {
         "SOCIAL_PATH": "social_fast_path",
         "SYSTEM_DATETIME": "system_datetime",
+        "SYSTEM_CONTEXT_STATUS": "system_context_status",
         "SYSTEM_STATUS": "system_status",
+        "WRITING_TASK": "writing_workflow",
         "DOCUMENT_TASK": "local_tool",
         "TOOL_PATH": "local_tool",
         "FAST_ROUTE": "fast_route",
@@ -3746,7 +4147,9 @@ def _local_reason_label(reason_code: str) -> str:
     labels = {
         "social_fast_path": "Social fast path",
         "system_datetime": "System datetime",
+        "system_context_status": "System context status",
         "system_status": "System status",
+        "writing_workflow": "Writing workflow",
         "local_tool": "Local tool",
         "fast_route": "Fast route",
         "memory_command": "Memory command",
@@ -3910,6 +4313,9 @@ class DocumentTaskRequest:
     actions: list[str] = field(default_factory=list)
     output_format: str | None = None
     instructions: str = ""
+    action: str = ""
+    requested_output: str = ""
+    needs_clarification: bool = False
 
 
 @dataclass
@@ -3925,10 +4331,48 @@ def _looks_like_document_task(text: str, request: DocumentTaskRequest | None = N
     has_document_name = bool(request.source_files) or any(ext in text for ext in DOCUMENT_EXTENSIONS)
     has_file_action = bool(request.actions) or _looks_like_read_or_summary(text) or _looks_like_create_file_task(text)
     return (
+        bool(request.action and (request.source_files or request.needs_clarification))
+        or bool(request.source_files and request.action in {"read", "display", "summarize", "create"})
+        or bool(request.source_files and request.requested_output == "full_contents")
+        or bool(request.needs_clarification and request.action in {"read", "display"})
+        or
         (has_document_name and has_file_action)
         or "ficheiro" in text and any(word in text for word in ("resume", "resumo", "ler ", "le ", "lê ", "cria", "guarda"))
         or _looks_like_create_file_task(text)
         or "workspace" in text and any(word in text for word in ("notas", "ficheiros", "documentos", "usa"))
+    )
+
+
+def _detect_document_intent(message: str, output_file: str = "") -> DocumentIntent:
+    text = str(message or "")
+    normalized = _normalize_text(text).strip(" .,!?:;")
+    action = ""
+    requested_output = ""
+
+    if _looks_like_create_file_task(normalized):
+        action = "create"
+        requested_output = "transformed_content"
+    elif re.search(r"\b(?:resume|resumir|resumo|sintetiza|síntese|sintese)\b", normalized):
+        action = "summarize"
+        requested_output = "summary"
+    elif _looks_like_full_document_read(normalized):
+        action = "read"
+        requested_output = "full_contents"
+    elif _looks_like_document_read_verb(normalized):
+        action = "read"
+        requested_output = "full_contents"
+
+    file_reference = _extract_semantic_file_reference(text, output_file=output_file)
+    needs_clarification = bool(
+        action in {"read", "display", "summarize"}
+        and not file_reference
+        and _looks_like_document_reference_context(normalized)
+    )
+    return DocumentIntent(
+        action=action,
+        file_reference=file_reference,
+        requested_output=requested_output,
+        needs_clarification=needs_clarification,
     )
 
 
@@ -3937,12 +4381,21 @@ def _parse_document_task_request(message: str) -> DocumentTaskRequest:
     normalized = _normalize_text(text)
     actions = _document_actions(normalized, _looks_like_create_file_task(normalized))
     output_file = _extract_output_txt_filename(text)
+    intent = _detect_document_intent(text, output_file=output_file)
     output_format = _extract_output_format(normalized)
     recipient = _extract_recipient(text)
     source_files = _extract_source_files(text, output_file)
+    if intent.file_reference and intent.file_reference not in source_files:
+        source_files.insert(0, intent.file_reference)
+    if intent.action in {"read", "display"}:
+        for action in ("locate_source", "read_source"):
+            if action not in actions:
+                actions.append(action)
+    if intent.action == "summarize" and "summarize" not in actions:
+        actions.append("summarize")
     if output_file and "write_output" not in actions:
         actions.append("write_output")
-    if recipient and "compose_email" not in actions and any(word in normalized for word in ("email", "mail")):
+    if recipient and "compose_email" not in actions and _explicit_email_composition_request(normalized):
         actions.append("compose_email")
     return DocumentTaskRequest(
         source_files=source_files,
@@ -3951,6 +4404,9 @@ def _parse_document_task_request(message: str) -> DocumentTaskRequest:
         actions=actions,
         output_format=output_format or None,
         instructions=text,
+        action=intent.action,
+        requested_output=intent.requested_output,
+        needs_clarification=intent.needs_clarification,
     )
 
 
@@ -3960,6 +4416,8 @@ def _document_request_from_pending(pending: dict[str, object], message: str) -> 
     output = parsed.output_file or str(pending.get("requested_output") or "") or None
     recipient = parsed.recipient or str(pending.get("recipient") or "") or None
     output_format = parsed.output_format or str(pending.get("output_format") or "") or None
+    requested_output = parsed.requested_output or str(pending.get("document_requested_output") or "")
+    action = parsed.action or str(pending.get("document_action") or "")
     actions = [str(item) for item in pending.get("requested_actions", []) if item]
     for action in parsed.actions:
         if action not in actions:
@@ -3974,14 +4432,18 @@ def _document_request_from_pending(pending: dict[str, object], message: str) -> 
         actions=actions,
         output_format=output_format,
         instructions=instructions or message,
+        action=action,
+        requested_output=requested_output,
+        needs_clarification=parsed.needs_clarification,
     )
 
 
 def _looks_like_read_or_summary(text: str) -> bool:
     return (
-        any(word in text for word in ("resume", "resumo", "resumir", "sintese", "síntese", "email", "mail"))
-        or bool(re.search(r"\b(l[eê]|ler)\b", text))
-        or ("mostra" in text and any(word in text for word in ("conteudo", "conteúdo", "documento", "ficheiro")))
+        _explicit_summary_request(text)
+        or _explicit_email_composition_request(text)
+        or _looks_like_document_read_verb(text)
+        or _looks_like_full_document_read(text)
     )
 
 
@@ -3990,11 +4452,60 @@ def _looks_like_create_file_task(text: str) -> bool:
 
 
 def _asks_to_read_file(text: str) -> bool:
-    return bool(re.search(r"\b(l[eê]|ler)\b", text)) or any(word in text for word in ("mostra o conteudo", "mostra o conteúdo"))
+    return _looks_like_document_read_verb(text) or _looks_like_full_document_read(text)
 
 
 def _looks_like_summary_or_email(text: str) -> bool:
-    return any(word in text for word in ("resume", "resumo", "email", "mail", "mensagem", "sintese", "síntese"))
+    return _explicit_summary_request(text) or _explicit_email_composition_request(text)
+
+
+def _explicit_summary_request(text: str) -> bool:
+    normalized = _normalize_text(text)
+    return bool(re.search(r"\b(?:resume|resumir|resumo|sintese|síntese|sintetiza)\b", normalized))
+
+
+def _explicit_email_composition_request(text: str) -> bool:
+    normalized = _normalize_text(text)
+    return bool(
+        re.search(r"\b(?:escreve|redige|prepara|cria|faz|compoe|compõe)\b.{0,60}\b(?:email|e-mail|mail|mensagem)\b", normalized)
+        or re.search(r"\b(?:email|e-mail|mail|mensagem)\b.{0,60}\b(?:para enviar|a enviar|ao professor|à professora|a professora)\b", normalized)
+    )
+
+
+def _looks_like_document_read_verb(text: str) -> bool:
+    normalized = _normalize_text(text)
+    return bool(
+        re.search(r"\b(?:le|ler|leias|lê|leres)\b", normalized)
+        or re.search(r"\b(?:abre|abrir)\b.{0,40}\b(?:documento|ficheiro|pdf|docx|txt|md)\b", normalized)
+        or "quero ver" in normalized
+    )
+
+
+def _looks_like_full_document_read(text: str) -> bool:
+    normalized = _normalize_text(text)
+    markers = (
+        "diz me o que esta",
+        "diz-me o que esta",
+        "o que esta escrito",
+        "o que la esta escrito",
+        "conteudo completo",
+        "conteudo integral",
+        "na integra",
+        "na íntegra",
+        "mostra tudo",
+        "mostra me o conteudo",
+        "mostra-me o conteudo",
+        "mostra o conteudo",
+        "exatamente o que la esta",
+        "exactamente o que la esta",
+        "nao resumas",
+        "não resumas",
+    )
+    return any(marker in normalized for marker in markers)
+
+
+def _looks_like_document_reference_context(text: str) -> bool:
+    return any(marker in text for marker in ("ficheiro", "documento", "pdf", "docx", "txt", "workspace"))
 
 
 def _looks_like_direct_create_after_document(text: str) -> bool:
@@ -4007,7 +4518,7 @@ def _document_actions(text: str, has_output: bool) -> list[str]:
         actions.extend(["locate_source", "read_source"])
     if _looks_like_summary_or_email(text):
         actions.append("summarize")
-    if any(word in text for word in ("email", "mail")):
+    if _explicit_email_composition_request(text):
         actions.append("compose_email")
     if has_output or _looks_like_create_file_task(text):
         actions.append("write_output")
@@ -4039,6 +4550,50 @@ def _extract_recipient(message: str) -> str:
     if _normalize_text(name) in {"workspace", "pdf", "ficheiro", "documento"}:
         return ""
     return name
+
+
+def _extract_semantic_file_reference(message: str, output_file: str = "") -> str:
+    text = str(message or "")
+    if _contains_path_traversal(text):
+        return "../"
+    output_norm = _normalize_text(output_file)
+    explicit = _extract_workspace_filename(text)
+    if (
+        explicit
+        and (not output_norm or _normalize_text(explicit) != output_norm)
+        and _semantic_file_reference_is_plausible(explicit)
+    ):
+        return explicit
+
+    patterns = (
+        r"\b(?:documento|ficheiro|arquivo)\s+(.+?)(?:\s+(?:e|para|com|que|na|no)\b|$)",
+        r"\b(?:o que est[áa]\s+(?:l[áa]\s+)?escrito\s+(?:em|no|na))\s+(.+?)(?:\s|$)",
+        r"\b(?:conte[úu]do\s+(?:de|do|da))\s+(.+?)(?:\s|$)",
+        r"\b(?:quero ver|mostra(?:-me)?|l[êe]|ler|leias)\s+(.+?)(?:\s+(?:na íntegra|na integra|completo|todo|tudo)\b|$)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        candidate = _clean_filename_fragment(match.group(1))
+        if output_norm and _normalize_text(candidate) == output_norm:
+            continue
+        if candidate and not _is_output_format_token(candidate) and _semantic_file_reference_is_plausible(candidate):
+            return candidate
+    return ""
+
+
+def _semantic_file_reference_is_plausible(candidate: str) -> bool:
+    normalized = _normalize_text(candidate).strip(" .,!?:;")
+    if not normalized:
+        return False
+    if normalized in {"conteudo", "conteudo completo", "tudo", "integra", "na integra"}:
+        return False
+    if normalized.startswith(("e guarda", "guarda em", "guardar em", "grava em", "e grava")):
+        return False
+    if len(normalized.split()) > 8:
+        return False
+    return True
 
 
 def _extract_source_files(message: str, output_file: str = "") -> list[str]:
@@ -4265,6 +4820,142 @@ def _is_positive_document_confirmation(text: str) -> bool:
     return normalized in {"sim", "s", "ok", "okay", "claro", "podes criar", "cria", "criar", "esse mesmo", "pode ser"}
 
 
+def _looks_like_document_full_content_followup(text: str) -> bool:
+    normalized = _normalize_text(text).strip(" .!?")
+    return (
+        _is_positive_document_confirmation(normalized)
+        or _looks_like_full_document_read(normalized)
+        or normalized in {"continua", "mostra tudo", "sim esse", "sim esse mesmo", "esse", "esse mesmo"}
+    )
+
+
+def _looks_like_document_context_clear(text: str) -> bool:
+    normalized = _normalize_text(text).strip(" .!?")
+    return any(
+        marker in normalized
+        for marker in (
+            "vamos falar de outra coisa",
+            "muda de assunto",
+            "esquece o documento",
+            "fecha o documento",
+            "deixa o documento",
+        )
+    )
+
+
+def _active_document_followup_action(text: str) -> str:
+    normalized = _normalize_text(text).strip(" .!?")
+    if not normalized:
+        return ""
+    if any(marker in normalized for marker in ("que horas sao", "que horas são", "que dia e", "que dia é", "abre o calendario", "abre o calendário")):
+        return ""
+    if any(marker in normalized for marker in ("mostra outra vez", "mostra tudo", "conteudo completo", "conteúdo completo", "na integra", "na íntegra", "nao resumas", "não resumas")):
+        return "display"
+    if any(marker in normalized for marker in ("sugeres alguma alteracao", "sugeres alguma alteração", "alguma alteracao", "alguma alteração", "o que mudavas", "revê", "reve", "review")):
+        return "review"
+    if any(marker in normalized for marker in ("interpreta", "analisa", "o que quer dizer", "diz me tu", "diz-me tu")):
+        return "interpret"
+    if any(marker in normalized for marker in ("resume melhor", "faz um resumo", "resumo melhor", "sintetiza")):
+        return "summarize"
+    if any(marker in normalized for marker in ("torna mais formal", "corrige o portugues", "corrige o português", "reescreve", "reescreve isto")):
+        return "rewrite"
+    if normalized.startswith(("voltando ao email", "voltando ao documento", "sobre o email", "sobre o documento")):
+        return "review"
+    return ""
+
+
+def _requested_output_for_document_action(action: str) -> str:
+    return {
+        "review": "selected_section",
+        "interpret": "metadata",
+        "summarize": "summary",
+        "rewrite": "transformed_content",
+        "display": "full_contents",
+        "read": "full_contents",
+    }.get(action, "transformed_content")
+
+
+def _build_active_document_context(
+    filename: str,
+    content: str,
+    workspace_path: Path,
+    last_action: str,
+) -> ActiveDocumentContext:
+    path = (workspace_path / filename).resolve()
+    try:
+        stat = path.stat()
+        mtime_ns = stat.st_mtime_ns
+        file_size = stat.st_size
+    except OSError:
+        mtime_ns = 0
+        file_size = 0
+    file_type = Path(filename).suffix.lower().lstrip(".")
+    digest = hashlib.sha256(str(content or "").encode("utf-8", errors="replace")).hexdigest()
+    detected_type = _detect_document_content_type(content, filename)
+    return ActiveDocumentContext(
+        resolved_file=filename,
+        file_type=file_type,
+        content_reference=filename,
+        content_hash=digest,
+        content_length=len(content or ""),
+        file_size=file_size,
+        detected_content_type=detected_type,
+        last_action=last_action,
+        current_document_task=last_action,
+        available_followups=["display", "summarize", "interpret", "review", "rewrite"],
+        mtime_ns=mtime_ns,
+        content=content,
+        ttl=8,
+    )
+
+
+def _detect_document_content_type(content: str, filename: str = "") -> str:
+    normalized = _normalize_text(f"{filename}\n{content}")
+    if any(marker in normalized for marker in ("assunto:", "ola ", "olá ", "cumprimentos", "segue em anexo")):
+        return "email"
+    if any(marker in normalized for marker in ("ata", "reuniao", "reunião", "direcao", "direção")):
+        return "meeting_notes"
+    return "document"
+
+
+def _document_context_file_used(context: ActiveDocumentContext, match_type: str) -> dict[str, object]:
+    return {
+        "name": context.resolved_file,
+        "type": context.file_type,
+        "read_success": bool(context.content.strip()),
+        "match_type": match_type,
+        "content_hash": context.content_hash,
+        "content_length": context.content_length,
+        "file_size": context.file_size,
+    }
+
+
+def _active_document_followup_prompt(request: DocumentTaskRequest, context: ActiveDocumentContext) -> str:
+    action_guidance = {
+        "review": (
+            "Revê o documento ativo. Sugere alterações úteis de clareza, tom e estrutura. "
+            "Não peças destinatário ou propósito se eles forem inferíveis do conteúdo."
+        ),
+        "interpret": (
+            "Interpreta o documento ativo. Explica o que é, para quem parece ser, que assuntos aborda, "
+            "que pontos estão pendentes e que destaques existem."
+        ),
+        "summarize": "Resume o documento ativo com clareza e sem inventar contexto.",
+        "rewrite": "Reescreve o documento ativo conforme o pedido, mantendo apenas informação presente no texto.",
+    }.get(request.action, "Trabalha o documento ativo usando apenas o conteúdo fornecido.")
+    return (
+        f"Pedido do utilizador: {request.instructions}\n"
+        f"Ação documental: {request.action}\n"
+        f"Ficheiro ativo: {context.resolved_file}\n"
+        f"Tipo detetado: {context.detected_content_type}\n\n"
+        "Conteúdo real do documento:\n"
+        f"{_truncate_document_content(context.content, limit=12000)}\n\n"
+        f"{action_guidance}\n"
+        "Não menciones assuntos que não estejam no documento. "
+        "Não digas que vais começar a ler: responde diretamente com base no conteúdo acima."
+    )
+
+
 def _is_negative_confirmation(text: str) -> bool:
     normalized = _normalize_text(text).strip(" .!?")
     return normalized in {"nao", "não", "n", "cancela", "cancelar", "deixa estar", "esquece"}
@@ -4321,6 +5012,22 @@ _FALSE_TOOL_CLAIM_MARKERS = (
     "consultei o calendario",
     "consultei o calendário",
     "vi na agenda",
+    "estava a verificar as notas",
+    "estive a verificar as notas",
+    "verifiquei as notas",
+    "consultei as notas",
+    "estava a verificar os ficheiros",
+    "estive a verificar os ficheiros",
+    "ja estou a le-lo",
+    "ja estou a ler",
+    "vou ler agora",
+    "ja abri o ficheiro",
+    "aqui esta o conteudo",
+    "vou comecar a le-lo",
+    "vou começar a lê-lo",
+    "acho que vou ler outro documento",
+    "ja estou a analisa-lo",
+    "já estou a analisá-lo",
 )
 
 _FUTURE_PROMISE_MARKERS = (
@@ -5375,6 +6082,243 @@ def _writing_request_kind(message: str) -> str:
     ):
         return "summary"
     return ""
+
+
+def _looks_like_incomplete_writing_request(normalized_message: str) -> bool:
+    text = normalized_message.strip(" .,!?:;")
+    if not re.search(r"\b(?:preciso|quero|ajuda|ajuda-me|podes|consegues)\b", text):
+        return False
+    return any(marker in text for marker in ("escrever um email", "redigir um email", "preparar um email", "escrever uma mensagem"))
+
+
+def _looks_like_complete_writing_request(normalized_message: str) -> bool:
+    text = normalized_message.strip(" .,!?:;")
+    if not _writing_request_kind(text):
+        return False
+    return bool(re.search(r"\b(?:escreve|redige|prepara|cria)\b", text)) and (
+        " a " in f" {text} " or " para " in text or len(text.split()) >= 9
+    )
+
+
+def _looks_like_writing_followup(normalized_message: str, task: PendingWritingTask) -> bool:
+    text = normalized_message.strip(" .,!?:;")
+    if not text:
+        return False
+    if any(marker in text for marker in ("patrocinador", "professor", "cliente", "colega", "direcao", "direção")):
+        return True
+    if any(marker in text for marker in ("projeto", "projecto", "apoio", "financiamento", "parceria", "rever", "marcar", "pedir")):
+        return True
+    if task.current_step == "collecting_context" and len(text.split()) <= 14:
+        return True
+    return False
+
+
+def _asks_system_context_status(normalized_message: str) -> bool:
+    text = normalized_message.strip(" .,!?:;")
+    return any(
+        marker in text
+        for marker in (
+            "estas a guardar contexto",
+            "guardas contexto",
+            "guardas memoria",
+            "estas a guardar memoria",
+            "o que sabes sobre o que estou a fazer",
+            "o que observas do meu computador",
+            "consegues ver as aplicacoes abertas",
+            "consegues ver os programas abertos",
+            "que contexto tens agora",
+            "que informacao tens agora",
+        )
+    )
+
+
+def _has_persistent_memory_data(memory: object) -> bool:
+    finder = getattr(memory, "find_structured_facts", None)
+    if callable(finder):
+        try:
+            if finder():
+                return True
+        except Exception:
+            pass
+    search = getattr(memory, "search", None)
+    if callable(search):
+        try:
+            if search("", limit=1):
+                return True
+        except Exception:
+            pass
+    context_for = getattr(memory, "context_for", None)
+    if callable(context_for):
+        try:
+            return bool(str(context_for("contexto", limit=1) or "").strip())
+        except Exception:
+            pass
+    return False
+
+
+def _extract_application_activity_name(message: str) -> str:
+    text = _normalize_text(message)
+    if not any(marker in text for marker in ("o que", "que estou", "atividade", "fazer")):
+        return ""
+    app_aliases = {
+        "chrome": "Chrome",
+        "google chrome": "Chrome",
+        "edge": "Edge",
+        "firefox": "Firefox",
+        "vscode": "VS Code",
+        "vs code": "VS Code",
+        "visual studio code": "VS Code",
+        "codex": "Codex",
+        "teams": "Teams",
+        "outlook": "Outlook",
+        "discord": "Discord",
+    }
+    for alias, label in app_aliases.items():
+        if alias in text:
+            return label
+    return ""
+
+
+def _fresh_or_latest_context_snapshot(context_observer: object):
+    for method_name in ("observe_once", "capture_snapshot", "snapshot_now"):
+        method = getattr(context_observer, method_name, None)
+        if callable(method):
+            try:
+                snapshot = method()
+                if snapshot is not None:
+                    return snapshot
+            except Exception:
+                pass
+    for method_name in ("latest_snapshot", "last_snapshot"):
+        method = getattr(context_observer, method_name, None)
+        if callable(method):
+            try:
+                snapshot = method()
+                if snapshot is not None:
+                    return snapshot
+            except Exception:
+                pass
+    return None
+
+
+def _application_activity_from_snapshot(snapshot: object, application_name: str) -> dict[str, object]:
+    app_norm = _normalize_text(application_name)
+    windows = list(getattr(snapshot, "open_windows", ()) or ())
+    matching = [
+        window
+        for window in windows
+        if _window_matches_application(window, app_norm)
+    ]
+    active_app = str(getattr(snapshot, "active_app", "") or "")
+    active_window = str(getattr(snapshot, "active_window", "") or "")
+    active = app_norm in _normalize_text(active_app) or any(bool(getattr(window, "is_active", False)) for window in matching)
+    if not matching and (app_norm in _normalize_text(active_app) or app_norm in _normalize_text(active_window)):
+        matching = [type("ObservedWindow", (), {"title": active_window, "process_name": active_app, "is_active": True})()]
+        active = True
+    titles = [str(getattr(window, "title", "") or "").strip() for window in matching if str(getattr(window, "title", "") or "").strip()]
+    return {
+        "application_found": bool(matching),
+        "application_name": application_name,
+        "active": active,
+        "window_titles": titles,
+        "observed_activity": "",
+        "confidence": 0.55 if matching else 0.0,
+        "limitations": "Nao consigo ver o conteudo interno da aplicacao com seguranca.",
+    }
+
+
+def _window_matches_application(window: object, app_norm: str) -> bool:
+    process = _normalize_text(str(getattr(window, "process_name", "") or ""))
+    title = _normalize_text(str(getattr(window, "title", "") or ""))
+    if app_norm == "chrome":
+        return "chrome" in process or "google chrome" in title
+    if app_norm == "vs code":
+        return "code" in process or "visual studio code" in title or "vs code" in title
+    return app_norm in process or app_norm in title
+
+
+def _update_pending_writing_task(task: PendingWritingTask, message: str) -> None:
+    text = _normalize_text(message)
+    raw = str(message or "").strip()
+    if "email" in text or "e-mail" in text:
+        task.task_type = "compose_email"
+    if "professor" in text:
+        task.recipient_type = "professor"
+    elif "patrocinador" in text:
+        task.recipient_type = "potential_sponsor"
+    elif "cliente" in text:
+        task.recipient_type = "client"
+    elif "colega" in text:
+        task.recipient_type = "colleague"
+    if "potencial patrocinador" in text:
+        task.recipient_type = "potential_sponsor"
+    if "projeto" in text or "projecto" in text:
+        explicit = _extract_explicit_project_reference(raw)
+        task.project = explicit or "unknown"
+    if any(marker in text for marker in ("apoio", "financiamento", "patrocinio", "patrocínio")):
+        task.purpose = "pedir apoio"
+    elif re.search(r"\b(?:rever|revisao|revisão)\b", text):
+        task.purpose = "pedir revisão"
+    elif "projeto" in text or "projecto" in text:
+        task.subject = raw
+    if raw and raw not in task.known_facts:
+        task.known_facts.append(raw)
+
+
+def _extract_explicit_project_reference(message: str) -> str:
+    match = re.search(r"\bprojeto\s+([A-Za-z0-9_.-]+)\b", message, flags=re.IGNORECASE)
+    if match:
+        name = match.group(1).strip(" .,!?:;")
+        if _normalize_text(name) not in {"que", "em", "um", "uma", "este", "esse"}:
+            return name
+    normalized = _normalize_text(message)
+    if "assistenteia" in normalized:
+        return "AssistenteIA"
+    if "echo" in normalized:
+        return "Echo"
+    return ""
+
+
+def _missing_writing_fields(task: PendingWritingTask) -> list[str]:
+    missing: list[str] = []
+    if not task.recipient_type and not task.recipient:
+        missing.append("recipient")
+    if not task.purpose:
+        missing.append("purpose")
+    if task.project == "unknown" and task.recipient_type == "potential_sponsor":
+        missing.append("project")
+    return missing[:2]
+
+
+def _writing_workflow_question(task: PendingWritingTask) -> str:
+    missing = set(task.missing_fields)
+    if {"project", "purpose"}.issubset(missing):
+        return "Qual é o projeto e que tipo de apoio queres pedir?"
+    if "recipient" in missing:
+        return "Para quem é o email?"
+    if "project" in missing:
+        return "Qual é o projeto?"
+    if "purpose" in missing:
+        return "O que queres pedir ou transmitir nesse email?"
+    return "Queres que eu escreva uma primeira versão?"
+
+
+def _writing_task_prompt(task: PendingWritingTask) -> str:
+    facts = "\n".join(f"- {fact}" for fact in task.known_facts)
+    return (
+        "Escreve um email com estes dados recolhidos:\n"
+        f"tipo={task.task_type}\n"
+        f"destinatario_tipo={task.recipient_type or 'unknown'}\n"
+        f"projeto={task.project}\n"
+        f"objetivo={task.purpose or task.subject or 'unknown'}\n"
+        f"factos:\n{facts}"
+    )
+
+
+def _writing_task_local_fallback(task: PendingWritingTask) -> str:
+    recipient = "Olá," if not task.recipient else f"Olá {task.recipient},"
+    subject = task.subject or task.purpose or "Pedido"
+    return f"Assunto: {subject}\n\n{recipient}\n\nEscrevo-te sobre este tema para percebermos a melhor forma de avançar.\n\nAlexandre"
 
 
 def _looks_like_complete_text_summary_request(message: str) -> bool:
