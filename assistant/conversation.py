@@ -1698,24 +1698,49 @@ class AssistantEngine:
                 requested_output=_requested_output_for_document_action(action),
             )
             self._last_fast_tools_used = ("read_workspace_document",) if reloaded else ()
-            composed = self.response_composer.compose(
-                ComposerRequest(
-                    intent="document_rewrite",
-                    user_message=_active_document_followup_prompt(request, context),
-                    history=[],
-                    facts=[
-                        f"Documento ativo: {context.resolved_file}.",
-                        f"Tipo detetado: {context.detected_content_type}.",
-                        "Usa apenas o conteúdo real do documento ativo.",
-                        "Devolve o texto reescrito na íntegra, pronto a substituir o original.",
-                        "Não afirmes que vais ler, abrir ou pesquisar; o conteúdo já está disponível.",
-                        "Não digas que já guardaste ou substituíste o ficheiro; ainda não foi guardado.",
-                    ],
-                    fallback="Consigo reescrever o documento, mas preciso de me basear apenas no texto que li.",
-                    language_instruction=self._language_instruction(),
+            original_content = context.content
+
+            def _compose_rewrite(prompt: str) -> str:
+                return self.response_composer.compose(
+                    ComposerRequest(
+                        intent="document_rewrite",
+                        user_message=prompt,
+                        history=[],
+                        facts=[
+                            f"Documento ativo: {context.resolved_file}.",
+                            f"Tipo detetado: {context.detected_content_type}.",
+                        ],
+                        fallback="Consigo reescrever o documento, mas preciso de me basear apenas no texto que li.",
+                        language_instruction=self._language_instruction(),
+                    )
                 )
-            )
-            context.draft_content = composed
+
+            attempt = _compose_rewrite(_document_rewrite_prompt(request, context))
+            valid, reason = _validate_rewrite_draft(original_content, attempt)
+            regenerated = False
+            if not valid:
+                regenerated = True
+                correction_prompt = _document_rewrite_correction_prompt(request, context, attempt, reason)
+                attempt = _compose_rewrite(correction_prompt)
+                valid, reason = _validate_rewrite_draft(original_content, attempt)
+
+            if not valid:
+                self._record_document_trace(
+                    found=True, files_used=files_used, output_created=False,
+                    document_action=action, active_document=context, context_reused=not reloaded,
+                    draft_validation_failed=True,
+                    draft_regeneration_attempted=regenerated,
+                    draft_validation_reason=reason,
+                    draft_original_length=len(original_content),
+                    draft_generated_length=len(attempt),
+                )
+                return (
+                    "Não consegui gerar uma versão reescrita completa e fiável deste documento "
+                    "(o modelo respondeu com um comentário em vez do texto completo). "
+                    "O ficheiro original continua igual — queres que tente outra vez?"
+                )
+
+            context.draft_content = attempt
             context.draft_action = action
             context.draft_created_from_hash = context.content_hash
             context.draft_saved = False
@@ -1725,8 +1750,12 @@ class AssistantEngine:
                 found=True, files_used=files_used, output_created=False,
                 document_action=action, active_document=context, context_reused=not reloaded,
                 draft_created=True,
+                draft_validation_passed=True,
+                draft_regeneration_attempted=regenerated,
+                draft_original_length=len(original_content),
+                draft_generated_length=len(attempt),
             )
-            return f"{composed}\n\n(Ainda não guardei esta versão — o ficheiro original continua igual.)"
+            return f"Aqui está a versão reescrita:\n\n{attempt}\n\n(Ainda não guardei esta versão — o ficheiro original continua igual.)"
 
         request = DocumentTaskRequest(
             source_files=[context.resolved_file],
@@ -1967,6 +1996,12 @@ class AssistantEngine:
         context_reused: bool = False,
         draft_created: bool = False,
         draft_reused: bool = False,
+        draft_validation_passed: bool = False,
+        draft_validation_failed: bool = False,
+        draft_regeneration_attempted: bool = False,
+        draft_validation_reason: str = "",
+        draft_original_length: int = 0,
+        draft_generated_length: int = 0,
     ) -> None:
         if self._turn_trace is None:
             return
@@ -1985,6 +2020,14 @@ class AssistantEngine:
         self._turn_trace["draft_created"] = bool(draft_created)
         self._turn_trace["draft_saved"] = bool(context.draft_saved) if context else False
         self._turn_trace["draft_reused"] = bool(draft_reused)
+        # Booleans/lengths/short reason label only — never the draft or the
+        # model's raw invalid response text.
+        self._turn_trace["draft_validation_passed"] = bool(draft_validation_passed)
+        self._turn_trace["draft_validation_failed"] = bool(draft_validation_failed)
+        self._turn_trace["draft_regeneration_attempted"] = bool(draft_regeneration_attempted)
+        self._turn_trace["draft_validation_reason"] = draft_validation_reason
+        self._turn_trace["draft_original_length"] = int(draft_original_length)
+        self._turn_trace["draft_generated_length"] = int(draft_generated_length)
 
     def _fast_agent_context(self) -> AgentContext:
         return AgentContext(
@@ -2514,6 +2557,12 @@ class AssistantEngine:
             "draft_created": bool(self._turn_trace.get("draft_created")),
             "draft_saved": bool(self._turn_trace.get("draft_saved")),
             "draft_reused": bool(self._turn_trace.get("draft_reused")),
+            "draft_validation_passed": bool(self._turn_trace.get("draft_validation_passed")),
+            "draft_validation_failed": bool(self._turn_trace.get("draft_validation_failed")),
+            "draft_regeneration_attempted": bool(self._turn_trace.get("draft_regeneration_attempted")),
+            "draft_validation_reason": self._turn_trace.get("draft_validation_reason") or "",
+            "draft_original_length": int(self._turn_trace.get("draft_original_length") or 0),
+            "draft_generated_length": int(self._turn_trace.get("draft_generated_length") or 0),
             "response_grounded": self._turn_trace.get("response_grounded"),
             "unsupported_tool_claim_detected": bool(self._turn_trace.get("unsupported_tool_claim_detected")),
             "unsupported_memory_claim_detected": bool(self._turn_trace.get("unsupported_memory_claim_detected")),
@@ -5267,6 +5316,188 @@ def _looks_like_rewrite_request(text: str) -> bool:
     return bool(find_near_pair_span(normalized, _REWRITE_GUARDED_VERBS, _REWRITE_QUALITY_WORDS, max_gap=40))
 
 
+_GREETING_LINE_PATTERN = re.compile(
+    r"^(?:ol[áa]|caro|cara|prezad[oa]s?|estimad[oa]s?|exm[oa]s?)\b[,:]?\s*([A-ZÀ-Ý][\wÀ-ÿ'-]*)?",
+    re.IGNORECASE,
+)
+_CLOSING_LINE_WORDS = (
+    "cumprimentos",
+    "atenciosamente",
+    "atentamente",
+    "obrigado",
+    "obrigada",
+    "abraco",
+    "abraço",
+    "com os melhores cumprimentos",
+)
+# Capitalized words that show up at the start of common sentences/lines in
+# this kind of document — excluded from entity extraction so ordinary
+# sentence capitalization doesn't get mistaken for a name/topic that must
+# survive the rewrite.
+_ENTITY_STOPWORDS = frozenset(
+    {
+        "assunto",
+        "subject",
+        "segue",
+        "cumprimentos",
+        "atenciosamente",
+        "ola",
+        "caro",
+        "cara",
+        "prezado",
+        "prezada",
+        "prezados",
+        "prezadas",
+        "estimado",
+        "estimada",
+        "obrigado",
+        "obrigada",
+        "discutimos",
+        "abraco",
+    }
+)
+
+
+def _extract_document_anchors(content: str) -> dict[str, object]:
+    """Structural anchors pulled from the ORIGINAL document — generic
+    (regex/heuristics on structure), never hardcoded to a specific person or
+    project. Used to check a rewritten draft actually kept the substance of
+    the original instead of drifting into commentary."""
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    subject = ""
+    greeting_name = ""
+    closing_name = ""
+    bullet_items: list[str] = []
+    entity_tokens: set[str] = set()
+    for index, line in enumerate(lines):
+        norm = _normalize_text(line)
+        if not subject and (norm.startswith("assunto") or norm.startswith("subject")):
+            subject = line
+        if not greeting_name:
+            greeting_match = _GREETING_LINE_PATTERN.match(line)
+            if greeting_match and greeting_match.group(1):
+                greeting_name = greeting_match.group(1)
+        if not closing_name and norm.rstrip(" ,.:;") in _CLOSING_LINE_WORDS and index + 1 < len(lines):
+            closing_name = lines[index + 1]
+        bullet_match = re.match(r"^[-*•]\s*(.+)$", line)
+        if bullet_match:
+            bullet_items.append(bullet_match.group(1).strip())
+            continue
+        for word_index, word in enumerate(line.split()):
+            cleaned = word.strip(",.:;!?()\"'“”")
+            if (
+                len(cleaned) >= 3
+                and cleaned[0].isupper()
+                and cleaned[1:].islower()
+                and word_index > 0
+                and _normalize_text(cleaned) not in _ENTITY_STOPWORDS
+            ):
+                entity_tokens.add(cleaned)
+    if greeting_name:
+        entity_tokens.add(greeting_name)
+    if closing_name:
+        entity_tokens.add(closing_name)
+    return {
+        "subject": subject,
+        "greeting_name": greeting_name,
+        "closing_name": closing_name,
+        "bullet_items": bullet_items,
+        "entity_tokens": entity_tokens,
+        "length": len(content.strip()),
+    }
+
+
+# Phrasing that marks a response as commentary/a question/a refusal rather
+# than the rewritten document itself — the exact failure mode reported
+# manually ("O documento parece pronto para enviar! ... vais enviar...?").
+_REWRITE_INVALID_RESPONSE_MARKERS = (
+    "parece pronto",
+    "esta pronto",
+    "está pronto",
+    "vais enviar",
+    "posso reescrever",
+    "queres que eu",
+    "gostarias que",
+    "posso ajudar",
+    "sugiro que",
+    "sugestao",
+    "sugestão",
+    "vou reescrever",
+    "vou analisar",
+    "deixa me analisar",
+    "deixa-me analisar",
+)
+
+
+def _validate_rewrite_draft(original_content: str, candidate: str) -> tuple[bool, str]:
+    """Structural plausibility check for a rewrite draft before it is
+    accepted — catches the model answering with a question/comment instead
+    of the rewritten document. Anchors are extracted from the ORIGINAL
+    document, never hardcoded to a specific name/project."""
+    candidate_stripped = str(candidate or "").strip()
+    if not candidate_stripped:
+        return False, "resposta vazia"
+    anchors = _extract_document_anchors(original_content)
+    original_length = int(anchors["length"]) or 1
+    if len(candidate_stripped) < original_length * 0.5:
+        return False, "muito mais curto que o original"
+    last_line = next((line for line in reversed(candidate_stripped.splitlines()) if line.strip()), "")
+    if last_line.strip().endswith("?"):
+        return False, "termina numa pergunta"
+    normalized_candidate = _normalize_text(candidate_stripped)
+    if contains_any_phrase(normalized_candidate, _REWRITE_INVALID_RESPONSE_MARKERS):
+        return False, "parece comentário/pergunta em vez do documento reescrito"
+    entity_tokens = anchors["entity_tokens"]
+    if entity_tokens:
+        present = sum(1 for token in entity_tokens if token.lower() in candidate_stripped.lower())
+        if present / len(entity_tokens) < 0.6:
+            return False, "faltam entidades/tópicos importantes do original"
+    bullet_items = anchors["bullet_items"]
+    if bullet_items:
+        preserved = sum(1 for item in bullet_items if item.lower() in candidate_stripped.lower())
+        if preserved / len(bullet_items) < 0.5:
+            return False, "faltam pontos da lista original"
+    greeting_name = str(anchors["greeting_name"] or "")
+    if greeting_name and greeting_name.lower() not in candidate_stripped.lower():
+        return False, "falta o destinatário/saudação original"
+    closing_name = str(anchors["closing_name"] or "")
+    if closing_name and closing_name.lower() not in candidate_stripped.lower():
+        return False, "falta a assinatura original"
+    return True, ""
+
+
+def _document_rewrite_prompt(request: DocumentTaskRequest, context: ActiveDocumentContext) -> str:
+    return (
+        "TAREFA: reescrever o documento completo abaixo.\n"
+        "SAÍDA OBRIGATÓRIA: apenas o documento completo reescrito, do início ao fim.\n"
+        "Não faças perguntas. Não analises. Não resumas. Não omitas nenhuma secção.\n"
+        "Mantém todos os factos, nomes, destinatário, assunto, listas e assinatura do original.\n"
+        "Não uses placeholders. Não digas que o documento está pronto, nem que vais enviar ou guardar algo.\n"
+        "Não comeces a resposta com frases como 'Aqui está' — devolve apenas o documento.\n"
+        f"Aplica apenas esta transformação: {request.instructions}\n\n"
+        f"<ORIGINAL_DOCUMENT>\n{_truncate_document_content(context.content, limit=12000)}\n</ORIGINAL_DOCUMENT>\n\n"
+        f"<USER_TRANSFORMATION>\n{request.instructions}\n</USER_TRANSFORMATION>"
+    )
+
+
+def _document_rewrite_correction_prompt(
+    request: DocumentTaskRequest, context: ActiveDocumentContext, invalid_response: str, reason: str
+) -> str:
+    return (
+        f"A tua resposta anterior não cumpriu o pedido ({reason}). "
+        "Essa resposta é só diagnóstico interno — não a uses como base, parte apenas do documento original abaixo.\n"
+        "TAREFA: reescrever o documento completo abaixo, do início ao fim.\n"
+        "SAÍDA OBRIGATÓRIA: apenas o documento completo reescrito.\n"
+        "Não faças perguntas. Não analises. Não comentes. Não omitas nenhuma secção.\n"
+        "Mantém todos os factos, nomes, destinatário, assunto, listas e assinatura do original.\n"
+        "Não comeces a resposta com frases como 'Aqui está' — devolve apenas o documento.\n"
+        f"Aplica apenas esta transformação: {request.instructions}\n\n"
+        f"<ORIGINAL_DOCUMENT>\n{_truncate_document_content(context.content, limit=12000)}\n</ORIGINAL_DOCUMENT>\n\n"
+        f"<USER_TRANSFORMATION>\n{request.instructions}\n</USER_TRANSFORMATION>\n\n"
+        f"<RESPOSTA_INVALIDA_ANTERIOR razao=\"{reason}\">\n{_truncate_document_content(invalid_response, limit=2000)}\n</RESPOSTA_INVALIDA_ANTERIOR>"
+    )
+
+
 def _active_document_followup_action(text: str, content_type: str = "") -> str:
     normalized = _normalize_text(text).strip(" .!?")
     if not normalized:
@@ -5405,7 +5636,8 @@ def _active_document_followup_prompt(request: DocumentTaskRequest, context: Acti
             "que pontos estão pendentes e que destaques existem."
         ),
         "summarize": "Resume o documento ativo com clareza e sem inventar contexto.",
-        "rewrite": "Reescreve o documento ativo conforme o pedido, mantendo apenas informação presente no texto.",
+        # "rewrite" is handled by a dedicated prompt (_document_rewrite_prompt)
+        # with structural validation — it never reaches this generic path.
     }.get(request.action, "Trabalha o documento ativo usando apenas o conteúdo fornecido.")
     return (
         f"Pedido do utilizador: {request.instructions}\n"
