@@ -63,6 +63,13 @@ class ModelRoutingInput:
     has_context: bool = False
     explicit_provider: str = ""
     explicit_model: str = ""
+    # Structured task description built by the document-rewrite/refinement
+    # flow (see assistant/conversation.py) -- when present, complexity is
+    # computed from these fields instead of the raw message-length/keyword
+    # heuristic below, since a short follow-up ("ainda consegues melhor")
+    # can hide a genuinely complex reconstructed task. Never contains the
+    # document's actual content. See _document_task_complexity_score.
+    task_profile: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -80,6 +87,9 @@ class ModelRoutingDecision:
     routing_user_message_chars: int = 0
     routing_context_chars: int = 0
     routing_constraint_count: int = 0
+    task_complexity_score: float = 0.0
+    task_complexity_band: str = ""
+    escalation_considered: bool = False
 
 
 class ModelUsageBudget:
@@ -225,12 +235,17 @@ class ModelRouter:
         source = str(routing_input.source or "").upper()
         if source in NO_PAID_CALL_SOURCES:
             return self._ollama("automatic", "source_kept_local", f"A origem {source} fica no modelo local.", routing_input=routing_input)
+
+        profile = routing_input.task_profile
+        task_type = str(profile.get("task_type") or "") if profile else ""
+        is_document_task = bool(profile) and task_type.startswith("document_")
+
         if not self.config.automatic.claude_enabled:
             return self._ollama("automatic", "automatic_claude_disabled", "Claude automatico esta desligado.", routing_input=routing_input)
         if not self._has_anthropic_key():
             return self._ollama(
                 "automatic",
-                "missing_api_key",
+                "document_escalation_blocked_api_key" if is_document_task else "missing_api_key",
                 "Sem ANTHROPIC_API_KEY; fica no modelo local.",
                 "missing_api_key",
                 routing_input=routing_input,
@@ -238,11 +253,15 @@ class ModelRouter:
         if self.env.get(PAID_CALL_CONFIRMATION_ENV, "").strip().lower() != "true":
             return self._ollama(
                 "automatic",
-                "paid_calls_not_confirmed",
+                "document_escalation_blocked_paid_disabled" if is_document_task else "paid_calls_not_confirmed",
                 f"Sem {PAID_CALL_CONFIRMATION_ENV}=true; fica no modelo local.",
                 "paid_calls_not_confirmed",
                 routing_input=routing_input,
             )
+
+        if is_document_task:
+            return self._document_task_decision(routing_input, profile)
+
         complexity_reason = _complexity_reason_for_claude(routing_input)
         if not complexity_reason:
             return self._ollama("automatic", "low_complexity", "Pedido simples; o modelo local e suficiente.", routing_input=routing_input)
@@ -279,6 +298,88 @@ class ModelRouter:
             routing_context_chars=routing_input.context_chars,
             routing_constraint_count=routing_input.constraint_count,
         )
+
+    def _document_task_decision(self, routing_input: ModelRoutingInput, profile: dict[str, object]) -> ModelRoutingDecision:
+        """Complexity is computed from the structured task profile the
+        document-rewrite/refinement flow reconstructs (revision number,
+        prior local validation failure, structural density...), not from
+        the literal length of a possibly-short follow-up message like
+        "ainda consegues melhor" -- see _document_task_complexity_score."""
+        preferred = str(profile.get("preferred_provider") or "auto").strip().lower()
+        if preferred == "ollama":
+            return self._ollama(
+                "automatic", "document_local_first",
+                "Fluxo documental pediu explicitamente o modelo local.",
+                routing_input=routing_input,
+            )
+
+        score = _document_task_complexity_score(profile)
+        band = _document_task_complexity_band(score)
+        task_type = str(profile.get("task_type") or "")
+        attempt_number = int(profile.get("document_regeneration_attempt") or 1)
+        previous_failure = bool(profile.get("document_previous_local_failure"))
+        escalation_considered = band == "high" or previous_failure
+
+        def _decision(
+            *, provider: str, reason_code: str, reason: str, paid_call: bool = False,
+            before: float = 0.0, after: float = 0.0, fallback_reason: str = "",
+        ) -> ModelRoutingDecision:
+            model = self.anthropic_model if provider == "anthropic" else self.ollama_model
+            return ModelRoutingDecision(
+                mode="automatic", provider=provider, model=model,
+                reason_code=reason_code, reason=reason, paid_call=paid_call,
+                budget_before_usd=before, budget_after_usd=after, fallback_reason=fallback_reason,
+                routing_user_message_chars=routing_input.user_message_chars,
+                routing_context_chars=routing_input.context_chars,
+                routing_constraint_count=routing_input.constraint_count,
+                task_complexity_score=float(score), task_complexity_band=band,
+                escalation_considered=escalation_considered,
+            )
+
+        if band == "low":
+            return _decision(
+                provider="ollama", reason_code="document_simple_local",
+                reason="Complexidade documental baixa; o modelo local e suficiente.",
+            )
+        if band == "medium":
+            if attempt_number <= 1:
+                return _decision(
+                    provider="ollama", reason_code="document_local_first",
+                    reason="Primeira tentativa documental fica no modelo local.",
+                )
+            return _decision(
+                provider="ollama", reason_code="document_local_validation_failed",
+                reason="Tentativa local falhou a validacao, mas a complexidade nao justifica escalar para Claude.",
+            )
+
+        estimated_cost = _estimate_prompt_cost_usd(routing_input.prompt_chars)
+        allowed, budget_reason, before, after = True, "", 0.0, estimated_cost
+        if self.budget is not None:
+            allowed, budget_reason, before, after = self.budget.can_spend(
+                estimated_cost,
+                self.config.automatic.daily_budget_usd,
+                self.config.automatic.max_single_call_estimated_usd,
+            )
+        if not allowed:
+            return _decision(
+                provider="ollama", reason_code="document_escalation_blocked_budget",
+                reason="Orcamento automatico impede a escalada documental para Claude.",
+                before=before, after=after, fallback_reason=budget_reason,
+            )
+
+        if previous_failure:
+            reason_code = "document_escalated_after_local_failure"
+            reason = "Tentativa local falhou a validacao; a escalar para Claude dentro do orcamento."
+        elif task_type == "document_refinement":
+            reason_code = "iterative_refinement_high_complexity"
+            reason = "Refinamento iterativo de alta complexidade; Claude escolhido dentro do orcamento."
+        elif band == "high":
+            reason_code = "document_high_complexity"
+            reason = "Tarefa documental de alta complexidade; Claude escolhido dentro do orcamento."
+        else:
+            reason_code = "document_claude_selected"
+            reason = "Tarefa documental elegivel para Claude dentro do orcamento."
+        return _decision(provider="anthropic", reason_code=reason_code, reason=reason, paid_call=True, before=before, after=after)
 
     def _has_anthropic_key(self) -> bool:
         if self.anthropic_key_available is not None:
@@ -545,6 +646,7 @@ def _with_routing_metrics(routing_input: ModelRoutingInput) -> ModelRoutingInput
         has_context=routing_input.has_context,
         explicit_provider=routing_input.explicit_provider,
         explicit_model=routing_input.explicit_model,
+        task_profile=routing_input.task_profile,
     )
 
 
@@ -614,3 +716,43 @@ def _estimate_prompt_cost_usd(prompt_chars: int) -> float:
     # Conservative Haiku estimate for pre-call budgeting. Real cost is recorded
     # afterwards from provider usage when available.
     return (tokens / 1_000_000) * 1.0 + (512 / 1_000_000) * 5.0
+
+
+# Bands for _document_task_complexity_score. Deliberately simple additive
+# weights (no ML/embeddings) -- tuned so a small first-time rewrite lands
+# "medium" (local-first, see _document_task_decision), an iterative
+# refinement lands "high" essentially always (its base weight alone clears
+# the threshold), and a prior local validation failure pushes an otherwise-
+# medium task toward "high" without automatically escalating every document
+# task.
+_DOCUMENT_COMPLEXITY_LOW_MAX = 15.0
+_DOCUMENT_COMPLEXITY_MEDIUM_MAX = 40.0
+
+
+def _document_task_complexity_score(profile: dict[str, object]) -> float:
+    score = 0.0
+    task_type = str(profile.get("task_type") or "")
+    # Iterative refinement is inherently higher-stakes than a first pass:
+    # it must preserve everything the first rewrite already got right while
+    # visibly improving it, with no fresh original to fall back on.
+    score += 45.0 if task_type == "document_refinement" else 10.0
+    entity_count = int(profile.get("document_named_entity_count") or 0)
+    list_count = int(profile.get("document_list_item_count") or 0)
+    score += min(20.0, (entity_count + list_count) * 3.0)
+    document_chars = int(profile.get("document_chars") or 0)
+    score += min(15.0, document_chars / 300.0)
+    if profile.get("document_previous_local_failure"):
+        score += 20.0
+    if str(profile.get("document_validation_failure_reason") or "") == "placeholder_detected":
+        score += 10.0
+    if int(profile.get("document_regeneration_attempt") or 1) >= 2:
+        score += 10.0
+    return score
+
+
+def _document_task_complexity_band(score: float) -> str:
+    if score <= _DOCUMENT_COMPLEXITY_LOW_MAX:
+        return "low"
+    if score <= _DOCUMENT_COMPLEXITY_MEDIUM_MAX:
+        return "medium"
+    return "high"
