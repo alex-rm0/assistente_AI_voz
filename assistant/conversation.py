@@ -53,6 +53,7 @@ from assistant.response_composer import ComposerRequest, ResponseComposer
 from assistant.security import check_user_request
 from assistant.session_manager import SessionManager
 from assistant.text_encoding import debug_text_encoding, has_mojibake_markers
+from assistant.text_matching import contains_any_phrase
 from assistant.tool_registry import ToolRegistry
 from assistant.tools import (
     cancel_task as cancel_task_tool,
@@ -1486,6 +1487,16 @@ class AssistantEngine:
         if pending.get("current_step") == "awaiting_source_file":
             request = _document_request_from_pending(pending, user_message)
             source = request.source_files[0] if request.source_files else _extract_workspace_filename(user_message)
+            if not source:
+                # Bare stem reply to "qual é o nome do ficheiro?" (no extension,
+                # no quotes, no "ficheiro/documento" prefix) — exactly what a
+                # user naturally types here. _workspace_search already does
+                # fuzzy stem matching, so hand it the cleaned raw message
+                # instead of re-asking, as long as it still looks like a
+                # plausible filename token and not another full sentence.
+                candidate = _clean_filename_fragment(user_message).strip().strip("\"'“”")
+                if candidate and _semantic_file_reference_is_plausible(candidate):
+                    source = candidate
             if not source:
                 return "Preciso mesmo do nome do ficheiro da workspace."
             match = _workspace_search(source, self.workspace_path)
@@ -4459,8 +4470,29 @@ def _looks_like_summary_or_email(text: str) -> bool:
     return _explicit_summary_request(text) or _explicit_email_composition_request(text)
 
 
+_SUMMARY_NEGATION_MARKERS = (
+    "sem resumir",
+    "sem resumo",
+    "sem sintese",
+    "sem síntese",
+    "sem sintetizar",
+    "nao resumas",
+    "não resumas",
+    "nao resumir",
+    "não resumir",
+    "nao quero resumo",
+    "não quero resumo",
+    "nao quero um resumo",
+    "não quero um resumo",
+    "nao e um resumo",
+    "não é um resumo",
+)
+
+
 def _explicit_summary_request(text: str) -> bool:
     normalized = _normalize_text(text)
+    if any(marker in normalized for marker in _SUMMARY_NEGATION_MARKERS):
+        return False
     return bool(re.search(r"\b(?:resume|resumir|resumo|sintese|síntese|sintetiza)\b", normalized))
 
 
@@ -4481,27 +4513,39 @@ def _looks_like_document_read_verb(text: str) -> bool:
     )
 
 
+_FULL_DOCUMENT_READ_MARKERS = (
+    "diz me o que esta",
+    "diz-me o que esta",
+    "digas o que esta",
+    "o que esta escrito",
+    "o que la esta escrito",
+    "conteudo completo",
+    "conteudo integral",
+    "conteudo todo",
+    "texto completo",
+    "texto integral",
+    "na integra",
+    "na íntegra",
+    "mostra tudo",
+    "mostra me o conteudo",
+    "mostra-me o conteudo",
+    "mostra o conteudo",
+    "exatamente o que la esta",
+    "exactamente o que la esta",
+    "exatamente como esta",
+    "palavra por palavra",
+    "nao resumas",
+    "não resumas",
+    "sem resumir",
+    "sem resumo",
+    "sem sintese",
+    "sem síntese",
+)
+
+
 def _looks_like_full_document_read(text: str) -> bool:
     normalized = _normalize_text(text)
-    markers = (
-        "diz me o que esta",
-        "diz-me o que esta",
-        "o que esta escrito",
-        "o que la esta escrito",
-        "conteudo completo",
-        "conteudo integral",
-        "na integra",
-        "na íntegra",
-        "mostra tudo",
-        "mostra me o conteudo",
-        "mostra-me o conteudo",
-        "mostra o conteudo",
-        "exatamente o que la esta",
-        "exactamente o que la esta",
-        "nao resumas",
-        "não resumas",
-    )
-    return any(marker in normalized for marker in markers)
+    return contains_any_phrase(normalized, _FULL_DOCUMENT_READ_MARKERS)
 
 
 def _looks_like_document_reference_context(text: str) -> bool:
@@ -4552,11 +4596,62 @@ def _extract_recipient(message: str) -> str:
     return name
 
 
+# Relational/grammatical words that a lazy regex capture can swallow instead
+# of the actual filename (e.g. "documento que está no workspace X" capturing
+# "que está" because "no" is the first recognized stop-word). A real filename
+# reference never legitimately starts with one of these.
+_NON_FILENAME_LEAD_WORDS = frozenset(
+    {
+        "que",
+        "quem",
+        "o",
+        "a",
+        "os",
+        "as",
+        "este",
+        "esta",
+        "esse",
+        "essa",
+        "isto",
+        "isso",
+        "aquele",
+        "aquela",
+        "aquilo",
+        "nesse",
+        "nessa",
+        "neste",
+        "nesta",
+        "naquele",
+        "naquela",
+    }
+)
+
+# Checked before the generic relational patterns below: these anchor on a
+# location/naming keyword ("workspace", "pasta", "chamado") so the capture
+# starts at the actual filename token instead of drifting into "que está".
+_NAMED_FILE_REFERENCE_PATTERNS = (
+    r"\bworkspace\s+(.+?)(?:\s*[,.;:?!]|\s+(?:e|para|com|que|na|no|o|a)\b|$)",
+    r"\bpasta\s+(.+?)(?:\s*[,.;:?!]|\s+(?:e|para|com|que|na|no|o|a)\b|$)",
+    r"\b(?:ficheiro|documento|arquivo)\s+(?:chamado|chamada|com o nome)\s+(.+?)(?:\s*[,.;:?!]|\s+(?:e|para|com|que|na|no)\b|$)",
+)
+
+
 def _extract_semantic_file_reference(message: str, output_file: str = "") -> str:
     text = str(message or "")
     if _contains_path_traversal(text):
         return "../"
     output_norm = _normalize_text(output_file)
+
+    for pattern in _NAMED_FILE_REFERENCE_PATTERNS:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        candidate = _clean_filename_fragment(match.group(1))
+        if output_norm and _normalize_text(candidate) == output_norm:
+            continue
+        if candidate and not _is_output_format_token(candidate) and _semantic_file_reference_is_plausible(candidate):
+            return candidate
+
     explicit = _extract_workspace_filename(text)
     if (
         explicit
@@ -4592,6 +4687,8 @@ def _semantic_file_reference_is_plausible(candidate: str) -> bool:
     if normalized.startswith(("e guarda", "guarda em", "guardar em", "grava em", "e grava")):
         return False
     if len(normalized.split()) > 8:
+        return False
+    if normalized.split()[0] in _NON_FILENAME_LEAD_WORDS:
         return False
     return True
 
@@ -4849,7 +4946,7 @@ def _active_document_followup_action(text: str) -> str:
         return ""
     if any(marker in normalized for marker in ("que horas sao", "que horas são", "que dia e", "que dia é", "abre o calendario", "abre o calendário")):
         return ""
-    if any(marker in normalized for marker in ("mostra outra vez", "mostra tudo", "conteudo completo", "conteúdo completo", "na integra", "na íntegra", "nao resumas", "não resumas")):
+    if "mostra outra vez" in normalized or _looks_like_full_document_read(normalized):
         return "display"
     if any(marker in normalized for marker in ("sugeres alguma alteracao", "sugeres alguma alteração", "alguma alteracao", "alguma alteração", "o que mudavas", "revê", "reve", "review")):
         return "review"
