@@ -6,6 +6,208 @@ Estado Git no início da auditoria: limpo (`git status --short` sem alterações
 
 Este checkpoint descreve o estado técnico real do Echo antes de adicionar novos providers ou funcionalidades. A análise foi feita a partir do código presente no repositório, não a partir de intenções anteriores.
 
+## Atualização — Checkpoint Técnico E Funcional Completo (Routing Automático, Documentos, Estados Visuais)
+
+Atualizado em 2026-08-07. HEAD atual: `72ddd5b`. Esta secção substitui, em termos de estado atual, as afirmações mais antigas deste ficheiro sobre routing/providers/UI — as secções seguintes (1 a 24) descrevem o estado em 2026-07-22/08-06 e ficam preservadas como histórico, mas partes delas (por exemplo "Anthropic: NÃO IMPLEMENTADO" na secção 9) já não são verdade. Esta secção é a fonte de verdade mais recente.
+
+### 1. Estado Geral Do Projeto
+
+O Echo é uma aplicação local. Execução principal:
+
+```
+python app.py --ui echo-os
+```
+
+(`--ui classic` continua disponível para a UI PySide6 clássica; `app.py` também aceita `--provider {ollama,anthropic}`, `--model` e `--model-mode {local,claude,automatic}` como overrides pontuais de sessão.)
+
+Stack:
+
+- Python
+- PySide6 (UI clássica)
+- QWebEngineView / QWebChannel (Echo OS)
+- HTML/CSS/JavaScript (frontend do Echo OS)
+- Ollama (provider local, operacional)
+- Anthropic (provider opcional, condicional — ver critérios abaixo)
+
+Modelo local atual (`config/settings.json` → `model.name` e `ollama.model`): `llama3.1:8b`.
+
+`config/settings.json` → `model_routing.mode` está gravado como `"local"` neste momento (ficheiro não tocado nesta tarefa). O modo `automatic` — o modo em que o router decide por tarefa e que todo o trabalho recente de escalada documental pressupõe — é o modo usado nas sessões de desenvolvimento/teste recentes, selecionado via `--model-mode automatic` ou `ECHO_MODEL_MODE=automatic`; `resolve_model_routing_config()` resolve por prioridade CLI > env > `settings.json` > default (`"local"`).
+
+Anthropic só é usado em modo `automatic` quando, simultaneamente:
+
+- `automatic_claude_enabled=true` (`model_routing.automatic.claude_enabled` em `settings.json`, atualmente `true`);
+- API key configurada (`ANTHROPIC_API_KEY`);
+- `ECHO_ALLOW_PAID_MODEL_CALLS=true` (nome real da env var: ver `PAID_CALL_CONFIRMATION_ENV` em `assistant/anthropic_provider.py`);
+- orçamento disponível (`ModelUsageBudget`, `daily_budget_usd=0.25`, `max_single_call_estimated_usd=0.05` em `settings.json`).
+
+Ponto central: o `ModelRouter` escolhe o provider por **tarefa reconstruída** (`task_profile`, ver secção 5), não pelo comprimento literal da mensagem do utilizador. Um follow-up de 3 palavras ("ainda consegues melhorar") pode reconstruir uma tarefa de alta complexidade; uma mensagem longa pode ser trivial. A heurística antiga de comprimento/palavras-chave (`_complexity_reason_for_claude`) continua a existir para chamadas não documentais, mas para tarefas documentais o `task_profile` tem sempre prioridade.
+
+### 2. Estado Do Routing
+
+Caminhos determinísticos principais observados em `assistant/conversation.py`/`assistant/model_router.py`:
+
+- **SOCIAL_FAST_PATH** — conversa social simples (saudações, "como estás", agradecimentos) resolvida sem qualquer chamada LLM.
+- **SYSTEM_DATETIME** / consultas de estado do sistema — resolvidas via ferramentas do Context Observer, zero chamadas LLM.
+- **DOCUMENT_TASK** — leitura, rewrite, refinement e ações sobre `ActiveDocumentContext`; leitura/display são deterministas (zero LLM), rewrite/refinement passam pelo `ModelRouter`.
+- **GENERAL_CONVERSATION** — fallback para tudo o que não tem caminho determinístico próprio; passa pelo `ResponseComposer`/`RoutedLLM`.
+
+Routing automático (`ModelRoutingConfig.mode == "automatic"`, `ModelRouter._automatic_decision`):
+
+- fontes em `NO_PAID_CALL_SOURCES` (`TOOL_SELECTOR`, `MEMORY_SUMMARY`, `SESSION_SUMMARY`, `VOICE_CRITIC`, `PLANNER`) ficam sempre no provider local;
+- gates de autorização, nesta ordem: `claude_enabled` → API key → `PAID_CALL_CONFIRMATION_ENV`;
+- para tarefas documentais (`task_profile` presente com `task_type` a começar por `document_`), delega em `ModelRouter._document_task_decision` (ver secção 5);
+- para tudo o resto, usa a heurística genérica `_complexity_reason_for_claude` + `ModelUsageBudget.can_spend`.
+
+Reason codes atuais confirmados no código (`assistant/model_router.py`) — lista fiel, sem invenção:
+
+- `explicit_provider`, `local_mode`, `claude_mode` — seleção de modo/provider explícita.
+- `source_kept_local` — fontes em `NO_PAID_CALL_SOURCES`.
+- `automatic_claude_disabled`, `missing_api_key`, `paid_calls_not_confirmed` — gates genéricos falhados (chamadas não documentais).
+- `document_escalation_blocked_api_key`, `document_escalation_blocked_paid_disabled` — os mesmos gates, variante documental.
+- `low_complexity` — heurística genérica não encontrou motivo para Claude.
+- `document_simple_local` — tarefa documental banda `low`.
+- `document_local_first` — tarefa documental banda `medium`, 1ª tentativa (ou `preferred_provider="ollama"` forçado).
+- `document_local_regeneration` — banda `medium`, 2ª tentativa, ainda não justifica Claude (renomeado de `document_local_validation_failed`).
+- `document_escalation_blocked_budget` — banda `high`, mas orçamento insuficiente.
+- `document_escalated_after_local_failure` — banda `high`, a tentativa anterior foi Ollama e falhou validação.
+- `document_regenerated_with_claude` — banda `high`, a tentativa anterior já era Claude e falhou validação (nunca confundido com falha local).
+- `iterative_refinement_high_complexity` — refinamento iterativo, banda `high`, sem falha anterior a considerar.
+- `document_high_complexity` / `document_claude_selected` — fallback dentro da banda `high` quando nenhuma das razões acima se aplica.
+- Heurística genérica (`_complexity_reason_for_claude`, não documental): `professional_writing`, `structured_summary`, `document_review`, `document_interpret`, `document_rewrite`, `document_synthesis`, `complex_planning`, `technical_explanation`, `long_prompt`, `complex_request`.
+
+Fallback: qualquer gate falhado devolve sempre o provider `ollama` (nunca um erro visível ao utilizador); budget gates usam `ModelUsageBudget.can_spend` (chave `daily_budget_usd`/`max_single_call_estimated_usd`); paid call authorization exige as 3 condições da secção 1 simultaneamente.
+
+### 3. Document System
+
+Estado atual do subsistema documental (`assistant/conversation.py`):
+
+- workspace search fuzzy (`_workspace_search`) e leitura determinística de `.txt`/`.md`/`.pdf`/`.docx`;
+- `ActiveDocumentContext` mantém o estado do documento ativo entre turnos (TTL, cache por mtime/tamanho), com os campos: `content` (original), `draft_content`, `previous_draft_content`, `draft_revision`, `previous_draft_revision`, `draft_action`, `draft_created_from_hash`, `draft_saved`, `draft_updated_at`;
+- ações reconhecidas sobre o documento ativo: `display` (mostra original/conteúdo integral), `review`, `interpret`, `rewrite` (cobre tanto o 1º rewrite como o refinamento iterativo — diferenciados por `is_refinement = bool(context.draft_content)`), `display_draft`, `compare_versions`, `discard_draft`, `restore_previous_draft`, `save_draft`;
+- `rewrite`/refinement criam sempre um draft transitório em memória — nunca escrevem no disco automaticamente;
+- "mostra a versão melhorada" devolve o draft; "mostra o original" devolve sempre o `content` original intacto; "compara as versões" mostra ambos; "descarta as alterações" limpa o draft; "volta à versão anterior" restaura exatamente um nível de undo (`previous_draft_content`/`previous_draft_revision` — não é um histórico ilimitado);
+- "guarda esta versão" pede confirmação explícita e só grava num ficheiro novo (`"<nome> (melhorado)<ext>"`) — o original nunca é sobrescrito sem pedido explícito;
+- o draft (e todo o `ActiveDocumentContext`) existe apenas em memória do processo — nunca é escrito em `long_term_memory`/SQLite, não sobrevive a um reinício do `AssistantEngine`.
+
+### 4. Iterative Document Refinement
+
+Follow-ups implícitos de refinamento são reconhecidos por `_looks_like_draft_refinement_request` (`_DRAFT_REFINEMENT_STANDALONE_PHRASES` + heurística de par próximo comparativo/qualidade). Frases atualmente reconhecidas incluem: "ainda consegues melhor", "ainda consegues melhorar", "consegues fazer melhor", "consegues melhorar isto/isso", "tenta melhorar", "refina mais/isto/a versão", "melhora mais um pouco", "podes melhorar mais", "faz uma versão ainda melhor", "outra versão mas melhor", "não está/ficou suficientemente formal", "quero algo mais profissional", e qualquer combinação próxima (até 40 caracteres de distância) de uma palavra comparativa (`ainda`, `mais`, `outra vez`, `de novo`, `um pouco`) com uma palavra de qualidade (`melhor`, `formal`, `profissional`, `claro`, `simples`, `conciso`, `elegante`) — cobre "mais formal" isolado.
+
+Com draft ativo (`context.draft_content` não vazio): resolve para `DOCUMENT_TASK` → `document_followup_action="iterative_refinement"` → usa o draft atual (`base_content = context.draft_content`) como base da reescrita; o documento original só é consultado como referência factual (`<DOCUMENTO_ORIGINAL_REFERENCIA>` no prompt), nunca sobrescrito.
+
+Sem draft ativo, estas frases não inventam contexto documental — caem no routing normal (tipicamente `GENERAL_CONVERSATION`).
+
+Mecânica de revisão: `draft_revision` incrementa a cada rewrite/refinement aceite (1 = primeiro rewrite, 2+ = cada refinamento seguinte); exatamente um nível de draft anterior é preservado (`previous_draft_content`/`previous_draft_revision`) para `restore_previous_draft`. Um turno de rewrite/refinement nunca excede 2 chamadas LLM (1ª tentativa +, se necessário, 1 regeneração corretiva). Proteções: `_is_noop_refinement` rejeita uma "melhoria" praticamente idêntica ao draft atual (similaridade `difflib` ≥ 0.97); `_validate_rewrite_draft` rejeita placeholders, respostas vazias/curtas, respostas terminadas em pergunta, comentários em vez do documento, ou perda de entidades/listas/saudação/assinatura relevantes; uma falha na 1ª tentativa dispara uma regeneração corretiva (prompt específico com o motivo da falha); se a 2ª também falhar, nenhum draft é criado e a falha é comunicada honestamente.
+
+### 5. Document Task Complexity
+
+Campos atuais do `task_profile` (construído em `_build_task_profile`, `assistant/conversation.py`, e consumido por `ModelRouter._document_task_decision`): `task_type` (`document_rewrite`/`document_refinement`), `document_chars`, `document_has_draft`, `document_revision_number`, `document_structure_count`, `document_named_entity_count`, `document_list_item_count`, `document_requires_fidelity`, `document_requires_full_output`, `document_previous_provider`, `document_previous_call_was_local`, `document_previous_call_was_paid`, `document_previous_validation_failed`, `document_previous_local_failure`, `document_validation_failure_reason`, `document_regeneration_attempt`, `preferred_provider`. Nenhum destes campos contém o conteúdo integral do documento — apenas contagens, booleanos e códigos curtos.
+
+`_document_task_complexity_score(profile)` (pesos atuais, copiados do código, `assistant/model_router.py`):
+
+- `+45.0` se `task_type == "document_refinement"`, senão `+10.0`;
+- `+min(20.0, (document_named_entity_count + document_list_item_count) * 3.0)`;
+- `+min(15.0, document_chars / 300.0)`;
+- `+20.0` se `document_previous_local_failure`;
+- `+10.0` se `document_validation_failure_reason == "placeholder_detected"`;
+- `+10.0` se `document_regeneration_attempt >= 2`.
+
+`_document_task_complexity_band(score)` — bands atuais: `low` (`score <= 15.0`), `medium` (`score <= 40.0`), `high` (`score > 40.0`). (`_DOCUMENT_COMPLEXITY_LOW_MAX = 15.0`, `_DOCUMENT_COMPLEXITY_MEDIUM_MAX = 40.0`.)
+
+Lógica geral: leitura/display determinístico nunca chama o router (0 chamadas LLM); rewrite simples de 1ª tentativa fica local-first (banda tipicamente `medium`); refinamento iterativo é sempre banda `high` (peso base 45 já excede o limiar de 40); uma falha local relevante numa tarefa já em banda `high` pode escalar a 2ª tentativa para Claude, sujeito aos gates de orçamento/autorização da secção 1; o máximo global permanece 2 chamadas por turno. Os valores/limiares acima não foram alterados nesta tarefa — são cópia fiel do código atual.
+
+### 6. Provider Provenance
+
+Correção recente (commits `0f64194`/`f8b9f58`/`4c41a49`/`72ddd5b`): um teste pago real (secção 7) revelou que uma falha na 1ª tentativa era sempre assumida como falha **local**, mesmo quando essa 1ª tentativa já tinha sido servida por Claude. `previous_provider` passou a ser propagado corretamente (lido do `routing_decisions` real, nunca assumido); `document_previous_local_failure` só é `true` quando a tentativa anterior foi de facto `ollama` **e** falhou validação.
+
+Sequências e reason codes correspondentes:
+
+- Ollama → Claude: `document_escalated_after_local_failure`
+- Claude → Claude: `document_regenerated_with_claude`
+- Ollama → Ollama: `document_local_regeneration`
+
+Telemetria de proveniência guardada por turno (`get_last_turn_telemetry()`): `provider_attempt_sequence` (lista por tentativa, nunca deduplicada), `initial_provider`, `final_provider`, `attempt_count`, `attempt_failure_reasons` (lista por tentativa), `initial_routing_reason_code`, `final_routing_reason_code`.
+
+### 7. Teste Real Com Claude
+
+Foi realizado um teste pago real controlado (fora desta sessão de agente — nenhuma chamada Anthropic real foi feita pelo assistente em qualquer uma das tarefas de implementação/validação). Sequência:
+
+1. ler `email_resumo_novo`;
+2. "Torna-o mais formal, mas não guardes ainda."
+3. "Ainda consegues melhorar?"
+
+Resultado observado no passo 3: `selected_path=DOCUMENT_TASK`, `provider=anthropic`, `model=claude-haiku-4-5-20251001`, `paid_call=true`, `llm_calls=2`, original mantido intacto, nova versão produzida.
+
+Este mesmo teste revelou a telemetria errada `document_escalated_after_local_failure` para uma sequência Anthropic→Anthropic (a 1ª tentativa já tinha sido Claude, não Ollama) — a causa e a correção estão descritas na secção 6; já foi corrigida e validada (39/135/810 testes, ver secção 12). Nenhuma API key ou segredo foi registado neste checkpoint.
+
+### 8. Fidelidade Documental
+
+Os quatro prompts de rewrite/refinement (`_document_rewrite_prompt`, `_document_rewrite_correction_prompt`, `_document_refinement_prompt`, `_document_refinement_correction_prompt`, `assistant/conversation.py`) instruem agora explicitamente para: preservar todos os factos, nomes, destinatário, assunto, listas e assinatura do original; preservar tempos verbais e cronologia factual; não mudar quem fez o quê, quando, nem se algo está concluído, previsto ou pendente; melhorar estilo sem reinterpretar cronologia.
+
+Decisão deliberada: não existe (ainda) um validador semântico determinístico para tempos verbais/cronologia — só a instrução no prompt, mais um teste que confirma a presença da instrução nos 4 prompts (`tests/test_automatic_routing_regressions.py`). Motivo registado: evitar falsos positivos de uma verificação heurística de gramática/tempo verbal sobre texto livre.
+
+### 9. Cancelamento / Timeout / Progress
+
+Cancelamento cooperativo: `AssistantEngine.begin_request()` cria um `threading.Event` novo por request; `cancel_current_request()` (thread-safe, pode ser chamado de uma worker thread Qt) marca o evento; `is_cancel_requested()` é verificado em checkpoints explícitos dentro do fluxo de rewrite. Não interrompe uma chamada `requests.post` síncrona já em execução (a chamada ao provider corre até ao fim); o cancelamento impede que uma 2ª tentativa/regeneração ou a criação de um draft aconteçam depois desse ponto.
+
+Timeout total do rewrite: `DOCUMENT_REWRITE_TOTAL_TIMEOUT_SECONDS`, verificado antes de iniciar cada tentativa (`_remaining_seconds()`); combinado com o limite de 2 chamadas por turno.
+
+Progress events emitidos (`_emit_progress`, nomes literais confirmados no código): `rewrite_attempt_started`, `rewrite_validation_started`, `rewrite_regeneration_started`, `rewrite_cancelled`, `rewrite_timeout`. Os progress labels correspondentes não entram no histórico de conversa (`ConversationMemory`) — são só eventos efémeros para a UI. Em cancelamento/timeout a UI regressa a `idle`.
+
+### 10. Estados Visuais Do Echo
+
+`prototype_web_ui/web/echo_entity.js` — `STATE_CONFIG` centralizado com os estados cognitivos: `idle`, `listening`, `thinking`, `reading`, `working`, `speaking`, `error`. Papéis espaciais (`layoutRole`, ortogonais ao estado cognitivo, via `ROLE_INTENSITY`): `normal` (implícito), `compact`, `focus` — só escalam intensidade (nunca tamanho/posição, que continuam a cargo do Adaptive Layout, fonte de verdade para posição).
+
+Transições entre estados são suaves (glide, não corte abrupto); `prefers-reduced-motion` reduz a intensidade do movimento (fator `0.4`) em vez de o eliminar — Echo continua a "respirar" visivelmente mesmo com movimento reduzido. `reading` é acionado via a telemetria já existente (`execution_path=="document_task"`); `working` cobre o decurso de um rewrite/refinement; `speaking` é deliberadamente saltado em cancelamento/timeout (não há resposta falada para uma resposta que não existe). Em `compact`/`focus`, `ROLE_INTENSITY` nunca chega a `0` (mínimo `0.75` em `focus`) — o Echo nunca desaparece completamente.
+
+### 11. Memória E Conversação
+
+Estado atual conhecido (sem alterações nesta tarefa): o histórico curto (`ConversationMemory`, `data/history.json`) é enviado ao modelo em cada turno; o Voice Critic usa esse mesmo histórico; a memória persistente (SQLite — `LongTermMemory`, `PersonalModel`, `SessionManager`) existe e é consultada, mas não é despejada literalmente no prompt; o `ContextObserver` regista snapshots de atividade e pode informar respostas sobre o estado do computador; há recuperação de contexto entre sessões (session summaries, "onde ficámos?"); existe cuidado ativo (guards) para não ecoar literalmente texto de memória antiga como se fosse a resposta atual. `GENERAL_CONVERSATION` e `SOCIAL_FAST_PATH` continuam a ser os caminhos para conversa sem tarefa determinística própria — `SOCIAL_FAST_PATH` não responde de forma rígida a saudações com conteúdo relevante a seguir (ver `_has_relevant_content_after_greeting` em `assistant/response_composer.py`); referências naturais a contexto recente são feitas quando há contexto disponível, nunca inventadas.
+
+### 12. Testes Atuais
+
+- `tests/test_model_router.py` → **39 passed**
+- `tests/test_automatic_routing_regressions.py` → **135 passed**
+- suite completa (`pytest`) → **810 passed**, 0 falhas
+
+Todas as respostas Anthropic nos testes automáticos usam `FakeProvider` — nenhuma chamada Anthropic real acontece na suite. A única chamada Anthropic real associada a este trabalho é o teste manual pago controlado descrito na secção 7, feito fora da execução dos testes automáticos.
+
+### 13. Commits Recentes Importantes
+
+```
+22754b1 feat: add spatial and behavioral echo states
+275a00f test: cover echo visual states and progress labels
+5ca08fc feat: support iterative document refinement
+e7c8771 test: cover iterative document refinements
+
+f9aa925 feat: score reconstructed document task complexity
+94680c2 feat: propagate document routing profiles
+26873e4 feat: route complex document refinements by task profile
+085cad7 test: cover document complexity routing policy
+a1fb3fc test: cover document provider escalation workflows
+
+0f64194 fix: track document rewrite provider provenance
+f8b9f58 fix: report document regeneration routing accurately
+4c41a49 test: cover document rewrite provider sequences
+72ddd5b test: verify local failure provider provenance
+```
+
+HEAD atual: `72ddd5b`.
+
+### 14. Worktree Local
+
+No momento desta atualização, esperado e **não commitado**:
+
+- `modified: config/settings.json`
+- `untracked: workspace/Reuniões Direção - Notas.pdf`
+- `untracked: workspace/email_resumo_novo.txt`
+
+Estes ficheiros não foram tocados por esta ou pelas tarefas anteriores de routing/provenance — permanecem fora de qualquer commit deliberadamente.
+
+### 15. Next Development Step
+
+Retomar desenvolvimento funcional/visual do Echo a partir desta base estável, priorizando a próxima evolução da experiência de workspace e comportamento da entidade.
+
 ## Actualização Da Fase 0
 
 Actualizado em 2026-07-22:
