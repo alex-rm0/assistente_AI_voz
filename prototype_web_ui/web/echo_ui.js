@@ -172,6 +172,34 @@
   let activeResponseLayout = "inline";
   let responseLayoutFrame = 0;
 
+  // Passo 3.3 (echo_entity voice commands): once a "desloca-te para a
+  // direita"-style command places Echo explicitly, this survives until the
+  // user asks for the center or "organiza automaticamente" -- automatic
+  // repositioning (applyResponseLayout's reading-mode anchor, and
+  // echo_workspace_objects.js's workspace-proximity positioning via
+  // setWorkspaceObjectEntityPoint) must not silently override it on the
+  // very next turn. Session-only, never persisted.
+  let entityPlacementOverride = null; // {region, source} | null
+
+  // Maps the backend's semantic regions onto the EXISTING named-anchor
+  // zones (workspaceDefaults/resolveSafeEchoAnchor) -- real geometry
+  // already computed from the actual viewport/safe-gap/entity-radius, not
+  // a new set of hardcoded pixel positions. "up"/"down" and the four
+  // corner regions are deliberately approximated onto the closest existing
+  // zone rather than inventing new ones (there is no dedicated "bottom"
+  // zone in the current system) -- see final report's documented scope.
+  const ENTITY_REGION_TO_ANCHOR = {
+    right: "center-right",
+    left: "center-left",
+    up: "top-center",
+    down: "center",
+    center: "center",
+    top_left: "upper-left",
+    top_right: "upper-right",
+    bottom_left: "center-left",
+    bottom_right: "center-right",
+  };
+
   function responseSizeForElement(element) {
     if (!element || !String(element.textContent || "").trim()) return "none";
     const wordCount = String(element.textContent || "").trim().split(/\s+/).filter(Boolean).length;
@@ -899,17 +927,46 @@
     return "center";
   }
 
+  function primarySurfaceRect(stage) {
+    const node = document.querySelector('#workspaceObjects [data-role="primary"]');
+    return node ? localRectFromElement(stage, node) : null;
+  }
+
+  // Section 13: voice intent ("desloca-te para a esquerda") is a
+  // PREFERENCE, geometry safety against the primary WorkspaceObject
+  // surface is a hard RESTRICTION -- when the exact requested zone is
+  // occupied, try the nearest free zone within the SAME side first, only
+  // falling back to "center" as a last resort. entityPlacementOverride
+  // itself is never cleared by a collision (see moveEchoEntityToRegion) --
+  // this only changes which real point that region resolves to.
+  const ANCHOR_SAME_SIDE_ALTERNATES = {
+    "center-left": ["center-left", "upper-left", "top-center"],
+    "center-right": ["center-right", "upper-right", "top-center"],
+    "top-center": ["top-center", "upper-left", "upper-right"],
+    "upper-left": ["upper-left", "center-left", "top-center"],
+    "upper-right": ["upper-right", "center-right", "top-center"],
+    "top-right": ["top-right", "upper-right", "top-center"],
+    center: ["center", "top-center"]
+  };
+
   function resolveSafeEchoAnchor(stage, requestedAnchor) {
     const zones = workspaceDefaults(stage);
-    const point = zones.echo[requestedAnchor] || zones.echo.center;
-    if (requestedAnchor !== "top-right" || !telemetryPanelOpen) return {anchor: requestedAnchor, point};
-
     const entityDiameter = cssPixelNumber(stage, "--entity-size-actual", ECHO_ITEM_SIZE.width);
     const entityRadius = Math.max(70, Math.min(220, entityDiameter / 2));
-    const echoRect = echoRectForPoint(point, entityRadius);
-    const panelRect = localRectFromElement(stage, byId("telemetryPanel"));
-    if (!boxesIntersect(echoRect, panelRect)) return {anchor: requestedAnchor, point};
-    return {anchor: "top-center", point: zones.echo["top-center"]};
+    const panelRect = requestedAnchor === "top-right" && telemetryPanelOpen ? localRectFromElement(stage, byId("telemetryPanel")) : null;
+    const surfaceRect = primarySurfaceRect(stage);
+
+    const candidates = ANCHOR_SAME_SIDE_ALTERNATES[requestedAnchor] || [requestedAnchor, "center"];
+    for (const candidate of candidates) {
+      const point = zones.echo[candidate] || zones.echo.center;
+      const echoRect = echoRectForPoint(point, entityRadius);
+      if (panelRect && boxesIntersect(echoRect, panelRect)) continue;
+      if (surfaceRect && boxesIntersect(echoRect, surfaceRect)) continue;
+      return {anchor: candidate, point};
+    }
+    // Nothing in the same side is free -- fall back to center, the same
+    // safe default the pre-existing telemetry-panel collision case used.
+    return {anchor: "center", point: zones.echo.center};
   }
 
   function updateResponseLayoutBounds(stage, layout) {
@@ -1443,7 +1500,23 @@
       currentProgressLabel = action.progressLabel;
       updateStatusLabel(document.body.dataset.echoState || "idle", currentProgressLabel);
     }
+    applyWorkspaceObjectProgress(event.type);
     return true;
+  }
+
+  // The DRAFT placeholder card during working/cancellation/timeout is driven
+  // by the exact same rewrite_* progress events as the entity state above --
+  // no separate backend signal, no document logic duplicated here.
+  function applyWorkspaceObjectProgress(eventType) {
+    const objects = window.echoWorkspaceObjects;
+    if (!objects) return;
+    if (eventType === "rewrite_attempt_started" || eventType === "rewrite_regeneration_started") {
+      objects.draftWorkingStarted();
+    } else if (eventType === "rewrite_cancelled") {
+      objects.draftCancelled();
+    } else if (eventType === "rewrite_timeout") {
+      objects.draftTimedOut();
+    }
   }
 
   function focusInput() {
@@ -1519,7 +1592,13 @@
     const layout = determineResponseLayout(metrics, activeResponseLayout);
     activeResponseLayout = layout;
     const reading = layout !== "inline";
-    const anchor = responseAnchorForLayout(stage, layout);
+    // Passo 3.3, section 9: a voice-driven entity placement wins over the
+    // response system's own auto-computed anchor -- without this, a plain
+    // short reply ("Feito.") right after "desloca-te para a direita" would
+    // silently move Echo back to whatever responseAnchorForLayout picks,
+    // undoing the command on the very next turn.
+    const overrideAnchorName = entityPlacementOverride ? ENTITY_REGION_TO_ANCHOR[entityPlacementOverride.region] : null;
+    const anchor = overrideAnchorName || responseAnchorForLayout(stage, layout);
 
     stage.dataset.responseLayout = layout;
     stage.dataset.responseMode = reading ? "reading" : "short";
@@ -1597,6 +1676,209 @@
   function startClock() {
     updateClock();
     window.setInterval(updateClock, 60000);
+  }
+
+  // Structured document/draft/comparison events (see assistant/conversation.py's
+  // _queue_ui_event calls in the document-followup flow) update the
+  // workspace object model directly -- no document logic is re-derived
+  // here, only the already-computed fields on the event payload are read.
+  // Returns true if the event was handled (caller should not also try the
+  // research-workspace switch for it).
+  function handleDocumentWorkspaceEvent(event) {
+    const objects = window.echoWorkspaceObjects;
+    if (!objects) return false;
+    switch (event.type) {
+      case "document_loaded":
+        objects.documentLoaded({
+          fileName: event.file_name,
+          contentType: event.content_type,
+          chars: event.chars,
+          preview: event.preview,
+        });
+        return true;
+      case "document_draft_ready":
+        objects.draftReady({
+          fileName: event.file_name,
+          revision: event.revision,
+          basedOn: event.based_on,
+          content: event.content,
+        });
+        return true;
+      case "document_comparison_ready":
+        objects.comparisonReady({
+          fileName: event.file_name,
+          revision: event.revision,
+          originalContent: event.original_content,
+          draftContent: event.draft_content,
+        });
+        return true;
+      case "document_draft_discarded":
+        objects.draftDiscarded(event.file_name);
+        return true;
+      case "document_draft_restored":
+        objects.draftRestored({fileName: event.file_name, revision: event.revision, content: event.content});
+        return true;
+      case "document_draft_saved":
+        objects.draftSaved({fileName: event.file_name, outputName: event.output_name});
+        return true;
+      // Passo 3.2: the backend (_try_workspace_command) only recognizes the
+      // INTENT and a best-effort raw target phrase -- it has no visibility
+      // into the live scene. Target resolution ("isto"/"a fatura"/"a
+      // segunda versão" -> an actual object id) and execution both happen
+      // entirely inside applyWorkspaceCommand, where the real scene lives.
+      case "workspace_command":
+        // Passo 3.3: a command whose target is echo_entity itself (not a
+        // WorkspaceObject) is handled entirely here -- applyWorkspaceCommand
+        // only knows about the object registry, it has no concept of
+        // "move Echo".
+        if (event.target_phrase === "echo_entity") {
+          moveEchoEntityToRegion(event.action, event.region, event.source);
+          return true;
+        }
+        // "organiza isto automaticamente" is the shared escape hatch for
+        // BOTH overrides (section 9/12): the WorkspaceObject layoutOverride
+        // (handled inside applyWorkspaceCommand itself) and Echo's own
+        // placement override, cleared here since applyWorkspaceCommand has
+        // no notion of the entity.
+        if (event.action === "auto_organize") {
+          moveEchoEntityToRegion("center", "center", "voice_command");
+        }
+        objects.applyWorkspaceCommand({
+          action: event.action,
+          target: event.target_phrase,
+          targetRef: event.target_ref,
+          relation: event.relation,
+          scope: event.scope,
+          selector: event.selector_index ? {kind: "paragraph", index: Number(event.selector_index)} : null,
+        });
+        return true;
+      // Passo 3.4: ActiveTaskContext's progressive artifact (e.g. a
+      // compose_email in progress) -- the backend only ever sends the
+      // already-rendered title/subtitle/content; the frontend's job is
+      // purely to keep the SAME WorkspaceObject (by task_id) up to date,
+      // never to create a new card per turn.
+      case "task_artifact_updated":
+        objects.upsertTaskArtifact({
+          id: event.id,
+          taskId: event.task_id,
+          title: event.title,
+          subtitle: event.subtitle,
+          content: event.content,
+        });
+        return true;
+      // Phase 3B integration fix #2: the backend/frontend object-sync
+      // bridge -- creates/updates the SAME id in echo_workspace_objects.js's
+      // own registry (upsertSemanticObject), never a second parallel
+      // system. The backend always emits one of these per new/changed
+      // SemanticObject BEFORE the representation_changed event that
+      // references it (see assistant/conversation.py), so by the time
+      // applyRepresentation runs, every id it names already exists here.
+      case "semantic_object_upserted":
+        objects.upsertSemanticObject({
+          id: event.id,
+          kind: event.kind,
+          title: event.title,
+          taskId: event.task_id,
+        });
+        return true;
+      // Phase 3B (Cognitive Workspace Blueprint v2): REPRESENTATION
+      // RENDERER. The backend (assistant/representation.py,
+      // _try_representation_command) already resolved which semantic
+      // object ids are visible/major/hidden for the requested style --
+      // this only forwards those fields verbatim into applyRepresentation,
+      // never re-deriving them. No geometry field is ever read here.
+      case "representation_changed":
+        objects.applyRepresentation({
+          style: event.style,
+          visible_object_ids: event.visible_object_ids,
+          major_object_ids: event.major_object_ids,
+          hidden_object_ids: event.hidden_object_ids,
+          style_params: event.style_params,
+          source: event.source,
+        });
+        return true;
+      // Phase 4 (Cognitive Workspace Blueprint v2, section 17): a purely
+      // semantic "how important is each object right now" event -- no
+      // geometry field exists here for one to arrive in. Forwarded
+      // verbatim, same pattern as representation_changed above.
+      case "attention_changed":
+        objects.applyAttention({
+          object_states: event.object_states,
+          focus_object_id: event.focus_object_id,
+          source: event.source,
+        });
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  // Reuses the existing safe-anchor/collision logic (resolveSafeEchoAnchor)
+  // instead of duplicating entity-positioning rules inside
+  // echo_workspace_objects.js, which has no access to this module's
+  // closures.
+  function setWorkspaceObjectEntityAnchor(anchor) {
+    const stage = document.querySelector(".stage");
+    if (!stage || !window.echoEntity || typeof window.echoEntity.setCenter !== "function") return;
+    const resolved = resolveSafeEchoAnchor(stage, anchor);
+    stage.dataset.entityAnchor = resolved.anchor;
+    window.echoEntity.setCenter(resolved.point.x, resolved.point.y, false);
+  }
+
+  // Geometry-based placement (section 12 of the "one primary work surface"
+  // revision): echo_workspace_objects.js measures the actual rendered
+  // primary/transient surface via getBoundingClientRect and hands back a
+  // real {x, y} point next to it -- this just forwards that point to the
+  // entity, same coordinate space (#mind and #workspaceObjects are both
+  // inset:0 inside the same .echo-main box).
+  function setWorkspaceObjectEntityPoint(point) {
+    // Passo 3.3, section 9: a voice-driven "desloca-te para a direita"
+    // must not be silently undone the moment a WorkspaceObject surface
+    // renders (this ran on every render() call already) -- the override
+    // wins until the user asks for the center or "organiza automaticamente".
+    if (entityPlacementOverride) return;
+    if (!point || !window.echoEntity || typeof window.echoEntity.setCenter !== "function") return;
+    const stage = document.querySelector(".stage");
+    if (stage) stage.dataset.entityAnchor = "workspace-proximity";
+    window.echoEntity.setCenter(point.x, point.y, false);
+  }
+
+  // Passo 3.3: moves Echo to a named semantic region ("right"/"left"/
+  // "up"/"down"/"center"/corner names) via the EXISTING safe-anchor zone
+  // system (resolveSafeEchoAnchor/workspaceDefaults) -- real viewport
+  // geometry, not a new hardcoded pixel position (section 14/15). Sets
+  // entityPlacementOverride so subsequent auto-repositioning (workspace-
+  // proximity, response-layout) leaves it alone; "center" clears the
+  // override instead of setting it, since center IS the neutral/auto
+  // position both "volta para o centro" and "organiza automaticamente"
+  // resolve to.
+  function moveEchoEntityToRegion(action, region, source) {
+    const stage = document.querySelector(".stage");
+    if (!stage || !window.echoEntity || typeof window.echoEntity.setCenter !== "function") return false;
+    // make_room carries no explicit direction -- "center-right" is the
+    // same default zone the response-layout system already reaches for
+    // when something needs more room (responseAnchorForLayout's "focus"
+    // case), reused here rather than invented.
+    const effectiveRegion = region || (action === "center" ? "center" : "right");
+    const anchorName = ENTITY_REGION_TO_ANCHOR[effectiveRegion] || "center";
+    const resolved = resolveSafeEchoAnchor(stage, anchorName);
+    stage.dataset.entityAnchor = resolved.anchor;
+    window.echoEntity.setCenter(resolved.point.x, resolved.point.y, false);
+    entityPlacementOverride = effectiveRegion === "center" ? null : {region: effectiveRegion, source: source || "voice_command"};
+    return true;
+  }
+
+  // Whenever the workspace has an active surface (primary object OR a
+  // transient view like a comparison -- this now covers the WHOLE
+  // lifetime of a document session, not just a momentary "open" click),
+  // the plain conversational response panel is suppressed via CSS
+  // (.stage[data-workspace-object-focus="true"]) so the same content is
+  // never shown twice at once. Presentation-only: the response/history
+  // themselves are never cleared or altered.
+  function setWorkspaceObjectFocusActive(active) {
+    const stage = document.querySelector(".stage");
+    if (!stage) return;
+    stage.dataset.workspaceObjectFocus = active ? "true" : "false";
   }
 
   function createWorkspaceController() {
@@ -1680,6 +1962,18 @@
         }
         if (event.type === "conversation_cleared" || event.type === "topic_changed") {
           this.clear();
+          if (window.echoWorkspaceObjects) window.echoWorkspaceObjects.clear();
+          // A full workspace reset also ends any voice-driven entity
+          // placement override -- otherwise echo_workspace_objects.js's
+          // own no-surface-left "recenter to center" (updatePresentation)
+          // would fire through the UNGUARDED setEntityAnchor callback
+          // (there's no workspace-object surface left to guard against at
+          // that point) while entityPlacementOverride was still set,
+          // leaving the two states out of sync.
+          entityPlacementOverride = null;
+          return;
+        }
+        if (handleDocumentWorkspaceEvent(event)) {
           return;
         }
         if (event.type === "research_started") {
@@ -1892,6 +2186,7 @@
         if (responseTitle) responseTitle.textContent = "Última resposta";
         if (workspaceHint) workspaceHint.classList.remove("visible");
         if (window.echoWorkspace) window.echoWorkspace.clear();
+        if (window.echoWorkspaceObjects) window.echoWorkspaceObjects.clear();
         if (echoResponse) {
           echoResponse.textContent = "";
           echoResponse.dataset.responseMode = "short";
@@ -1906,6 +2201,7 @@
         }
         const stage = document.querySelector(".stage");
         activeResponseLayout = "inline";
+        entityPlacementOverride = null;
         if (stage) {
           stage.dataset.responseMode = "short";
           stage.dataset.responseLayout = "inline";
@@ -2060,6 +2356,20 @@
     telemetryDebugMode = new URLSearchParams(window.location.search).get("telemetryDebug") === "1";
     window.echoEntity = new window.EchoEntity(byId("mind"));
     window.echoWorkspace = createWorkspaceController();
+    window.echoWorkspaceObjects = window.EchoWorkspaceObjects.create({
+      setEntityAnchor: setWorkspaceObjectEntityAnchor,
+      setEntityPoint: setWorkspaceObjectEntityPoint,
+      onFocusChange: setWorkspaceObjectFocusActive,
+      // Phase 4 (section 11): the one frontend -> backend layout signal --
+      // a semantic object, never a pixel/coordinate (see
+      // echo_workspace_objects.js's computeSpacePressure). Fire-and-forget:
+      // no response is expected back for this specific call.
+      reportCapacity: (payload) => {
+        if (window.echoController && typeof window.echoController.reportWorkspaceCapacity === "function") {
+          window.echoController.reportWorkspaceCapacity(JSON.stringify(payload));
+        }
+      },
+    });
     window.echoFreeWorkspace = createFreeWorkspaceController();
     window.echoTelemetryDemo = applyTelemetryMock;
     updateAdaptiveLayout();

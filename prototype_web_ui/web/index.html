@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="./styles.css">
   <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
   <script defer src="./echo_entity.js"></script>
+  <script defer src="./echo_workspace_objects.js"></script>
   <script defer src="./echo_ui.js"></script>
 </head>
 <body>
@@ -68,6 +69,9 @@
               <p id="bridgeReply">A resposta aparece aqui.</p>
             </div>
           </div>
+
+          <svg id="workspaceTethers" class="workspace-tethers" aria-hidden="true" focusable="false"></svg>
+          <div id="workspaceObjects" class="workspace-objects" aria-label="Objetos de trabalho externalizados"></div>
 
           <section class="input-zone" aria-label="Entrada de texto">
             <form id="echoForm" class="input-pill">

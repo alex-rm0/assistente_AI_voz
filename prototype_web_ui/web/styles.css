@@ -180,7 +180,12 @@ input {
 }
 
 #mind {
-  z-index: 1;
+  /* Above .workspace-objects (5) and its focused child, so Echo is never
+     geometrically hidden behind a workspace surface -- a defensive net on
+     top of the real fix, which is that the focused surface's own left+right
+     sizing (see .workspace-object[data-state="focused"]) leaves Echo's
+     safe-anchor corner free by construction. */
+  z-index: 6;
   cursor: grab;
   touch-action: none;
   outline: 0;
@@ -979,6 +984,593 @@ body.workspace-dragging {
   color: #6f96b8;
   font: 400 10px var(--mono);
   text-transform: uppercase;
+}
+
+/* Workspace objects (Passo 3: workspace adaptativo, revisto para "one
+   primary work surface"). At any moment there is at most one big surface
+   -- [data-role="primary"] -- and zero or more small [data-role="reference"]
+   cards. Role is set by echo_workspace_objects.js's WorkspaceScene, never
+   hardcoded per object type: the same two rules below make a DOCUMENT, a
+   DRAFT or a transient COMPARISON view the surface, whichever it is. */
+.workspace-tethers {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.workspace-tether {
+  fill: none;
+  stroke: var(--cyan);
+  stroke-width: 1;
+  stroke-linecap: round;
+  opacity: .14;
+}
+
+.workspace-tether--entity {
+  opacity: .2;
+}
+
+.workspace-objects {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.workspace-object {
+  position: absolute;
+  overflow: hidden;
+  pointer-events: auto;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,.09);
+  background: rgba(12,14,20,.85);
+  box-shadow: 0 22px 48px -30px #000;
+  padding: 12px 13px 10px;
+  opacity: 0;
+  transform: translateY(6px) scale(.98);
+  transition: opacity .4s ease, transform .45s cubic-bezier(.2,.8,.3,1), left .3s ease, top .3s ease, width .3s ease;
+}
+
+.workspace-object[data-state="created"],
+.workspace-object[data-state="active"],
+.workspace-object[data-state="background"] {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+.workspace-object[data-dragging="true"] {
+  transition: none;
+}
+
+/* Passo 3.2, "esconde isto por agora" -- stays in the registry (so "mostra
+   X" can bring it back) and keeps its animatable properties (unlike
+   display:none), but is pulled out of view and out of interaction. */
+.workspace-object[data-hidden="true"] {
+  opacity: 0 !important;
+  pointer-events: none;
+}
+
+.workspace-object[data-type="document"] { border-color: rgba(70,197,255,.24); }
+.workspace-object[data-type="draft"] { border-color: rgba(255,196,110,.28); }
+.workspace-object[data-type="comparison"] { border-color: rgba(180,140,255,.28); }
+.workspace-object[data-type="excerpt"] { border-color: rgba(120,220,170,.28); }
+
+/* --- Reference role: small, one action, fully legible (never dimmed --
+   section 4 asked for a clean small card, not greyed-out clutter). --- */
+.workspace-object[data-role="reference"] {
+  width: 190px;
+  max-height: 150px;
+  opacity: 1;
+}
+
+.workspace-object[data-role="reference"] .workspace-object__header {
+  cursor: grab;
+  touch-action: none;
+}
+
+.workspace-object[data-role="reference"][data-dragging="true"] .workspace-object__header {
+  cursor: grabbing;
+}
+
+.workspace-object[data-role="reference"] .workspace-object__body {
+  max-height: 80px;
+}
+
+/* --- Primary role: the ONE surface, whatever object currently is it.
+   left+right (not a fixed width) so it geometrically stops short of
+   Echo's measured position by construction. --- */
+.workspace-object[data-role="primary"] {
+  left: var(--safe-gap) !important;
+  top: calc(var(--header-height) + var(--safe-gap)) !important;
+  /* 374px is not decorative: it's the entity's own worst-case reach from
+     the stage's right edge -- topRightX's fallback radius (180) + its
+     fallback safe-gap*1.4 (33.6) + the entity's own drawn fallback radius
+     (160) = 373.6px, measured directly against resolveSafeEchoAnchor's and
+     EchoEntity.responsiveRadius()'s fallback constants in echo_ui.js/
+     echo_entity.js (both hit their fallback branch here, since
+     getComputedStyle never resolves a clamp()-valued custom property back
+     to a px number). Used only as the FIRST-PAINT reservation, before
+     echo_workspace_objects.js's updateEchoProximity() has measured this
+     very rect and moved Echo to a real point next to it -- see section 12,
+     not the final word on where Echo ends up. */
+  right: calc(374px + var(--safe-gap));
+  width: auto;
+  max-height: min(74vh, 660px);
+  padding: 18px 20px 18px;
+  cursor: default;
+}
+
+.workspace-object[data-role="primary"] .workspace-object__header {
+  cursor: default;
+}
+
+.workspace-object[data-role="primary"] .workspace-object__title {
+  font-size: 19px;
+  white-space: normal;
+}
+
+.workspace-object[data-role="primary"] .workspace-object__subtitle {
+  font-size: 13px;
+  color: var(--cyan-soft);
+}
+
+.workspace-object[data-role="primary"] .workspace-object__body {
+  max-height: none;
+  height: calc(100% - 92px);
+}
+
+.workspace-object[data-role="primary"] .workspace-object__text {
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.workspace-object__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.workspace-object__type {
+  font: 400 9px var(--mono);
+  letter-spacing: .08em;
+  color: var(--text-faint);
+  text-transform: uppercase;
+}
+
+/* Always in the DOM (see echo_workspace_objects.js buildNode), only shown
+   for a closable surface -- today, a transient comparison view -- same
+   header-close convention as #researchWorkspace/#telemetryPanel. A
+   primary DOCUMENT/DRAFT has nothing to "close": it just is the surface
+   until superseded. */
+.workspace-object__close {
+  display: none;
+  width: 22px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(255,255,255,.04);
+  color: var(--text-low);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.workspace-object__close:hover {
+  color: var(--text-high);
+  background: rgba(255,255,255,.09);
+}
+
+.workspace-object[data-closable="true"] .workspace-object__close {
+  display: flex;
+}
+
+.workspace-object__title {
+  margin: 8px 0 0;
+  color: var(--text-high);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.workspace-object__subtitle {
+  margin: 2px 0 0;
+  color: var(--text-low);
+  font: 300 11px var(--sans);
+}
+
+.workspace-object__body {
+  margin-top: 8px;
+  overflow: auto;
+}
+
+.workspace-object__text,
+.workspace-object__working {
+  margin: 0;
+  color: var(--text-mid);
+  font: 300 12px/1.5 var(--sans);
+  white-space: pre-wrap;
+}
+
+.workspace-object__working {
+  color: var(--cyan-soft);
+}
+
+.workspace-object[data-working="true"] .workspace-object__working {
+  animation: workspace-object-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes workspace-object-pulse {
+  0%, 100% { opacity: .55; }
+  50% { opacity: 1; }
+}
+
+.workspace-object__comparison {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  height: 100%;
+}
+
+.workspace-object__comparison-col {
+  min-width: 0;
+  height: 100%;
+  overflow: auto;
+  border: 1px solid rgba(255,255,255,.07);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: rgba(255,255,255,.02);
+}
+
+.workspace-object__comparison-col span {
+  display: block;
+  margin-bottom: 6px;
+  color: #6f96b8;
+  font: 400 9px var(--mono);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.workspace-object__comparison-col p {
+  margin: 0;
+  color: var(--text-mid);
+  font: 300 11px/1.5 var(--sans);
+  white-space: pre-wrap;
+}
+
+.workspace-object[data-role="primary"] .workspace-object__comparison-col span {
+  font-size: 10px;
+  color: var(--cyan-soft);
+}
+
+.workspace-object[data-role="primary"] .workspace-object__comparison-col p {
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* Action hierarchy (section 8): a handful of contextual buttons on the
+   primary surface, one on a reference card -- never a control panel. */
+.workspace-object__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.workspace-object__actions button {
+  border: 1px solid rgba(255,255,255,.1);
+  background: rgba(255,255,255,.04);
+  color: var(--text-low);
+  font: 400 10px var(--mono);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  border-radius: 6px;
+  padding: 5px 9px;
+  cursor: pointer;
+}
+
+.workspace-object__actions button:hover {
+  color: var(--text-high);
+  background: rgba(255,255,255,.09);
+}
+
+/* Secondary actions (restore/discard on a draft primary surface) exist
+   but only reveal on hover/focus -- never permanent buttons competing
+   with the 2-4 primary ones. */
+.workspace-object__actions-secondary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  opacity: 0;
+  transition: opacity .2s ease;
+}
+
+.workspace-object__actions-secondary:empty {
+  display: none;
+}
+
+.workspace-object:hover .workspace-object__actions-secondary,
+.workspace-object:focus-within .workspace-object__actions-secondary {
+  opacity: 1;
+}
+
+.workspace-object__actions-secondary button {
+  border: 0;
+  background: none;
+  color: var(--text-faint);
+  font: 400 10px var(--mono);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  padding: 3px 2px;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+}
+
+.workspace-object__actions-secondary button:hover {
+  color: var(--text-low);
+  text-decoration-color: currentColor;
+}
+
+/* While the workspace has an active surface, the work remains the
+   protagonist, but Echo's reply must still be perceptible. Only the old
+   placeholder hint is hidden; the real response stays above workspace
+   objects through its normal z-index and subtle reading-mode styling. */
+.stage[data-workspace-object-focus="true"] .workspace-hint {
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+.stage[data-workspace-object-focus="true"] .echo-response.visible {
+  opacity: .96;
+  z-index: 8;
+}
+
+/* --- Phase 3B/3C: Representation Renderer -------------------------------
+   cards/list are flat projections -- no primary/reference distinction, so
+   [data-role] is intentionally absent on their nodes (see
+   echo_workspace_objects.js's renderRepresentation/updateRepresentationNode).
+   side_by_side reuses the EXISTING [data-role="primary"]/["reference"]
+   rules above, with one Phase 3C addition ([data-compact-major] below) for
+   short-content majors. Transitions/reduced-motion are inherited from
+   .workspace-object's own rule + the global prefers-reduced-motion
+   override at the bottom of this file -- nothing new introduced for
+   either.
+
+   Phase 3C (cognitive layout baseline): the container itself
+   (#workspaceObjects, full-viewport, inset:0) only ever CENTERS its
+   content -- any border/background/sizing lives on the shrink-to-fit
+   `.workspace-representation-group` wrapper instead. Styling the full-
+   bleed container directly was the "list becomes a full-height sidebar"
+   bug: a border+background painted across the WHOLE viewport regardless
+   of how little content (3 short rows) was actually inside it. */
+
+.workspace-objects[data-representation-style="cards"],
+.workspace-objects[data-representation-style="list"] {
+  /* Grid's place-items centers a shrink-to-fit item by its own intrinsic
+     size cleanly; a flex container centering a flex-wrap child is
+     ambiguous (its width can resolve to a single column's min-content
+     instead of the natural multi-column max-content width). */
+  display: grid;
+  place-items: center;
+  padding: calc(var(--header-height) + var(--safe-gap)) var(--safe-gap) var(--safe-gap);
+}
+
+.workspace-representation-group {
+  pointer-events: auto;
+  display: flex;
+}
+
+/* A balanced, content-sized cluster near the working area -- not pinned
+   to a corner, not stretched to fill available width just because it's
+   there (section 2/4). */
+.workspace-objects[data-representation-style="cards"] .workspace-representation-group {
+  flex-wrap: wrap;
+  align-content: center;
+  justify-content: center;
+  gap: 20px;
+  max-width: min(64vw, 620px);
+}
+
+/* A quiet, single panel sized to its OWN content (grows with more rows,
+   capped at a sensible max so only a genuinely long list scrolls --
+   section 5's explicit requirement), never a fixed full-height sidebar. */
+.workspace-objects[data-representation-style="list"] .workspace-representation-group {
+  flex-direction: column;
+  align-items: stretch;
+  width: min(300px, 32vw);
+  max-height: min(50vh, 380px);
+  overflow-y: auto;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: rgba(12,14,20,.6);
+}
+
+/* Neutralizes the base .workspace-object's absolute positioning/sizing --
+   both cards and list rows flow normally inside the group wrapper above. */
+.workspace-object[data-representation-role] {
+  position: static;
+  left: auto;
+  top: auto;
+  right: auto;
+  width: auto;
+  max-height: none;
+}
+
+/* Content-driven, not a fixed viewport-relative box (section 3) -- shrinks
+   to the title's own width within calm min/max bounds, with roomier
+   padding/type than the old cramped "widget" sizing so it reads as a
+   thought object, not a form control. Only a card carrying real body text
+   grows past the min width (the generic __body rule's own line-wrapping
+   already handles that; no separate rule needed here). */
+.workspace-objects[data-representation-style="cards"] .workspace-object[data-representation-role] {
+  width: fit-content;
+  min-width: 160px;
+  max-width: 260px;
+  padding: 20px 24px;
+}
+
+.workspace-objects[data-representation-style="cards"] .workspace-object[data-representation-role] .workspace-object__title {
+  font-size: 15px;
+  white-space: normal;
+}
+
+/* A subtle accent only -- side_by_side is the style that actually resizes
+   majors; cards keeps every object the same size and just tags which
+   one(s) the backend marked major, so it never turns into a second
+   competing "primary" look. */
+.workspace-objects[data-representation-style="cards"] .workspace-object[data-representation-role="major"] {
+  border-color: rgba(70,197,255,.4);
+  box-shadow: 0 0 0 1px rgba(70,197,255,.25), 0 22px 48px -30px #000;
+}
+
+/* No technical eyebrow ("OBJETO"/"TAREFA") or close button on a generic
+   representation card/row -- section 16 explicitly asks to avoid
+   debug-style status chrome here. */
+.workspace-objects[data-representation-style="cards"] .workspace-object__header,
+.workspace-objects[data-representation-style="list"] .workspace-object__header {
+  display: none;
+}
+
+.workspace-objects[data-representation-style="list"] .workspace-object[data-representation-role] {
+  border: 0;
+  border-bottom: 1px solid var(--hairline);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 10px 16px;
+  flex-shrink: 0;
+}
+
+.workspace-objects[data-representation-style="list"] .workspace-object[data-representation-role]:last-child {
+  border-bottom: 0;
+}
+
+/* One lean line per row -- body/actions stay for cards, but a list reads
+   as titles only, which is what makes it visibly a LIST rather than
+   cards stacked vertically. */
+.workspace-objects[data-representation-style="list"] .workspace-object__body,
+.workspace-objects[data-representation-style="list"] .workspace-object__actions,
+.workspace-objects[data-representation-style="list"] .workspace-object__actions-secondary {
+  display: none;
+}
+
+.workspace-objects[data-representation-style="list"] .workspace-object__title {
+  white-space: normal;
+  font-size: 13px;
+}
+
+.workspace-objects[data-representation-style="list"] .workspace-object[data-representation-role="major"] .workspace-object__title {
+  color: var(--cyan-soft);
+}
+
+/* Phase 3C: a compact side_by_side pair (short-content majors, see
+   isCompactObject in echo_workspace_objects.js) -- same [data-role=
+   "primary"] surface, just with a calmer, smaller-content presentation
+   (no technical eyebrow, larger centered title) than a real document
+   surface, matching the cards/list treatment above instead of looking
+   like a miniature document editor. Geometry itself (left/top/width/
+   max-height) is set inline by layoutCompactMajorSurfaces(), not here. */
+.workspace-object[data-role="primary"][data-compact-major="true"] {
+  padding: 22px 26px;
+}
+
+.workspace-object[data-role="primary"][data-compact-major="true"] .workspace-object__header {
+  display: none;
+}
+
+.workspace-object[data-role="primary"][data-compact-major="true"] .workspace-object__title {
+  font-size: 16px;
+  text-align: center;
+}
+
+.workspace-object[data-role="primary"][data-compact-major="true"] .workspace-object__body {
+  height: auto;
+  text-align: center;
+}
+
+/* Phase 4 (Cognitive Workspace Blueprint v2): ATTENTION visual language
+   (section 18) -- subtle opacity/scale differences ONLY, layered on top
+   of whatever data-role/data-representation-role already decided (never
+   overriding position/size, never flashy color coding or dashboard
+   badges -- section 18 explicitly asks to keep Echo's dark/futuristic/
+   minimal language). FOCUS gets the strongest hierarchy (full opacity,
+   a faint accent ring); ACTIVE/VISIBLE are the calm default (no override
+   needed, the base rule already reads that way); GLANCEABLE quietens;
+   MINIMIZED collapses to a small chip (section 16 -- no heavy dock/
+   taskbar, just a compact label); HIDDEN is not rendered at all. */
+.workspace-object[data-attention="focus"] {
+  box-shadow: 0 0 0 1px rgba(120,190,255,.35), 0 22px 48px -30px #000;
+}
+
+.workspace-object[data-attention="glanceable"] {
+  opacity: .68;
+}
+
+.workspace-object[data-attention="hidden"] {
+  display: none;
+}
+
+/* Section 16: a lightweight chip, not a smaller card -- header/body/
+   actions all collapse away, leaving only the title as a quiet label the
+   user can still point back to ("mostra o email outra vez"). Applies
+   uniformly whether the node is currently a flat peer, a reference, or
+   even a major -- attention is orthogonal to representation, so this
+   never checks data-role/data-representation-role. */
+.workspace-object[data-attention="minimized"] {
+  width: auto;
+  min-width: 0;
+  max-width: 160px;
+  height: auto;
+  max-height: none;
+  padding: 6px 12px;
+  opacity: .6;
+  box-shadow: none;
+  border-color: rgba(255,255,255,.06);
+}
+
+.workspace-object[data-attention="minimized"] .workspace-object__header,
+.workspace-object[data-attention="minimized"] .workspace-object__body,
+.workspace-object[data-attention="minimized"] .workspace-object__actions,
+.workspace-object[data-attention="minimized"] .workspace-object__actions-secondary {
+  display: none;
+}
+
+.workspace-object[data-attention="minimized"] .workspace-object__title {
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-quiet, rgba(255,255,255,.55));
+}
+
+@media (max-width: 860px) {
+  .workspace-object[data-role="reference"] {
+    width: 150px;
+  }
+  .workspace-object__comparison {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  .workspace-object__comparison-col {
+    height: auto;
+    max-height: 40vh;
+  }
+  /* Narrow layouts already send the entity to layoutRole=compact at a much
+     smaller --entity-size-actual (see Passo 2), so the primary surface can
+     safely reclaim the full width instead of reserving Echo's lane. */
+  .workspace-object[data-role="primary"] {
+    right: var(--safe-gap);
+  }
 }
 
 .workspace-hint {

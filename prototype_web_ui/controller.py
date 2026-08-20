@@ -202,6 +202,29 @@ class EchoUIController(QObject):
         return encoded
 
     @Slot(str)
+    def reportWorkspaceCapacity(self, payload: str) -> None:
+        """Phase 4 (Cognitive Workspace Blueprint v2, section 11): the
+        ONLY frontend -> backend layout signal. `payload` is a JSON object
+        with exactly {pressure, visible_object_count, major_surface_count,
+        overflow_risk} -- semantic capacity, never a pixel or coordinate
+        (echo_workspace_objects.js computes this; see its own comments for
+        why no geometry field exists to send one in). Fire-and-forget: no
+        response/uiEvent is expected back for this call itself, the signal
+        is simply stored for the NEXT turn's policy checks to read."""
+        owner = getattr(self.responder, "__self__", None)
+        handler = getattr(owner, "report_workspace_capacity", None)
+        if not callable(handler):
+            return
+        try:
+            data = json.loads(str(payload or "{}"))
+        except json.JSONDecodeError:
+            return
+        try:
+            handler(data)
+        except Exception as exc:
+            _debug_ui(f"[Echo UI DEBUG] workspace_capacity_error={exc}")
+
+    @Slot(str)
     def sendTestResponse(self, text: str) -> None:
         self._thread_debug("sendTestResponse")
         response_text = str(text or "")

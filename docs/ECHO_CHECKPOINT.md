@@ -6,6 +6,42 @@ Estado Git no início da auditoria: limpo (`git status --short` sem alterações
 
 Este checkpoint descreve o estado técnico real do Echo antes de adicionar novos providers ou funcionalidades. A análise foi feita a partir do código presente no repositório, não a partir de intenções anteriores.
 
+## Atualização — Cognitive Workspace Foundation Estabilizada
+
+Atualizado em 2026-08-20. Este checkpoint regista a fundação estabilizada do Cognitive Workspace até à base da Phase 4. A validação final desta ronda foi `1198 passed` com `.\.venv\Scripts\python.exe -m pytest`.
+
+### Arquitetura estabilizada
+
+- `WorkSession` é o contentor transitório central do estado de trabalho: tarefa ativa, tarefas pausadas, contexto documental, escrita pendente, objetos semânticos, representação, atenção, restrições e capacidade.
+- `InteractionInterpreter` e `TurnRoutingDecision` dão uma leitura canónica do turno antes dos caminhos determinísticos principais. O routing continua conservador: comandos explícitos de workspace/atenção/representação vencem continuações genéricas de tarefa.
+- `interaction_primitives` concentra primitivas lexicais partilhadas, para evitar dependência circular entre o interpretador e `conversation.py`.
+- O modelo de atividade genérica permite tarefas continuáveis sem criar domínios rígidos: comparação genérica, planeamento, estudo, investigação, escrita e email.
+- O fluxo de escrita ainda mantém dívida arquitetural conhecida: `ActiveTaskContext` para `compose_email` e `PendingWritingTask` coexistem. Está funcional, mas continua híbrido.
+
+### Modelo semântico do workspace
+
+- `SemanticObject` representa objetos estáveis do espaço de trabalho e mantém ownership por `task_id`.
+- Opções de comparação e critérios de comparação estão separados: opções usam `kind="option"`; critérios usam `kind="criterion"`.
+- A ownership semântica é resolvida antes de materializar objetos. Uma referência explícita como "os telefones" associa novos critérios/opções à comparação correta, mesmo quando outro trabalho, como email, está ativo.
+- O sistema distingue retomar uma atividade de focar visualmente um artefacto: `TASK_RESUME` altera a atividade ativa; foco/mostrar/minimizar altera atenção/representação.
+
+### Representação, atenção e execução composta
+
+- `RepresentationState` define como os objetos são apresentados (`cards`, `list`, `side_by_side`, `conversation_only`) sem conter geometria de frontend.
+- `AttentionState` define importância/prominência (`focus`, `active`, `visible`, `glanceable`, `minimized`, `hidden`) separada da representação.
+- A UI de workspace recebe objetos semânticos e eventos de representação/atenção através da ponte frontend, incluindo rendering de objetos, comandos visuais e sincronização de artefactos.
+- Intenções compostas de workspace são suportadas para fluxos determinísticos como mostrar um artefacto e minimizar outro conjunto no mesmo turno.
+- O scope relativo `all_except` existe para pedidos como "abre o mail para ver, minimiza tudo o resto": a cláusula anterior fornece a âncora que deve permanecer visível.
+- A infraestrutura de capacidade/space-pressure existe, mas a política automática de ask-before-minimize ainda é o próximo item inacabado da Phase 4.
+- A resposta visual respeita o invariante de visibilidade: Echo, resposta e composer não devem colidir nos modos de resposta estabilizados.
+
+### Baseline e limites
+
+- Baseline validada: `1198 passed`.
+- Operações determinísticas de Cognitive Workspace não usam Anthropic nem chamadas LLM.
+- Não foram usadas chamadas Anthropic para validar estes fluxos.
+- Próximo passo técnico da Phase 4: política automática de space-pressure com confirmação antes de minimizar objetos.
+
 ## Atualização — Checkpoint Técnico E Funcional Completo (Routing Automático, Documentos, Estados Visuais)
 
 Atualizado em 2026-08-07. HEAD atual: `72ddd5b`. Esta secção substitui, em termos de estado atual, as afirmações mais antigas deste ficheiro sobre routing/providers/UI — as secções seguintes (1 a 24) descrevem o estado em 2026-07-22/08-06 e ficam preservadas como histórico, mas partes delas (por exemplo "Anthropic: NÃO IMPLEMENTADO" na secção 9) já não são verdade. Esta secção é a fonte de verdade mais recente.
