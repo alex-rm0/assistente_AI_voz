@@ -100,6 +100,13 @@ def test_security_block_message_uses_ptpt_accents() -> None:
     assert "acao" not in decision.message
 
 
+def test_security_does_not_treat_telemoveis_as_move_command() -> None:
+    decision = check_user_request("volta aos telemóveis")
+
+    assert decision.allowed
+    assert decision.action is None
+
+
 def test_exhaustion_response_is_short_and_connected_to_problem(tmp_path: Path) -> None:
     engine = make_engine(tmp_path)
 

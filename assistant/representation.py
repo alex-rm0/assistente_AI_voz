@@ -223,6 +223,7 @@ ALTERNATIVES_TRIGGER_PHRASES = (
     "vamos também comparar", "tambem vamos comparar", "também vamos comparar", "comparar as opcoes",
     "quero considerar", "vamos considerar", "considerar as opcoes",
     "vamos avaliar", "quero avaliar", "preciso de avaliar",
+    "quero escolher entre", "escolher entre",
 )
 
 _ALTERNATIVE_SPLIT_RE = re.compile(r",| e (?=\w)| com (?=\w)|\bvs\.?\s+(?=\w)", re.IGNORECASE)

@@ -69,6 +69,14 @@ from assistant.representation import (
     strip_add_alternatives_phrase,
     transform_representation,
 )
+from assistant.task_intelligence import (
+    answer_task_query,
+    classify_task_query,
+    needs_task_reference_clarification,
+    task_card_summary,
+    task_option_titles,
+    update_task_knowledge,
+)
 from assistant.memory_recall import (
     build_memory_retrieval,
     build_task_retrieval,
@@ -967,6 +975,18 @@ class AssistantEngine:
                 )
                 self._perf_log("resposta total", request_started_at, time.perf_counter())
                 return writing_workflow_response
+
+        task_intelligence_response = self._try_task_intelligence_query(user_message)
+        if task_intelligence_response is not None:
+            task_intelligence_response = self._complete_turn(
+                user_message,
+                task_intelligence_response,
+                "TASK_INTELLIGENCE",
+                technical=True,
+                selected_path="TASK_INTELLIGENCE",
+            )
+            self._perf_log("resposta total", request_started_at, time.perf_counter())
+            return task_intelligence_response
 
         # Passo 3.4: an ongoing (or newly triggered) ActiveTaskContext gets
         # first refusal on the turn, before document/general routing --
@@ -2761,6 +2781,27 @@ class AssistantEngine:
                 self._turn_trace["active_task_continuation_rejected_reason"] = "no_positive_task_evidence"
         return response
 
+    def _try_task_intelligence_query(self, user_message: str) -> str | None:
+        if not classify_task_query(user_message):
+            return None
+        task = self._active_task_context
+        if task is None or task.status in ("completed", "cancelled"):
+            return None
+        response = answer_task_query(self._work_session, task, user_message)
+        if not response:
+            return None
+        if self._turn_trace is not None:
+            self._turn_trace["task_intelligence_query"] = True
+            self._turn_trace["task_intelligence_task_id"] = task.id
+            self._turn_trace["task_intelligence_task_type"] = task.task_type
+        return response
+
+    def _current_turn_reference(self) -> str:
+        try:
+            return f"turn-{len(self.memory.load()) + 1}"
+        except Exception:
+            return "turn-current"
+
     def _process_task_turn(self, raw_message: str, normalized_message: str) -> str | None:
         """Returns a response if this text meaningfully created/updated/
         resolved the active task; None means "not task-related, caller
@@ -2811,6 +2852,7 @@ class AssistantEngine:
                 materialized_options = self._materialize_comparison_options_from_context(new_ctx, raw_message)
                 if materialized_options and "options" not in updated_fields:
                     updated_fields.append("options")
+                knowledge_entries = update_task_knowledge(self._work_session, new_ctx, raw_message, turn_id=self._current_turn_reference())
                 new_ctx.source_turns.append(raw_message)
                 self._active_task_context = new_ctx
                 self._touch_task(new_ctx)
@@ -2823,6 +2865,7 @@ class AssistantEngine:
                     self._turn_trace["active_task_selected_path"] = "TASK_SWITCH"
                     self._turn_trace["task_continuation_detected"] = False
                     self._turn_trace["task_fields_updated"] = updated_fields
+                    self._turn_trace["task_knowledge_updated_count"] = len(knowledge_entries)
                     self._turn_trace["task_context_source"] = "deterministic_activity"
                     self._turn_trace["task_turn_intent"] = "switch"
                 return self._task_continuation_response(new_ctx)
@@ -2876,6 +2919,15 @@ class AssistantEngine:
                     self._turn_trace["task_context_source"] = "deterministic_activity"
                     self._turn_trace["task_turn_intent"] = "continue"
                 return self._task_continuation_response(ctx)
+            if needs_task_reference_clarification(self._work_session, ctx, raw_message):
+                options = task_option_titles(self._work_session, ctx)
+                labels = " ou ".join(options[:3]) if options else "qual opção"
+                if self._turn_trace is not None:
+                    self._turn_trace["task_continuation_detected"] = True
+                    self._turn_trace["task_turn_intent"] = "clarify_reference"
+                    self._turn_trace["active_task_continuation_evidence"] = "ambiguous_task_reference"
+                    self._turn_trace["task_continuation_rejected"] = False
+                return f"Quando dizes isso, estás a falar de {labels}?"
             same_task_start = bool(interpretation.starts_task and interpretation.task_type == ctx.task_type)
             allow_unclassified_note = bool(interpretation.continues_task or interpretation.refines_task or same_task_start)
             updated_fields = self._extract_task_fields(
@@ -2897,6 +2949,7 @@ class AssistantEngine:
                     self._turn_trace["task_continuation_rejected"] = True
                     self._turn_trace["active_task_continuation_rejected_reason"] = "no_positive_task_evidence"
                 return None
+            knowledge_entries = update_task_knowledge(self._work_session, ctx, raw_message, turn_id=self._current_turn_reference())
             ctx.source_turns.append(raw_message)
             self._touch_task(ctx)
             if self._turn_trace is not None:
@@ -2907,6 +2960,7 @@ class AssistantEngine:
                 self._turn_trace["task_continuation_rejected"] = False
                 self._turn_trace["active_task_continuation_rejected_reason"] = ""
                 self._turn_trace["task_fields_updated"] = updated_fields
+                self._turn_trace["task_knowledge_updated_count"] = len(knowledge_entries)
                 self._turn_trace["task_context_source"] = "deterministic"
                 self._turn_trace["task_turn_intent"] = "refine" if interpretation.refines_task else ("continue" if same_task_start else "data")
             return self._task_continuation_response(ctx)
@@ -2928,6 +2982,7 @@ class AssistantEngine:
         materialized_options = self._materialize_comparison_options_from_context(ctx, raw_message)
         if materialized_options and "options" not in updated_fields:
             updated_fields.append("options")
+        knowledge_entries = update_task_knowledge(self._work_session, ctx, raw_message, turn_id=self._current_turn_reference())
         ctx.source_turns.append(raw_message)
         self._active_task_context = ctx
         if self._turn_trace is not None:
@@ -2937,6 +2992,7 @@ class AssistantEngine:
             if ctx.task_type != "compose_email":
                 self._turn_trace["active_task_selected_path"] = "TASK_START"
             self._turn_trace["task_fields_updated"] = updated_fields
+            self._turn_trace["task_knowledge_updated_count"] = len(knowledge_entries)
             self._turn_trace["task_context_source"] = "deterministic_activity" if interpretation.task_type else "deterministic"
             self._turn_trace["task_turn_intent"] = "data"
         return self._task_continuation_response(ctx)
@@ -3081,6 +3137,9 @@ class AssistantEngine:
         if ctx.task_type != "compose_email":
             title = _generic_task_title(ctx)
             content = _generic_task_card_content(ctx)
+            intelligence_lines = task_card_summary(self._work_session, ctx)
+            if intelligence_lines:
+                content = content + "\n" + "\n".join(intelligence_lines)
             if not ctx.active_artifact_id:
                 ctx.active_artifact_id = f"artifact-{ctx.id}"
             ctx.active_artifact_revision += 1
@@ -3993,7 +4052,7 @@ class AssistantEngine:
         if len(candidates) < 2:
             return None
 
-        category = extract_comparison_category(user_message)
+        category = extract_comparison_category(user_message) or _infer_generic_comparison_category(_normalize_text(user_message))
         if self._explicit_alternatives_would_create_new_activity(user_message, candidates, category):
             capacity_response = self._maybe_prepare_task_surface_capacity_action(user_message)
             if capacity_response:
@@ -4007,9 +4066,11 @@ class AssistantEngine:
             self._work_session.active_task.id if self._work_session.active_task is not None else ""
         )
         created_ids = self._materialize_comparison_options(candidates, user_message, owning_task_id=owning_task_id)
+        knowledge_entries = update_task_knowledge(self._work_session, activity_ctx, user_message, turn_id=self._current_turn_reference()) if activity_ctx is not None else []
         if self._turn_trace is not None:
             if category:
                 self._turn_trace["comparison_category"] = category
+            self._turn_trace["task_knowledge_updated_count"] = len(knowledge_entries)
             if activity_ctx is not None:
                 if self._turn_trace.get("task_started"):
                     self._turn_trace["generic_activity_created"] = True
@@ -4136,6 +4197,8 @@ class AssistantEngine:
             if current.task_type == "generic_comparison":
                 current_category = _normalize_text(current.parameters.get("category", ""))
                 next_category = _normalize_text(category)
+                current_options = _normalized_option_set(_split_option_text(current.parameters.get("options", "")))
+                next_options = _normalized_option_set(candidates)
                 starts_additional_comparison = contains_any_phrase(
                     normalized,
                     (
@@ -4151,7 +4214,8 @@ class AssistantEngine:
                         "nova comparação",
                     ),
                 )
-                if (next_category and current_category and next_category != current_category) or starts_additional_comparison:
+                has_distinct_option_set = bool(current_options and next_options and current_options.isdisjoint(next_options))
+                if (next_category and current_category and next_category != current_category) or starts_additional_comparison or has_distinct_option_set:
                     self._pause_active_task()
                     ctx = self._create_task_context(
                         "generic_comparison",
@@ -4426,6 +4490,8 @@ class AssistantEngine:
             self._queue_semantic_object_sync(obj)
             created_ids.append(object_id)
         self._merge_options_into_task(owning_task_id, added_titles)
+        owner_task = self._find_task_by_id(owning_task_id)
+        knowledge_entries = update_task_knowledge(self._work_session, owner_task, user_message, turn_id=self._current_turn_reference()) if owner_task is not None else []
 
         current = self._work_session.representation
         style = current.style if current is not None else "cards"
@@ -4472,6 +4538,7 @@ class AssistantEngine:
             self._turn_trace["mixed_add_target_reference"] = target_reference
             self._turn_trace["mixed_add_owner_task_id"] = owning_task_id
             self._turn_trace["mixed_add_target_resolution_source"] = target_resolution_source
+            self._turn_trace["task_knowledge_updated_count"] = len(knowledge_entries)
 
         labels = added_titles[0] if len(added_titles) == 1 else ", ".join(added_titles[:-1]) + " e " + added_titles[-1]
         if existing_titles and len(existing_titles) == len(added_titles):
@@ -11973,6 +12040,12 @@ _ACTIVITY_RESUME_PHRASES = (
     "volta a",
     "voltar ao",
     "volta ao",
+    "voltar aos",
+    "volta aos",
+    "voltar as",
+    "volta as",
+    "voltar às",
+    "volta às",
     "retoma",
     "continuar",
     "continuamos",
@@ -12061,6 +12134,8 @@ def _activity_start_from_message(raw_text: str, normalized_text: str) -> tuple[s
             "vamos avaliar",
             "quero avaliar",
             "preciso de avaliar",
+            "quero escolher entre",
+            "escolher entre",
         ),
     ) and (
         contains_any_phrase(normalized_text, ("comparar", "avaliar", "com", "entre"))
@@ -12087,6 +12162,11 @@ def _activity_start_from_message(raw_text: str, normalized_text: str) -> tuple[s
             "preparar férias",
             "prepara te",
         ),
+    ):
+        return "plan_trip", "travel_planning_trigger"
+    if contains_any_phrase(normalized_text, ("quero ajuda a planear", "ajuda a planear", "ajuda me a planear")) and re.search(
+        r"\b(vou|vamos|iremos)\s+(?:a|para)\s+\w+",
+        normalized_text,
     ):
         return "plan_trip", "travel_planning_trigger"
     if contains_any_phrase(normalized_text, ("vamos estudar",)):
@@ -12126,6 +12206,13 @@ def _interpret_activity(
             goal=meta["goal"],
             confidence=0.92,
             reason="resume_previous_activity",
+            remaining_content=normalized_text,
+        )
+    if has_resume and paused_tasks:
+        return ActivityInterpretation(
+            resumes_task=True,
+            confidence=0.68,
+            reason="resume_semantic_reference",
             remaining_content=normalized_text,
         )
     if task_type:
@@ -12182,6 +12269,7 @@ def _resume_target_from_message(normalized_text: str) -> str:
 
 
 def _find_task_stack_match(tasks: list["ActiveTaskContext"], interpretation: ActivityInterpretation) -> int | None:
+    target_tokens = _semantic_token_forms(interpretation.remaining_content)
     for index in range(len(tasks) - 1, -1, -1):
         task = tasks[index]
         if interpretation.task_type and task.task_type == interpretation.task_type:
@@ -12190,6 +12278,10 @@ def _find_task_stack_match(tasks: list["ActiveTaskContext"], interpretation: Act
             return index
         if interpretation.activity_family != "unknown" and task.activity_family == interpretation.activity_family:
             return index
+        if interpretation.resumes_task and target_tokens:
+            task_tokens = _semantic_token_forms(_task_semantic_text(task))
+            if target_tokens.intersection(task_tokens):
+                return index
     return None
 
 
@@ -12204,7 +12296,7 @@ def _message_mentions_active_task(normalized_text: str, ctx: "ActiveTaskContext"
             ),
         )
     if ctx.task_type == "plan_trip":
-        return contains_any_phrase(normalized_text, ("ferias", "viagem", "norte", "portugal", "destino", "alojamento", "descansar", "aventura"))
+        return contains_any_phrase(normalized_text, ("ferias", "viagem", "norte", "portugal", "destino", "alojamento", "descansar", "aventura", "orcamento", "orçamento", "gastar", "euros", "datas", "semana", "voos", "voo", "itinerario", "itinerário", "visitar", "coisas para ver"))
     if ctx.task_type == "study_topic":
         return contains_any_phrase(normalized_text, ("exame", "teste", "slides", "apontamentos", "materia", "algoritmos", "grafos", "estudar"))
     if ctx.task_type == "make_decision":
@@ -12212,7 +12304,7 @@ def _message_mentions_active_task(normalized_text: str, ctx: "ActiveTaskContext"
     if ctx.task_type == "research_topic":
         return contains_any_phrase(normalized_text, ("investigar", "pesquisar", "opcoes", "opcao", "fontes", "alternativas"))
     if ctx.task_type == "generic_comparison":
-        return contains_any_phrase(normalized_text, ("compara", "comparar", "comparacao", "comparação", "bateria", "camara", "câmara", "autonomia", "criterios", "critérios", "opcao", "opcoes", "adiciona", "acrescenta"))
+        return contains_any_phrase(normalized_text, ("compara", "comparar", "comparacao", "comparação", "bateria", "camara", "câmara", "autonomia", "criterios", "critérios", "opcao", "opcoes", "adiciona", "acrescenta", "orcamento", "orçamento", "gastar", "euros", "custa", "esta a", "está a", "preco", "preço", "mais importante", "prioridade", "melhor", "pior", "vantagem", "desvantagem", "escolher", "decidir", "suporte"))
     if ctx.task_type == "generic_activity":
         return contains_any_phrase(normalized_text, ("organizar", "preparar", "plano", "passo", "proximo", "próximo", "tarefa", "ideia"))
     if ctx.task_type == "writing":
@@ -12540,12 +12632,17 @@ def _extract_generic_activity_fields(
             ctx.parameters["topic"] = cleaned
             updated.append("topic")
     elif ctx.task_type == "generic_comparison":
+        if not ctx.parameters.get("category"):
+            category = _infer_generic_comparison_category(normalized_text)
+            if category:
+                ctx.parameters["category"] = category
+                updated.append("category")
         if not ctx.parameters.get("options"):
             options = _extract_comparison_options_from_text(raw_text)
             if options:
                 ctx.parameters["options"] = " e ".join(options)
                 updated.append("options")
-        if contains_any_phrase(normalized_text, ("compara", "comparar", "criterios", "critérios", "bateria", "camara", "câmara", "autonomia")):
+        if contains_any_phrase(normalized_text, ("compara", "comparar", "criterios", "critérios", "bateria", "camara", "câmara", "autonomia", "custa", "esta a", "está a", "preco", "preço", "suporte")):
             if cleaned not in ctx.requested_outputs:
                 ctx.requested_outputs.append(cleaned)
             updated.append("requested_output")
@@ -12563,6 +12660,14 @@ def _extract_generic_activity_fields(
     elif updated and cleaned not in ctx.collected_facts:
         ctx.collected_facts.append(cleaned)
     return updated
+
+
+def _infer_generic_comparison_category(normalized_text: str) -> str:
+    if contains_any_phrase(normalized_text, ("telemovel", "telemoveis", "telefone", "telefones", "iphone", "smartphone", "smartphones")):
+        return "telemóveis"
+    if contains_any_phrase(normalized_text, ("proposta", "propostas", "fornecedor", "fornecedores")):
+        return "propostas"
+    return ""
 
 
 def _missing_generic_activity_fields(ctx: "ActiveTaskContext") -> list[str]:
@@ -12933,8 +13038,14 @@ _OPEN_REFERENCE_TRIGGER_PHRASES = ("abre", "mostra", "foca no", "foca na")
 _RESUME_REFERENCE_TRIGGER_PHRASES = (
     "volta ao",
     "volta a",
+    "volta aos",
+    "volta as",
+    "volta às",
     "vamos voltar ao",
     "vamos voltar a",
+    "vamos voltar aos",
+    "vamos voltar as",
+    "vamos voltar às",
     "continua o",
     "continua a",
     "continua com",

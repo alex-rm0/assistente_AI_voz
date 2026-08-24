@@ -68,7 +68,7 @@ def _detect_blocked_action(text: str, original_message: str) -> str | None:
     if any(word in text for word in ("apaga", "apagar", "remove", "remover", "elimina", "eliminar", "delete")):
         return "apagar ficheiro"
 
-    if any(word in text for word in ("move", "mover", "renomeia", "renomear", "copia para", "copiar para")):
+    if re.search(r"\b(?:move|mover|renomeia|renomear)\b", text) or any(phrase in text for phrase in ("copia para", "copiar para")):
         return "mover ficheiro"
 
     command_words = (
