@@ -32,7 +32,10 @@ Atualizado em 2026-08-20. Este checkpoint regista a fundação estabilizada do C
 - A UI de workspace recebe objetos semânticos e eventos de representação/atenção através da ponte frontend, incluindo rendering de objetos, comandos visuais e sincronização de artefactos.
 - Intenções compostas de workspace são suportadas para fluxos determinísticos como mostrar um artefacto e minimizar outro conjunto no mesmo turno.
 - O scope relativo `all_except` existe para pedidos como "abre o mail para ver, minimiza tudo o resto": a cláusula anterior fornece a âncora que deve permanecer visível.
-- A infraestrutura de capacidade/space-pressure existe, mas a política automática de ask-before-minimize ainda é o próximo item inacabado da Phase 4.
+- A infraestrutura de capacidade/space-pressure está ligada ao ciclo de trabalho: a UI envia apenas capacidade semântica (`pressure`, `visible_object_count`, `major_surface_count`, `overflow_risk`) e o backend guarda revisão/frescura sem receber geometria.
+- A política automática de space-pressure é conservadora: `low` não atua; `medium` não minimiza destrutivamente; `high` escolhe candidatos por atenção, ownership semântica, recência e restrições explícitas.
+- A minimização automática exige confirmação: objetos em `focus`, objetos mencionados na nova atividade, ownership da tarefa atual, `keep_visible_ids` e `do_not_minimize_ids` ficam protegidos; uma recusa suprime a mesma sugestão até o espaço mudar materialmente.
+- Objetos minimizados continuam semanticamente recuperáveis: `show_again`/`mostra outra vez` restaura o mesmo `SemanticObject`, sem reconstruir conteúdo.
 - A resposta visual respeita o invariante de visibilidade: Echo, resposta e composer não devem colidir nos modos de resposta estabilizados.
 
 ### Baseline e limites
@@ -40,7 +43,8 @@ Atualizado em 2026-08-20. Este checkpoint regista a fundação estabilizada do C
 - Baseline validada: `1198 passed`.
 - Operações determinísticas de Cognitive Workspace não usam Anthropic nem chamadas LLM.
 - Não foram usadas chamadas Anthropic para validar estes fluxos.
-- Próximo passo técnico da Phase 4: política automática de space-pressure com confirmação antes de minimizar objetos.
+- Dívida arquitetural conhecida: o fluxo `ActiveTaskContext` para `compose_email` e `PendingWritingTask` continua híbrido.
+- Próximo passo técnico: evoluir a política de space-pressure para decisões de layout mais ricas, mantendo a confirmação antes de qualquer minimização relevante.
 
 ## Atualização — Checkpoint Técnico E Funcional Completo (Routing Automático, Documentos, Estados Visuais)
 

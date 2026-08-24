@@ -809,6 +809,7 @@ class _FakeEngine:
         self.progress_events = progress_events
         self.cancelled = False
         self._progress_listener = None
+        self.capacity_reports: list[dict] = []
 
     def set_progress_listener(self, listener) -> None:
         self._progress_listener = listener
@@ -822,6 +823,9 @@ class _FakeEngine:
             if self._progress_listener is not None:
                 self._progress_listener(event)
         return self.reply
+
+    def report_workspace_capacity(self, payload: dict) -> None:
+        self.capacity_reports.append(payload)
 
 
 def _qt_app():
@@ -844,6 +848,27 @@ def test_cancel_current_request_invokes_fake_engine_cancellation() -> None:
     controller.cancelCurrentRequest()
 
     assert engine.cancelled is True
+
+
+def test_report_workspace_capacity_bridge_calls_engine_with_semantic_payload() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine()
+    controller = EchoUIController(engine.respond)
+
+    controller.reportWorkspaceCapacity(
+        '{"pressure":"high","visible_object_count":5,"major_surface_count":2,"overflow_risk":true}'
+    )
+
+    assert engine.capacity_reports == [
+        {
+            "pressure": "high",
+            "visible_object_count": 5,
+            "major_surface_count": 2,
+            "overflow_risk": True,
+        }
+    ]
 
 
 def test_cancel_current_request_is_a_noop_when_no_request_is_active() -> None:
@@ -1426,7 +1451,9 @@ def test_workspace_response_panel_remains_visible_above_active_surfaces() -> Non
     css = (WEB / "styles.css").read_text(encoding="utf-8")
 
     presentation_block = objects_js[objects_js.index("function updatePresentation"):objects_js.index("function runAction")]
-    assert "const hasSurface = Boolean(activeSurfaceId());" in presentation_block
+    assert "const taskState = taskSurfaceState();" in presentation_block
+    assert "Boolean(activeSurfaceId())" in presentation_block
+    assert "taskState.openTasks.length > 0" in presentation_block
     assert "onFocusChange(hasSurface);" in presentation_block
 
     schedule_render_block = objects_js[objects_js.index("function scheduleRender"):objects_js.index("function buildBody")]
@@ -1719,7 +1746,7 @@ def _run_workspace_harness(js_tail: str) -> dict:
 # geometry-focused tests. hostRect is fully controllable so tests assert
 # on deterministic numbers, not a real screen.
 
-def _run_workspace_harness_with_dom(js_tail: str, host_rect: dict) -> dict:
+def _run_workspace_harness_with_dom(js_tail: str, host_rect: dict, pre_controller_js: str = "") -> dict:
     import json
     import shutil
     import subprocess
@@ -1753,11 +1780,20 @@ def _run_workspace_harness_with_dom(js_tail: str, host_rect: dict) -> dict:
         textContent: "",
         innerHTML: "",
         type: "",
-        appendChild(child) { child.parentNode = el; el.children.push(child); return child; },
+        _listeners: {},
+        appendChild(child) {
+          if (child.parentNode && child.parentNode.children) {
+            child.parentNode.children = child.parentNode.children.filter((c) => c !== child);
+          }
+          el.children = el.children.filter((c) => c !== child);
+          child.parentNode = el;
+          el.children.push(child);
+          return child;
+        },
         removeChild(child) { el.children = el.children.filter((c) => c !== child); child.parentNode = null; },
         remove() { if (el.parentNode) el.parentNode.removeChild(el); },
-        addEventListener() {},
-        setAttribute() {},
+        addEventListener(type, fn) { el._listeners[type] = el._listeners[type] || []; el._listeners[type].push(fn); },
+        setAttribute(name, value) { el[name] = value; },
         setPointerCapture() {},
         releasePointerCapture() {},
         get isConnected() { return true; },
@@ -1777,13 +1813,25 @@ def _run_workspace_harness_with_dom(js_tail: str, host_rect: dict) -> dict:
       };
       return el;
     }
+    const documentListeners = {};
     global.document = {
       createElement: (tag) => makeElement(tag),
       createElementNS: (ns, tag) => makeElement(tag),
-      addEventListener: () => {},
+      _listeners: documentListeners,
+      addEventListener: (type, fn) => {
+        documentListeners[type] = documentListeners[type] || [];
+        documentListeners[type].push(fn);
+      },
       getElementById: () => null,
     };
     global.window = global;
+    global.localStorage = {
+      _store: {},
+      getItem(key) { return Object.prototype.hasOwnProperty.call(this._store, key) ? this._store[key] : null; },
+      setItem(key, value) { this._store[key] = String(value); },
+      removeItem(key) { delete this._store[key]; },
+      clear() { this._store = {}; },
+    };
     """
 
     script = f"""
@@ -1793,7 +1841,16 @@ def _run_workspace_harness_with_dom(js_tail: str, host_rect: dict) -> dict:
     const hostRect = {json.dumps(host_rect)};
     const containerEl = {{
       children: [],
-      appendChild(child) {{ child.parentNode = containerEl; containerEl.children.push(child); return child; }},
+      style: makeStyle(),
+      appendChild(child) {{
+        if (child.parentNode && child.parentNode.children) {{
+          child.parentNode.children = child.parentNode.children.filter((c) => c !== child);
+        }}
+        containerEl.children = containerEl.children.filter((c) => c !== child);
+        child.parentNode = containerEl;
+        containerEl.children.push(child);
+        return child;
+      }},
       removeChild(child) {{ containerEl.children = containerEl.children.filter((c) => c !== child); child.parentNode = null; }},
       querySelector(selector) {{
         const className = selector.replace(":scope > .", "").replace(".", "");
@@ -1806,6 +1863,7 @@ def _run_workspace_harness_with_dom(js_tail: str, host_rect: dict) -> dict:
 
     const entityPointCalls = [];
     const entityAnchorCalls = [];
+    {pre_controller_js}
     const controller = EchoWorkspaceObjects.create({{
       container: containerEl,
       tetherLayer: tetherLayerEl,
@@ -3505,3 +3563,345 @@ def test_phase4_report_capacity_callback_only_fires_on_change() -> None:
     assert result["reportCount"] == 1  # only the first render's report differs from "nothing yet"
     for geometry_key in ("x", "y", "width", "height", "position"):
         assert geometry_key not in result["lastReport"]
+
+
+def test_phase4_workspace_open_actions_are_layout_idempotent() -> None:
+    """Repeatedly opening the same semantic objects must not accumulate
+    inline geometry from previous renders. The same final semantic state
+    should leave the same layout-owned properties every time."""
+    result = _run_workspace_harness_with_dom(
+        """
+        const samsung = controller.createObject({id: "option-samsung", type: "option", title: "Samsung"});
+        const apple = controller.createObject({id: "option-apple", type: "option", title: "Apple"});
+        const pixel = controller.createObject({id: "option-pixel", type: "option", title: "Pixel"});
+        controller.applyRepresentation({
+          style: "side_by_side",
+          visible_object_ids: [samsung.id, apple.id, pixel.id],
+          major_object_ids: [samsung.id, apple.id],
+          hidden_object_ids: [],
+          source: "test",
+        });
+        controller.render();
+
+        function nodeFor(id) {
+          return containerEl.children.find((child) => child.dataset && child.dataset.id === id);
+        }
+        function snapshot() {
+          const ids = [samsung.id, apple.id, pixel.id];
+          return ids.map((id) => {
+            const node = nodeFor(id);
+            return {
+              id,
+              parentIsContainer: node ? node.parentNode === containerEl : false,
+              role: node ? (node.dataset.role || "") : "",
+              representationRole: node ? (node.dataset.representationRole || "") : "",
+              split: node ? (node.dataset.split || "") : "",
+              compactMajor: node ? (node.dataset.compactMajor || "") : "",
+              attention: node ? (node.dataset.attention || "") : "",
+              left: node ? (node.style.left || "") : "",
+              top: node ? (node.style.top || "") : "",
+              right: node ? (node.style.right || "") : "",
+              width: node ? (node.style.width || "") : "",
+              maxHeight: node ? (node.style["max-height"] || "") : "",
+              transform: node ? (node.style.transform || "") : "",
+            };
+          });
+        }
+        function open(id) {
+          controller.runAction(id, "open");
+          controller.render();
+        }
+
+        open(pixel.id);
+        open(samsung.id);
+        const firstSamsung = JSON.stringify(snapshot());
+        open(pixel.id);
+        open(samsung.id);
+        const secondSamsung = JSON.stringify(snapshot());
+        open(pixel.id);
+        const firstPixel = JSON.stringify(snapshot());
+        open(samsung.id);
+        open(pixel.id);
+        const secondPixel = JSON.stringify(snapshot());
+
+        const semanticIds = controller.listObjects().map((obj) => obj.id).sort();
+        console.log(JSON.stringify({
+          samsungStable: firstSamsung === secondSamsung,
+          pixelStable: firstPixel === secondPixel,
+          semanticIds,
+          firstSamsung: JSON.parse(firstSamsung),
+          secondSamsung: JSON.parse(secondSamsung),
+          firstPixel: JSON.parse(firstPixel),
+          secondPixel: JSON.parse(secondPixel),
+        }));
+        """,
+        _HOST_RECT,
+    )
+    assert result["samsungStable"] is True
+    assert result["pixelStable"] is True
+    assert result["semanticIds"] == ["option-apple", "option-pixel", "option-samsung"]
+    for snapshot_name in ("firstSamsung", "secondSamsung", "firstPixel", "secondPixel"):
+        for node in result[snapshot_name]:
+            assert "translate" not in node["transform"]
+            assert node["id"] in result["semanticIds"]
+
+
+def test_phase45_task_surface_renders_task_slots_without_child_slots() -> None:
+    result = _run_workspace_harness_with_dom(
+        """
+        controller.upsertTaskArtifact({id: "artifact-task-1", taskId: "task-1", title: "Email", subtitle: "collecting", content: "Para quem?"});
+        controller.upsertTaskArtifact({id: "artifact-task-2", taskId: "task-2", title: "Comparação: telefones", subtitle: "ready", content: "Samsung\\nApple\\nPixel"});
+        controller.upsertSemanticObject({id: "option-samsung", kind: "option", title: "Samsung", taskId: "task-2"});
+        controller.upsertSemanticObject({id: "option-apple", kind: "option", title: "Apple", taskId: "task-2"});
+        controller.applyRepresentation({style: "cards", visible_object_ids: ["option-samsung","option-apple"], major_object_ids: [], hidden_object_ids: [], source: "auto"});
+        controller.render();
+
+        const directNodes = containerEl.children.filter((child) => child.dataset && child.dataset.id);
+        const taskSlots = directNodes.filter((node) => node.dataset.taskSurfaceSlot === "true");
+        const childNodes = directNodes.filter((node) => String(node.dataset.id).startsWith("option-"));
+        console.log(JSON.stringify({
+          taskSurface: containerEl.dataset.taskSurface,
+          openTaskCount: containerEl.dataset.openTaskCount,
+          taskSlotIds: taskSlots.map((node) => node.dataset.id).sort(),
+          childNodeCount: childNodes.length,
+          entityPointCount: entityPointCalls.length,
+          lastEntityPoint: entityPointCalls[entityPointCalls.length - 1],
+        }));
+        """,
+        _HOST_RECT,
+    )
+    assert result["taskSurface"] == "active"
+    assert result["openTaskCount"] == "2"
+    assert result["taskSlotIds"] == ["artifact-task-1", "artifact-task-2"]
+    assert result["childNodeCount"] == 0
+    assert result["entityPointCount"] >= 1
+    assert result["lastEntityPoint"]["x"] > 500
+
+
+def test_phase45_task_surface_four_slot_layout_is_repeat_render_idempotent() -> None:
+    result = _run_workspace_harness_with_dom(
+        """
+        ["Email", "Comparação: telefones", "Comparação: carros", "Planeamento de férias"].forEach((title, index) => {
+          controller.upsertTaskArtifact({id: `artifact-task-${index + 1}`, taskId: `task-${index + 1}`, title, subtitle: "ready", content: title});
+        });
+        controller.render();
+        function snapshot() {
+          return containerEl.children
+            .filter((child) => child.dataset && child.dataset.taskSurfaceSlot === "true")
+            .map((node) => ({
+              id: node.dataset.id,
+              index: node.dataset.taskSlotIndex,
+              count: node.dataset.taskCount,
+              left: node.style.left || "",
+              top: node.style.top || "",
+              width: node.style.width || "",
+              height: node.style.height || "",
+              transform: node.style.transform || "",
+            }))
+            .sort((a, b) => a.id.localeCompare(b.id));
+        }
+        const first = JSON.stringify(snapshot());
+        controller.render();
+        controller.render();
+        const second = JSON.stringify(snapshot());
+        console.log(JSON.stringify({stable: first === second, slots: JSON.parse(second)}));
+        """,
+        _HOST_RECT,
+    )
+    assert result["stable"] is True
+    assert len(result["slots"]) == 4
+    assert {slot["count"] for slot in result["slots"]} == {"4"}
+    assert all("translate" not in slot["transform"] for slot in result["slots"])
+
+
+def test_phase451_task_surface_default_width_is_slightly_wider_and_css_bound() -> None:
+    result = _run_workspace_harness_with_dom(
+        """
+        controller.upsertTaskArtifact({id: "artifact-task-1", taskId: "task-1", title: "Email", subtitle: "ready", content: "Email"});
+        controller.render();
+        const slot = containerEl.children.find((child) => child.dataset && child.dataset.taskSurfaceSlot === "true");
+        const handle = containerEl.children.find((child) => child.dataset && child.dataset.taskSurfaceResizeHandle === "true");
+        console.log(JSON.stringify({
+          width: slot.style.width,
+          cssWidth: containerEl.style["--task-surface-width"],
+          handleLeft: handle.style.left,
+          handleCount: containerEl.children.filter((child) => child.dataset && child.dataset.taskSurfaceResizeHandle === "true").length,
+        }));
+        """,
+        _HOST_RECT,
+    )
+    assert result["width"] == "439px"
+    assert int(result["width"].removesuffix("px")) > 414
+    assert result["cssWidth"] == "439px"
+    assert result["handleLeft"] == "458px"
+    assert result["handleCount"] == 1
+
+
+def test_phase451_task_surface_width_clamps_invalid_or_extreme_preferences() -> None:
+    tiny = _run_workspace_harness_with_dom(
+        """
+        controller.upsertTaskArtifact({id: "artifact-task-1", taskId: "task-1", title: "Email", subtitle: "ready", content: "Email"});
+        controller.render();
+        const slot = containerEl.children.find((child) => child.dataset && child.dataset.taskSurfaceSlot === "true");
+        console.log(JSON.stringify({width: slot.style.width}));
+        """,
+        _HOST_RECT,
+        pre_controller_js='window.localStorage.setItem("echo_os.task_surface.v1", JSON.stringify({widthRatio: 0.01}));',
+    )
+    huge = _run_workspace_harness_with_dom(
+        """
+        controller.upsertTaskArtifact({id: "artifact-task-1", taskId: "task-1", title: "Email", subtitle: "ready", content: "Email"});
+        controller.render();
+        const slot = containerEl.children.find((child) => child.dataset && child.dataset.taskSurfaceSlot === "true");
+        console.log(JSON.stringify({width: slot.style.width}));
+        """,
+        _HOST_RECT,
+        pre_controller_js='window.localStorage.setItem("echo_os.task_surface.v1", JSON.stringify({widthRatio: 0.99}));',
+    )
+    invalid = _run_workspace_harness_with_dom(
+        """
+        controller.upsertTaskArtifact({id: "artifact-task-1", taskId: "task-1", title: "Email", subtitle: "ready", content: "Email"});
+        controller.render();
+        const slot = containerEl.children.find((child) => child.dataset && child.dataset.taskSurfaceSlot === "true");
+        console.log(JSON.stringify({width: slot.style.width}));
+        """,
+        _HOST_RECT,
+        pre_controller_js='window.localStorage.setItem("echo_os.task_surface.v1", "{bad json");',
+    )
+    assert tiny["width"] == "317px"
+    assert huge["width"] == "536px"
+    assert invalid["width"] == "439px"
+
+
+def test_phase451_manual_resize_persists_and_next_render_is_idempotent() -> None:
+    result = _run_workspace_harness_with_dom(
+        """
+        ["Email", "Comparação: telefones"].forEach((title, index) => {
+          controller.upsertTaskArtifact({id: `artifact-task-${index + 1}`, taskId: `task-${index + 1}`, title, subtitle: "ready", content: title});
+        });
+        controller.render();
+        const handle = containerEl.children.find((child) => child.dataset && child.dataset.taskSurfaceResizeHandle === "true");
+        handle._listeners.pointerdown[0]({pointerId: 4, clientX: 488, preventDefault() {}});
+        document._listeners.pointermove.forEach((fn) => fn({pointerId: 4, clientX: 548}));
+        document._listeners.pointerup.forEach((fn) => fn({pointerId: 4}));
+        function snapshot() {
+          return containerEl.children
+            .filter((child) => child.dataset && child.dataset.taskSurfaceSlot === "true")
+            .map((node) => ({id: node.dataset.id, left: node.style.left, top: node.style.top, width: node.style.width, height: node.style.height}))
+            .sort((a, b) => a.id.localeCompare(b.id));
+        }
+        const afterDrag = JSON.stringify(snapshot());
+        controller.render();
+        controller.render();
+        const afterRender = JSON.stringify(snapshot());
+        console.log(JSON.stringify({
+          stable: afterDrag === afterRender,
+          slots: JSON.parse(afterRender),
+          stored: JSON.parse(window.localStorage.getItem("echo_os.task_surface.v1")),
+          handleCount: containerEl.children.filter((child) => child.dataset && child.dataset.taskSurfaceResizeHandle === "true").length,
+        }));
+        """,
+        _HOST_RECT,
+    )
+    assert result["stable"] is True
+    assert {slot["width"] for slot in result["slots"]} == {"499px"}
+    assert abs(result["stored"]["widthRatio"] - (499 / 1220)) < 0.000001
+    assert result["handleCount"] == 1
+
+
+def test_phase451_persisted_preference_restores_and_viewport_resize_does_not_drift() -> None:
+    result = _run_workspace_harness_with_dom(
+        """
+        ["Email", "Comparação: telefones", "Comparação: carros", "Plano"].forEach((title, index) => {
+          controller.upsertTaskArtifact({id: `artifact-task-${index + 1}`, taskId: `task-${index + 1}`, title, subtitle: "ready", content: title});
+        });
+        controller.render();
+        function snapshot() {
+          return {
+            width: containerEl.style["--task-surface-width"],
+            handleLeft: containerEl.children.find((child) => child.dataset && child.dataset.taskSurfaceResizeHandle === "true").style.left,
+            slots: containerEl.children
+              .filter((child) => child.dataset && child.dataset.taskSurfaceSlot === "true")
+              .map((node) => ({id: node.dataset.id, width: node.style.width, index: node.dataset.taskSlotIndex}))
+              .sort((a, b) => a.id.localeCompare(b.id)),
+          };
+        }
+        const first = JSON.stringify(snapshot());
+        hostRect.width = 1000;
+        controller.render();
+        const narrowA = JSON.stringify(snapshot());
+        controller.render();
+        const narrowB = JSON.stringify(snapshot());
+        hostRect.width = 1220;
+        controller.render();
+        const restored = JSON.stringify(snapshot());
+        const semanticIds = controller.listObjects().map((obj) => obj.id).sort();
+        console.log(JSON.stringify({
+          first: JSON.parse(first),
+          narrowStable: narrowA === narrowB,
+          restoredSameAsFirst: restored === first,
+          semanticIds,
+        }));
+        """,
+        dict(_HOST_RECT),
+        pre_controller_js='window.localStorage.setItem("echo_os.task_surface.v1", JSON.stringify({widthRatio: 0.4}));',
+    )
+    assert result["first"]["width"] == "488px"
+    assert result["narrowStable"] is True
+    assert result["restoredSameAsFirst"] is True
+    assert result["semanticIds"] == ["artifact-task-1", "artifact-task-2", "artifact-task-3", "artifact-task-4"]
+
+
+def test_phase451_echo_and_minimized_rail_follow_resized_task_surface() -> None:
+    result = _run_workspace_harness_with_dom(
+        """
+        controller.upsertTaskArtifact({id: "artifact-task-1", taskId: "task-1", title: "Email", subtitle: "ready", content: "Email"});
+        controller.upsertTaskArtifact({id: "artifact-task-2", taskId: "task-2", title: "Comparação: carros", subtitle: "ready", content: "Audi\\nBMW"});
+        controller.applyAttention({object_states: {"artifact-task-2": "minimized"}, focus_object_id: "", source: "voice_command"});
+        controller.render();
+        const beforePoint = entityPointCalls[entityPointCalls.length - 1];
+        const beforeRail = containerEl.children.find((child) => child.dataset && child.dataset.minimizedRail === "true").style.left;
+        const handle = containerEl.children.find((child) => child.dataset && child.dataset.taskSurfaceResizeHandle === "true");
+        handle._listeners.pointerdown[0]({pointerId: 9, clientX: 488, preventDefault() {}});
+        document._listeners.pointermove.forEach((fn) => fn({pointerId: 9, clientX: 588}));
+        document._listeners.pointerup.forEach((fn) => fn({pointerId: 9}));
+        const afterPoint = entityPointCalls[entityPointCalls.length - 1];
+        const afterRail = containerEl.children.find((child) => child.dataset && child.dataset.minimizedRail === "true").style.left;
+        console.log(JSON.stringify({
+          beforePoint,
+          afterPoint,
+          beforeRail,
+          afterRail,
+          railCount: containerEl.children.filter((child) => child.dataset && child.dataset.minimizedRail === "true").length,
+        }));
+        """,
+        _HOST_RECT,
+    )
+    assert result["afterPoint"]["x"] > result["beforePoint"]["x"]
+    assert result["beforeRail"] == result["afterRail"] == "24px"
+    assert result["railCount"] == 1
+
+
+def test_phase45_minimized_task_uses_rail_not_open_slot() -> None:
+    result = _run_workspace_harness_with_dom(
+        """
+        controller.upsertTaskArtifact({id: "artifact-task-1", taskId: "task-1", title: "Email", subtitle: "ready", content: "Email"});
+        controller.upsertTaskArtifact({id: "artifact-task-2", taskId: "task-2", title: "Comparação: carros", subtitle: "ready", content: "Audi\\nBMW"});
+        controller.applyAttention({object_states: {"artifact-task-2": "minimized"}, focus_object_id: "", source: "voice_command"});
+        controller.render();
+        const directNodes = containerEl.children.filter((child) => child.dataset && child.dataset.id);
+        const openSlots = directNodes.filter((node) => node.dataset.taskSurfaceSlot === "true").map((node) => node.dataset.id);
+        const rail = directNodes.filter((node) => node.dataset.minimizedRail === "true").map((node) => node.dataset.id);
+        console.log(JSON.stringify({
+          openTaskCount: containerEl.dataset.openTaskCount,
+          minimizedTaskCount: containerEl.dataset.minimizedTaskCount,
+          openSlots,
+          rail,
+        }));
+        """,
+        _HOST_RECT,
+    )
+    assert result["openTaskCount"] == "1"
+    assert result["minimizedTaskCount"] == "1"
+    assert result["openSlots"] == ["artifact-task-1"]
+    assert result["rail"] == ["artifact-task-2"]

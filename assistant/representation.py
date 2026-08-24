@@ -219,8 +219,10 @@ def resolve_mentioned_object_ids(raw_message: str, work_session) -> list[str]:
 # of named options (travel destinations, job candidates, book titles...).
 
 ALTERNATIVES_TRIGGER_PHRASES = (
-    "pensar em", "quero comparar", "vamos comparar", "comparar as opcoes",
+    "pensar em", "quero comparar", "vamos comparar", "vamos tambem comparar",
+    "vamos também comparar", "tambem vamos comparar", "também vamos comparar", "comparar as opcoes",
     "quero considerar", "vamos considerar", "considerar as opcoes",
+    "vamos avaliar", "quero avaliar", "preciso de avaliar",
 )
 
 _ALTERNATIVE_SPLIT_RE = re.compile(r",| e (?=\w)| com (?=\w)|\bvs\.?\s+(?=\w)", re.IGNORECASE)
@@ -281,6 +283,71 @@ def slugify_title(title: str) -> str:
     return slug or "option"
 
 
+_COMPARISON_INTRO_PHRASES = (
+    "vamos comparar", "quero comparar", "preciso de comparar", "compara", "comparar",
+    "vamos tambem comparar", "vamos também comparar", "tambem vamos comparar", "também vamos comparar",
+    "vamos avaliar", "quero avaliar", "preciso de avaliar", "avaliar",
+)
+
+_COMPARISON_CATEGORY_PREFIX_RE = re.compile(
+    r"\b(?:vamos\s+(?:tamb[ée]m\s+)?|quero\s+|preciso\s+de\s+|ajuda(?:-me|\s+me)?\s+a\s+)?"
+    r"(?:comparar|avaliar)\s+([^:;,]+?)\s*:",
+    re.IGNORECASE,
+)
+
+
+def _explicit_alternatives_tail(raw_message: str) -> str:
+    tail = raw_message
+    if ":" in raw_message:
+        return raw_message.rsplit(":", 1)[1]
+    lowered = raw_message.lower()
+    for phrase in ALTERNATIVES_TRIGGER_PHRASES:
+        index = lowered.find(phrase)
+        if index != -1:
+            tail = raw_message[index + len(phrase):]
+            break
+    return tail
+
+
+def _looks_like_category_label(text: str) -> bool:
+    cleaned = _strip_leading_option_filler(text.strip(" .!?…"))
+    if not cleaned or cleaned != cleaned.lower() or len(cleaned) > 40:
+        return False
+    normalized = normalize_for_matching(cleaned)
+    words = [word for word in re.findall(r"\b[\wÀ-ÿ]{2,}\b", normalized)]
+    return bool(words) and len(words) <= 3 and any(word.endswith("s") for word in words)
+
+
+def _comparison_category_and_parts(raw_message: str) -> tuple[str, list[str]]:
+    tail = _strip_trailing_style_suffix(_explicit_alternatives_tail(raw_message))
+    parts = [part.strip(" .!?…") for part in _ALTERNATIVE_SPLIT_RE.split(tail) if part.strip(" .!?…")]
+    normalized = normalize_for_matching(raw_message)
+    if not contains_any_phrase(normalized, _COMPARISON_INTRO_PHRASES):
+        return "", parts
+    colon_category = _COMPARISON_CATEGORY_PREFIX_RE.search(raw_message)
+    if colon_category:
+        category = _strip_leading_option_filler(colon_category.group(1)).strip(" .!?…")
+        if _looks_like_category_label(category):
+            return category, parts
+    if "," not in tail and ";" not in tail:
+        return "", parts
+    if len(parts) < 3 or not _looks_like_category_label(parts[0]):
+        return "", parts
+    concrete_rest = [
+        _strip_leading_option_filler(part)
+        for part in parts[1:]
+        if _looks_like_named_option(_strip_leading_option_filler(part))
+    ]
+    if len(concrete_rest) < 2:
+        return "", parts
+    return _strip_leading_option_filler(parts[0]).strip(" .!?…"), parts[1:]
+
+
+def extract_comparison_category(raw_message: str) -> str:
+    category, _parts = _comparison_category_and_parts(raw_message)
+    return category
+
+
 def extract_explicit_alternatives(raw_message: str) -> list[str]:
     """Purely structural extraction: a generic trigger phrase, followed by
     a comma/" e "-separated list of capitalized tokens (the light,
@@ -292,20 +359,9 @@ def extract_explicit_alternatives(raw_message: str) -> list[str]:
     if not contains_any_phrase(normalized, ALTERNATIVES_TRIGGER_PHRASES):
         return []
 
-    tail = raw_message
-    if ":" in raw_message:
-        tail = raw_message.rsplit(":", 1)[1]
-    else:
-        lowered = raw_message.lower()
-        for phrase in ALTERNATIVES_TRIGGER_PHRASES:
-            index = lowered.find(phrase)
-            if index != -1:
-                tail = raw_message[index + len(phrase):]
-                break
-
-    tail = _strip_trailing_style_suffix(tail)
+    _category, parts = _comparison_category_and_parts(raw_message)
     candidates: list[str] = []
-    for part in _ALTERNATIVE_SPLIT_RE.split(tail):
+    for part in parts:
         cleaned = _strip_leading_option_filler(part.strip(" .!?…"))
         if _looks_like_named_option(cleaned):
             candidates.append(_normalize_option_title(cleaned))
@@ -506,12 +562,19 @@ class RepresentationConstraint:
 class SpacePressureState:
     """Section 11: the ONLY thing the frontend is allowed to tell the
     backend about layout -- a semantic capacity signal, never a pixel or a
-    coordinate. `pressure` is one of "low" | "medium" | "high"."""
+    coordinate. `pressure` is one of "low" | "medium" | "high".
+
+    `revision` and `updated_at` are backend bookkeeping attached after the
+    semantic signal arrives. They are not part of the frontend payload and
+    never contain geometry.
+    """
 
     pressure: str = "low"
     visible_object_count: int = 0
     major_surface_count: int = 0
     overflow_risk: bool = False
+    revision: int = 0
+    updated_at: float = 0.0
 
 
 SPACE_PRESSURE_LEVELS = ("low", "medium", "high")

@@ -152,20 +152,53 @@ def minimize_object(work_session, object_id: str, *, source: str = SOURCE_VOICE_
 _MINIMIZE_RANK = {GLANCEABLE: 0, VISIBLE: 1, ACTIVE: 2}
 
 
+def _constraint_ids(work_session) -> set[str]:
+    constraints = getattr(work_session, "constraints", None)
+    if constraints is None:
+        return set()
+    return set(getattr(constraints, "keep_visible_ids", []) or []) | set(
+        getattr(constraints, "do_not_minimize_ids", []) or []
+    )
+
+
+def _current_task_ids(work_session) -> set[str]:
+    task = getattr(work_session, "active_task", None)
+    if task is None:
+        return set()
+    ids = set(getattr(task, "workspace_object_ids", []) or [])
+    artifact_id = getattr(task, "active_artifact_id", "") or ""
+    if artifact_id:
+        ids.add(artifact_id)
+    return ids
+
+
 def rank_minimization_candidates(work_session, *, exclude_ids: frozenset[str] | set[str] = frozenset()) -> list[str]:
     """Returns candidate object ids ordered from SAFEST-to-minimize first.
-    `exclude_ids` is the caller's job to populate with anything protected --
-    typically the current FOCUS id plus RepresentationConstraint.
-    do_not_minimize_ids (section 5/10: explicit keep-open constraints always
-    win). Stable order (Python dict iteration order, i.e. attention-
-    assignment order) breaks ties deterministically rather than randomly."""
+    FOCUS/MINIMIZED/HIDDEN are never candidates. Explicit constraints
+    (`keep_visible_ids` and `do_not_minimize_ids`) always win, even if the
+    caller forgets to include them in `exclude_ids`.
+
+    Ranking is semantic but generic: lower-attention objects are safer,
+    objects not owned by the current task are safer, and stable insertion
+    order breaks ties deterministically. No object kind or domain is
+    hardcoded.
+    """
     state = work_session.attention
     if state is None:
         return []
+    protected = set(exclude_ids) | _constraint_ids(work_session)
+    current_task_ids = _current_task_ids(work_session)
     candidates = [
         object_id
         for object_id, level in state.object_states.items()
-        if object_id not in exclude_ids and level in _MINIMIZE_RANK
+        if object_id not in protected and level in _MINIMIZE_RANK
     ]
-    candidates.sort(key=lambda object_id: _MINIMIZE_RANK[state.object_states[object_id]])
+    order = {object_id: index for index, object_id in enumerate(state.object_states)}
+    candidates.sort(
+        key=lambda object_id: (
+            _MINIMIZE_RANK[state.object_states[object_id]],
+            1 if object_id in current_task_ids else 0,
+            order.get(object_id, 0),
+        )
+    )
     return candidates

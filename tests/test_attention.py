@@ -32,6 +32,20 @@ from assistant.attention import (
 class _FakeSession:
     attention: AttentionState | None = None
     objects: dict = field(default_factory=dict)
+    constraints: object | None = None
+    active_task: object | None = None
+
+
+@dataclass
+class _FakeConstraints:
+    keep_visible_ids: list[str] = field(default_factory=list)
+    do_not_minimize_ids: list[str] = field(default_factory=list)
+
+
+@dataclass
+class _FakeTask:
+    workspace_object_ids: list[str] = field(default_factory=list)
+    active_artifact_id: str = ""
 
 
 # --- A: AttentionState defaults ------------------------------------------
@@ -153,3 +167,21 @@ def test_rank_minimization_candidates_excludes_minimized_and_hidden() -> None:
     set_bulk_attention(session, {"obj-a": MINIMIZED, "obj-b": HIDDEN, "obj-c": ACTIVE})
     candidates = rank_minimization_candidates(session)
     assert candidates == ["obj-c"]
+
+
+def test_rank_minimization_candidates_respects_session_constraints() -> None:
+    session = _FakeSession(constraints=_FakeConstraints(keep_visible_ids=["obj-a"], do_not_minimize_ids=["obj-b"]))
+    set_bulk_attention(session, {"obj-a": GLANCEABLE, "obj-b": GLANCEABLE, "obj-c": VISIBLE})
+
+    candidates = rank_minimization_candidates(session)
+
+    assert candidates == ["obj-c"]
+
+
+def test_rank_minimization_candidates_prefers_non_current_task_objects() -> None:
+    session = _FakeSession(active_task=_FakeTask(workspace_object_ids=["task-owned"]))
+    set_bulk_attention(session, {"task-owned": VISIBLE, "unrelated": VISIBLE})
+
+    candidates = rank_minimization_candidates(session)
+
+    assert candidates == ["unrelated", "task-owned"]

@@ -5911,9 +5911,34 @@ def test_phase4_g_low_pressure_no_action(tmp_path: Path) -> None:
     telemetry = engine.get_last_turn_telemetry() or {}
 
     assert telemetry["task_started"] is True
+    assert telemetry["space_pressure"] == "low"
+    assert telemetry["space_pressure_action"] == "none"
+    assert telemetry["space_pressure_permission_required"] is False
     assert telemetry.get("space_pressure_candidate_found") is None
     assert engine._pending_workspace_action is None
     assert "minimizar" not in response.lower()
+
+
+def test_phase4_g2_medium_pressure_no_destructive_minimize(tmp_path: Path) -> None:
+    """G2: MEDIUM pressure is conservative in this phase: it can leave
+    low-priority context less prominent through attention policy, but it
+    never asks for or performs minimization."""
+    engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
+    register_object(engine._work_session, SemanticObject(id="email-draft", title="Rascunho do email"))
+    register_object(engine._work_session, SemanticObject(id="doc-a", title="Documento A"))
+    set_bulk_attention(engine._work_session, {"email-draft": ACTIVE, "doc-a": ACTIVE})
+    engine._work_session.capacity = SpacePressureState(pressure="medium", visible_object_count=3, major_surface_count=1)
+
+    response = engine.respond("prepara te, vamos planear umas ferias com base no Documento A")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["space_pressure"] == "medium"
+    assert telemetry["space_pressure_action"] == "none"
+    assert telemetry["space_pressure_permission_required"] is False
+    assert engine._pending_workspace_action is None
+    assert engine._work_session.attention.object_states["email-draft"] != "minimized"
+    assert "minimizar" not in response.lower()
+    assert ollama.calls == []
 
 
 def test_phase4_h_high_pressure_selects_a_candidate(tmp_path: Path) -> None:
@@ -5933,9 +5958,19 @@ def test_phase4_h_high_pressure_selects_a_candidate(tmp_path: Path) -> None:
     assert telemetry["task_started"] is True
     assert telemetry["space_pressure_candidate_found"] is True
     assert telemetry["pending_workspace_action_created"] is True
-    assert engine._pending_workspace_action == {
-        "action": "minimize", "object_ids": ["email-draft"], "reason": "space_pressure", "ttl": 2,
-    }
+    assert engine._pending_workspace_action is not None
+    assert engine._pending_workspace_action["action"] == "minimize"
+    assert engine._pending_workspace_action["object_ids"] == ["email-draft"]
+    assert engine._pending_workspace_action["reason"] == "space_pressure"
+    assert engine._pending_workspace_action["ttl"] == 2
+    assert "capacity_revision" in engine._pending_workspace_action
+    assert telemetry["space_pressure"] == "high"
+    assert telemetry["space_pressure_candidate_ids"][0] == "email-draft"
+    assert "doc-a" not in telemetry["space_pressure_candidate_ids"]
+    assert "doc-b" not in telemetry["space_pressure_candidate_ids"]
+    assert telemetry["space_pressure_action"] == "propose_minimize"
+    assert telemetry["space_pressure_permission_required"] is True
+    assert telemetry["pending_workspace_action"] is True
     assert "?" in response
     assert "email" in response.lower() or "rascunho" in response.lower()
     # Referenced objects stay ACTIVE (relevant to the new task); the
@@ -5987,6 +6022,28 @@ def test_phase4_j_do_not_minimize_constraint_respected(tmp_path: Path) -> None:
     assert engine._work_session.attention.object_states["email-draft"] != "minimized"
 
 
+def test_phase4_j2_keep_visible_constraint_respected_by_space_pressure(tmp_path: Path) -> None:
+    """J2: keep_visible is a real protection, not just a representation
+    preference. High pressure must not propose the kept object."""
+    engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
+    register_object(engine._work_session, SemanticObject(id="email-draft", title="email"))
+    register_object(engine._work_session, SemanticObject(id="old-note", title="Nota antiga"))
+    set_bulk_attention(engine._work_session, {"email-draft": GLANCEABLE, "old-note": GLANCEABLE})
+
+    engine.respond("mantém o email visível")
+    assert engine._work_session.constraints is not None
+    assert "email-draft" in engine._work_session.constraints.keep_visible_ids
+
+    engine._work_session.capacity = SpacePressureState(pressure="high", visible_object_count=5, major_surface_count=0)
+    engine.respond("prepara te, vamos planear umas ferias")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert engine._pending_workspace_action is not None
+    assert engine._pending_workspace_action["object_ids"] == ["old-note"]
+    assert "email-draft" in telemetry["space_pressure_protected_ids"]
+    assert "email-draft" not in telemetry["space_pressure_candidate_ids"]
+
+
 def test_phase4_k_ask_before_minimize_creates_pending_action(tmp_path: Path) -> None:
     """K: the permission question itself creates a PendingWorkspaceAction
     (already asserted structurally in test H); this test focuses on the
@@ -6021,6 +6078,9 @@ def test_phase4_l_confirmation_executes_pending_action(tmp_path: Path) -> None:
 
     assert telemetry["selected_path"] == "ATTENTION_COMMAND"
     assert telemetry["pending_workspace_action_resolved"] == "executed"
+    assert telemetry["pending_workspace_action_result"] == "executed"
+    assert telemetry["pending_workspace_action_object_ids"] == ["email-draft"]
+    assert telemetry["minimization_reason"] == "space_pressure"
     assert engine._pending_workspace_action is None
     assert engine._work_session.attention.object_states["email-draft"] == "minimized"
     assert "email" in response.lower() or "rascunho" in response.lower()
@@ -6043,11 +6103,66 @@ def test_phase4_m_negative_confirmation_cancels_pending_action_without_losing_ta
     telemetry = engine.get_last_turn_telemetry() or {}
 
     assert telemetry["pending_workspace_action_resolved"] == "cancelled"
+    assert telemetry["pending_workspace_action_result"] == "cancelled"
+    assert telemetry["pending_workspace_action_object_ids"] == ["email-draft"]
     assert engine._pending_workspace_action is None
     assert engine._work_session.attention.object_states["email-draft"] != "minimized"
     assert engine._work_session.active_task is not None
     assert engine._work_session.active_task.task_type == "plan_trip"
     assert response  # a real explanatory response, not a silent no-op
+
+
+def test_phase4_m2_negative_confirmation_suppresses_repeated_space_pressure_prompt(tmp_path: Path) -> None:
+    """M2: after the user rejects one space-pressure suggestion, Echo must
+    not ask the same question again until the capacity signal materially
+    changes."""
+    engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
+    register_object(engine._work_session, SemanticObject(id="email-draft", title="Rascunho do email"))
+    set_bulk_attention(engine._work_session, {"email-draft": ACTIVE})
+    engine._work_session.capacity = SpacePressureState(pressure="high", visible_object_count=5, major_surface_count=0)
+
+    engine.respond("prepara te, vamos planear umas ferias")
+    assert engine._pending_workspace_action is not None
+    engine.respond("não")
+
+    engine._work_session.active_task = None
+    response = engine.respond("vamos preparar outro plano de ferias")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert engine._pending_workspace_action is None
+    assert telemetry["space_pressure_action"] == "no_safe_candidate"
+    assert telemetry["space_pressure_candidate_found"] is False
+    assert response.count("?") == 0
+    assert ollama.calls == []
+
+
+def test_phase4_m3_capacity_bridge_tracks_revision_and_clears_suppression(tmp_path: Path) -> None:
+    """M3: frontend capacity reports remain semantic-only but still give
+    the backend enough freshness/revision data to reset transient
+    rejected-candidate suppression on material change."""
+    engine, _llm, _ollama, _anthropic = make_engine(tmp_path, mode="local")
+    engine._space_pressure_suppressed_candidate_ids.add("email-draft")
+
+    engine.report_workspace_capacity(
+        {
+            "pressure": "high",
+            "visible_object_count": 5,
+            "major_surface_count": 2,
+            "overflow_risk": True,
+            "x": 100,
+            "width": 300,
+        }
+    )
+
+    capacity = engine._work_session.capacity
+    assert capacity is not None
+    assert capacity.pressure == "high"
+    assert capacity.visible_object_count == 5
+    assert capacity.major_surface_count == 2
+    assert capacity.overflow_risk is True
+    assert capacity.revision == 1
+    assert capacity.updated_at > 0
+    assert engine._space_pressure_suppressed_candidate_ids == set()
 
 
 def test_phase4_n_minimized_object_restores_with_same_semantic_id(tmp_path: Path) -> None:
@@ -6495,6 +6610,55 @@ def test_phase4_precedence_fix_still_holds(tmp_path: Path) -> None:
     assert ollama.calls == []
 
 
+def test_workspace_open_typo_resolves_existing_object_without_llm(tmp_path: Path) -> None:
+    engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
+    register_object(engine._work_session, SemanticObject(id="option-samsung", kind="option", title="Samsung"))
+    set_bulk_attention(engine._work_session, {"option-samsung": ACTIVE})
+
+    response = engine.respond("abre samasung")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["selected_path"] == "ATTENTION_COMMAND"
+    assert telemetry["llm_calls"] == 0
+    assert telemetry["attention_command_executed"] is True
+    assert engine._work_session.attention.object_states["option-samsung"] == FOCUS
+    assert "Samsung" in response
+    assert ollama.calls == []
+
+
+def test_workspace_open_ambiguous_typo_asks_clarification_without_llm(tmp_path: Path) -> None:
+    engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
+    register_object(engine._work_session, SemanticObject(id="option-samsung", kind="option", title="Samsung"))
+    register_object(engine._work_session, SemanticObject(id="option-samsong", kind="option", title="Samsong"))
+    set_bulk_attention(engine._work_session, {"option-samsung": ACTIVE, "option-samsong": ACTIVE})
+
+    response = engine.respond("abre samsng")
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert telemetry["selected_path"] == "ATTENTION_COMMAND"
+    assert telemetry["llm_calls"] == 0
+    assert telemetry["attention_command_executed"] is False
+    assert "Samsung" in response and "Samsong" in response
+    assert engine._work_session.attention.object_states["option-samsung"] == ACTIVE
+    assert engine._work_session.attention.object_states["option-samsong"] == ACTIVE
+    assert ollama.calls == []
+
+
+def test_generated_operational_success_claim_is_blocked_when_no_workspace_operation_executed(tmp_path: Path) -> None:
+    engine, _llm, _ollama, _anthropic = make_engine(tmp_path, mode="local")
+
+    response = engine._complete_turn(
+        "abre samasung",
+        "Samsung está a abrir agora.",
+        "AGENT_DIRECT",
+        selected_path="AGENT",
+    )
+    telemetry = engine.get_last_turn_telemetry() or {}
+
+    assert response == "Não alterei nada no workspace. Preciso de identificar um objeto real antes de agir."
+    assert telemetry == {}
+
+
 # --- Phase 4 integration fix: workspace activity/object reference
 # resolution (section 12, tests A-K). The real Qt manual test showed Echo
 # treating each active task as an isolated conversational funnel instead of
@@ -6591,10 +6755,13 @@ def test_workspace_reference_d_abre_planeamento_focuses_existing_task(tmp_path: 
 
 def test_workspace_reference_e_writing_task_preserved_when_planning_focused(tmp_path: Path) -> None:
     """E. the current writing task is preserved (not lost/deleted, not
-    switched) when the planning activity is brought back into focus --
-    section 11: planning -> FOCUS, writing -> ACTIVE, same objects."""
+    recreated) when the planning activity is brought back into focus.
+    Phase 4.5: task-level "abre X" restores the requested task identity;
+    the previous writing task remains preserved in the stack."""
     engine, _llm, _ollama, _anthropic = make_engine(tmp_path, mode="local")
     _start_plan_trip_with_destination(engine)
+    plan_ctx = engine._work_session.active_task
+    assert plan_ctx is not None
     engine.respond("vamos escrever também um mail")
     writing_ctx_before = engine._work_session.active_task
     assert writing_ctx_before is not None and writing_ctx_before.task_type == "writing"
@@ -6604,10 +6771,11 @@ def test_workspace_reference_e_writing_task_preserved_when_planning_focused(tmp_
 
     writing_ctx_after = engine._work_session.active_task
     assert writing_ctx_after is not None
-    assert writing_ctx_after.id == writing_ctx_before.id
-    assert writing_ctx_after.task_type == "writing"
+    assert writing_ctx_after.id == plan_ctx.id
+    assert writing_ctx_after.task_type == "plan_trip"
     assert engine._work_session.attention.object_states[writing_artifact_id] == ACTIVE
     assert writing_artifact_id in engine._work_session.objects
+    assert any(task.id == writing_ctx_before.id for task in engine._work_session.paused_task_stack)
 
 
 def test_workspace_reference_f_multi_option_addition_reachable_while_task_active(tmp_path: Path) -> None:
@@ -6732,3 +6900,147 @@ def test_workspace_reference_k_attention_and_representation_precedence_kept(tmp_
     assert engine._work_session.attention.object_states["email-draft"] == "active"
     assert response
     assert ollama.calls == []
+
+
+def test_p0_pending_email_does_not_swallow_new_activity_sequence(tmp_path: Path) -> None:
+    engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
+
+    response1 = engine.respond("vamos escrever um mail")
+    email_ctx = engine._work_session.active_task
+    assert email_ctx is not None
+    assert email_ctx.task_type == "compose_email"
+    assert email_ctx.missing_information == ["recipient"]
+    email_task_id = email_ctx.id
+    email_artifact_id = email_ctx.active_artifact_id
+    email_fields_before = (dict(email_ctx.entities), dict(email_ctx.parameters), list(email_ctx.collected_facts))
+    assert "Para quem" in response1
+
+    engine.respond("vamos também preparar umas férias")
+    travel_ctx = engine._work_session.active_task
+    telemetry2 = engine.get_last_turn_telemetry() or {}
+    assert travel_ctx is not None
+    assert travel_ctx.task_type == "plan_trip"
+    assert telemetry2["selected_path"] in {"TASK_SWITCH", "TASK_START"}
+    assert telemetry2["llm_calls"] == 0
+    preserved_email = next(task for task in engine._work_session.paused_task_stack if task.id == email_task_id)
+    assert preserved_email.active_artifact_id == email_artifact_id
+    assert (dict(preserved_email.entities), dict(preserved_email.parameters), list(preserved_email.collected_facts)) == email_fields_before
+
+    engine.respond("preciso da tua ajuda a planear essas férias")
+    telemetry3 = engine.get_last_turn_telemetry() or {}
+    assert engine._work_session.active_task is not None
+    assert engine._work_session.active_task.id == travel_ctx.id
+    assert telemetry3["selected_path"] == "TASK_CONTINUATION"
+    preserved_email = next(task for task in engine._work_session.paused_task_stack if task.id == email_task_id)
+    assert (dict(preserved_email.entities), dict(preserved_email.parameters), list(preserved_email.collected_facts)) == email_fields_before
+
+    engine.respond("compara samsung com apple")
+    telemetry4 = engine.get_last_turn_telemetry() or {}
+    comparison_ctx = engine._work_session.active_task
+    assert comparison_ctx is not None
+    assert comparison_ctx.task_type == "generic_comparison"
+    assert telemetry4["selected_path"] in {"REPRESENTATION_COMMAND", "TASK_SWITCH", "TASK_START"}
+    assert telemetry4["llm_calls"] == 0
+    preserved_email = next(task for task in engine._work_session.paused_task_stack if task.id == email_task_id)
+    assert (dict(preserved_email.entities), dict(preserved_email.parameters), list(preserved_email.collected_facts)) == email_fields_before
+
+    response5 = engine.respond("volta ao email")
+    telemetry5 = engine.get_last_turn_telemetry() or {}
+    resumed_email = engine._work_session.active_task
+    assert resumed_email is not None
+    assert resumed_email.id == email_task_id
+    assert resumed_email.active_artifact_id == email_artifact_id
+    assert resumed_email.missing_information == ["recipient"]
+    assert telemetry5["selected_path"] == "TASK_RESUME"
+    assert "Para quem" in response5
+
+    engine.respond("é para o João")
+    telemetry6 = engine.get_last_turn_telemetry() or {}
+    assert engine._work_session.active_task is not None
+    assert engine._work_session.active_task.id == email_task_id
+    assert engine._work_session.active_task.entities.get("recipient") == "João"
+    assert telemetry6["selected_path"] == "TASK_CONTINUATION"
+    assert telemetry6["llm_calls"] == 0
+    assert ollama.calls == []
+
+
+def test_p0_pending_email_interrupted_by_planning_comparison_and_generic_activity(tmp_path: Path) -> None:
+    engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
+    engine.respond("vamos escrever um mail")
+    email_ctx = engine._work_session.active_task
+    assert email_ctx is not None
+    email_task_id = email_ctx.id
+    email_fields_before = (dict(email_ctx.entities), dict(email_ctx.parameters), list(email_ctx.collected_facts))
+
+    engine.respond("ajuda-me a planear umas férias")
+    assert engine._work_session.active_task is not None
+    assert engine._work_session.active_task.task_type == "plan_trip"
+    preserved_email = next(task for task in engine._work_session.paused_task_stack if task.id == email_task_id)
+    assert (dict(preserved_email.entities), dict(preserved_email.parameters), list(preserved_email.collected_facts)) == email_fields_before
+
+    engine.respond("vamos comparar hotéis A e B")
+    assert engine._work_session.active_task is not None
+    assert engine._work_session.active_task.task_type == "generic_comparison"
+    preserved_email = next(task for task in engine._work_session.paused_task_stack if task.id == email_task_id)
+    assert (dict(preserved_email.entities), dict(preserved_email.parameters), list(preserved_email.collected_facts)) == email_fields_before
+
+    engine.respond("prepara uma apresentação")
+    assert engine._work_session.active_task is not None
+    assert engine._work_session.active_task.task_type == "generic_activity"
+    preserved_email = next(task for task in engine._work_session.paused_task_stack if task.id == email_task_id)
+    assert (dict(preserved_email.entities), dict(preserved_email.parameters), list(preserved_email.collected_facts)) == email_fields_before
+    assert ollama.calls == []
+
+
+def test_p0_pending_email_interrupted_by_workspace_attention_and_representation_commands(tmp_path: Path) -> None:
+    engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
+    engine.respond("vamos escrever um mail")
+    email_ctx = engine._work_session.active_task
+    assert email_ctx is not None
+    email_task_id = email_ctx.id
+    email_artifact_id = email_ctx.active_artifact_id
+    email_fields_before = (dict(email_ctx.entities), dict(email_ctx.parameters), list(email_ctx.collected_facts))
+
+    engine.respond("minimiza o email")
+    telemetry2 = engine.get_last_turn_telemetry() or {}
+    assert telemetry2["selected_path"] == "ATTENTION_COMMAND"
+    assert engine._work_session.attention.object_states[email_artifact_id] == MINIMIZED
+
+    engine.respond("mostra o email")
+    telemetry3 = engine.get_last_turn_telemetry() or {}
+    assert telemetry3["selected_path"] == "ATTENTION_COMMAND"
+    assert engine._work_session.attention.object_states[email_artifact_id] == FOCUS
+
+    engine.respond("mostra-me cidades em cartões")
+    telemetry4 = engine.get_last_turn_telemetry() or {}
+    assert telemetry4["selected_path"] == "REPRESENTATION_COMMAND"
+    preserved_email = engine._work_session.active_task
+    assert preserved_email is not None and preserved_email.id == email_task_id
+    assert (dict(preserved_email.entities), dict(preserved_email.parameters), list(preserved_email.collected_facts)) == email_fields_before
+    assert ollama.calls == []
+
+
+def test_p0_pending_email_still_accepts_legitimate_short_field_answers(tmp_path: Path) -> None:
+    examples = [
+        ("João", "João"),
+        ("para o João", "João"),
+        ("é para a Maria", "Maria"),
+        ("para a minha chefe", "", "manager"),
+    ]
+    for item in examples:
+        utterance = item[0]
+        expected_name = item[1]
+        expected_role = item[2] if len(item) > 2 else ""
+        engine, _llm, ollama, _anthropic = make_engine(tmp_path / utterance.replace(" ", "_"), mode="local")
+        engine.respond("vamos escrever um mail")
+        engine.respond(utterance)
+        telemetry = engine.get_last_turn_telemetry() or {}
+        ctx = engine._work_session.active_task
+        assert ctx is not None and ctx.task_type == "compose_email"
+        if expected_name:
+            assert ctx.entities.get("recipient") == expected_name
+        if expected_role:
+            assert ctx.entities.get("recipientRole") == expected_role
+        assert telemetry["selected_path"] == "TASK_CONTINUATION"
+        assert telemetry["llm_calls"] == 0
+        assert ollama.calls == []

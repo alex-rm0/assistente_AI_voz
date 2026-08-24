@@ -143,7 +143,7 @@ def test_interpreter_detects_generic_comparison_activity() -> None:
     assert interp.activity.starts_task is True
     assert interp.activity.task_type == "generic_comparison"
     assert interp.activity.activity_family == "comparison"
-    assert expected_route(interp) == ROUTE_REPRESENTATION_COMMAND
+    assert expected_route(interp) == ROUTE_TASK_CONTINUATION
 
 
 def test_interpreter_detects_generic_organization_activity() -> None:

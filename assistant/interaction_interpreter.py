@@ -221,7 +221,8 @@ _REPRESENTATION_HIDE_PHRASES = (
     "vamos so conversar",
 )
 _REPRESENTATION_RESTORE_PHRASES = (
-    "mostra outra vez", "traz de volta", "mostra de novo", "poe outra vez",
+    "mostra outra vez", "mostra me outra vez", "mostra-me outra vez",
+    "traz de volta", "mostra de novo", "mostra me de novo", "poe outra vez",
 )
 _REPRESENTATION_SIMPLIFY_PHRASES = (
     "nao compliques", "faz algo mais simples", "faz mais simples", "simplifica",
@@ -552,6 +553,8 @@ def _representation_intent(raw_message: str, normalized: str) -> RepresentationI
 
 
 def _attention_intent(normalized: str, work_session=None) -> AttentionIntent:
+    if contains_any_phrase(normalized, ("opcoes", "opções")) and contains_any_phrase(normalized, ("outra vez", "de novo")):
+        return AttentionIntent()
     # Order matters: show_again's two-part check is the most specific
     # (requires BOTH a show-verb and a recovery marker), so a plain
     # "mostra outra vez" alone (no recovery marker other than "outra
@@ -692,12 +695,15 @@ def decide_turn_route(interpretation: InteractionInterpretation, work_session=No
     if interpretation.spatial.present:
         primary = ROUTE_WORKSPACE_COMMAND
         reason = "explicit_spatial_intent"
-    elif interpretation.representation.present:
-        primary = ROUTE_REPRESENTATION_COMMAND
-        reason = "explicit_representation_intent"
+    elif interpretation.activity.present and interpretation.representation.present:
+        primary = ROUTE_TASK_CONTINUATION
+        reason = "activity_with_representation_intent"
     elif interpretation.attention.present:
         primary = ROUTE_ATTENTION_COMMAND
         reason = "explicit_attention_intent"
+    elif interpretation.representation.present:
+        primary = ROUTE_REPRESENTATION_COMMAND
+        reason = "explicit_representation_intent"
     elif interpretation.activity.present or interpretation.content.present:
         primary = ROUTE_TASK_EXECUTION if interpretation.content.kind == "control_execute" else ROUTE_TASK_CONTINUATION
         reason = "task_activity_or_content_intent"

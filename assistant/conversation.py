@@ -57,6 +57,7 @@ from assistant.representation import (
     choose_representation,
     extract_added_alternatives,
     extract_add_target_reference,
+    extract_comparison_category,
     extract_comparison_criteria,
     extract_explicit_alternatives,
     message_implies_comparison,
@@ -138,6 +139,8 @@ class PendingWritingTask:
     active_artifact_id: str = ""
     active_artifact_revision: int = 0
     ttl: int = 4
+    batch_total: int = 1
+    batch_remaining_after_current: int = 0
 
 
 @dataclass
@@ -410,6 +413,9 @@ class AssistantEngine:
         # wrong home for it: this is turn-to-turn CONTROL FLOW state, not
         # session knowledge).
         self._pending_workspace_action: dict[str, object] | None = None
+        self._space_pressure_suppressed_candidate_ids: set[str] = set()
+        self._workspace_capacity_revision = 0
+        self._task_surface_capacity_override = False
         # Phase 1 (Cognitive Workspace Blueprint v2): the single, central
         # session-state container. `_active_task_context`,
         # `_active_document_context`, `_pending_writing_task`, and
@@ -865,12 +871,23 @@ class AssistantEngine:
         # in one deterministic turn.
         explicit_alternatives_response = self._try_explicit_alternatives(user_message)
         if explicit_alternatives_response is not None:
+            explicit_selected_path = (
+                str(self._turn_trace.get("active_task_selected_path") or "REPRESENTATION_COMMAND")
+                if self._turn_trace
+                else "REPRESENTATION_COMMAND"
+            )
+            explicit_source = "TASK_CONTINUATION" if explicit_selected_path.startswith("TASK_") else "REPRESENTATION_COMMAND"
+            if self._turn_trace is not None and self._turn_trace.get("task_started"):
+                self._apply_auto_attention_for_new_activity(user_message)
+                extra = self._maybe_propose_space_pressure_minimize(user_message)
+                if extra:
+                    explicit_alternatives_response = explicit_alternatives_response + extra
             explicit_alternatives_response = self._complete_turn(
                 user_message,
                 explicit_alternatives_response,
-                "REPRESENTATION_COMMAND",
+                explicit_source,
                 technical=True,
-                selected_path="REPRESENTATION_COMMAND",
+                selected_path=explicit_selected_path,
             )
             self._perf_log("resposta total", request_started_at, time.perf_counter())
             return explicit_alternatives_response
@@ -928,10 +945,15 @@ class AssistantEngine:
         # may still own the broader workspace activity model, but email
         # execution state is not duplicated into a second compose_email task.
         normalized_for_writing = _normalize_text(user_message)
+        plural_writing_request = _extract_writing_batch_count(normalized_for_writing) > 1
         if (
             self._pending_writing_task is None
             and _looks_like_incomplete_writing_request(normalized_for_writing)
-            and not (self._active_task_context is not None and contains_any_phrase(normalized_for_writing, _ACTIVITY_SWITCH_PHRASES))
+            and not (
+                self._active_task_context is not None
+                and contains_any_phrase(normalized_for_writing, _ACTIVITY_SWITCH_PHRASES)
+                and not plural_writing_request
+            )
             and not (self._active_task_context is not None and self._active_task_context.task_type == "compose_email")
         ):
             writing_workflow_response = self._try_writing_workflow(user_message)
@@ -959,7 +981,7 @@ class AssistantEngine:
             # every turn, only when task_started actually fired this turn.
             if self._turn_trace is not None and self._turn_trace.get("task_started"):
                 self._apply_auto_attention_for_new_activity(user_message)
-                extra = self._maybe_propose_space_pressure_minimize()
+                extra = self._maybe_propose_space_pressure_minimize(user_message)
                 if extra:
                     active_task_response = active_task_response + extra
             active_task_response = self._complete_turn(
@@ -1708,6 +1730,9 @@ class AssistantEngine:
         if self._pending_writing_task is None:
             if not _looks_like_incomplete_writing_request(normalized):
                 return None
+            capacity_response = self._maybe_prepare_task_surface_capacity_action(user_message)
+            if capacity_response:
+                return capacity_response
             if self._active_task_context is not None:
                 self._pause_active_task()
             task = PendingWritingTask()
@@ -1719,6 +1744,11 @@ class AssistantEngine:
             return _writing_workflow_question(task)
 
         task = self._pending_writing_task
+        if _is_explicit_non_writing_activity_or_command(user_message, normalized, self._active_task_context, self._paused_task_stack):
+            if self._turn_trace is not None:
+                self._turn_trace["writing_followup_rejected"] = True
+                self._turn_trace["writing_followup_rejected_reason"] = "explicit_non_writing_activity_or_command"
+            return None
         if not _looks_like_writing_followup(normalized, task):
             task.ttl -= 1
             if task.ttl <= 0:
@@ -1764,11 +1794,13 @@ class AssistantEngine:
         title = f"Email para {task.recipient}" if task.recipient else "Email em preparação"
         payload = {
             "task_type": task.task_type,
-        "recipient": task.recipient,
-        "purpose": task.purpose,
-        "subject": task.subject,
-        "recipient_context": task.recipient_context,
-        "status": task.current_step,
+            "recipient": task.recipient,
+            "purpose": task.purpose,
+            "subject": task.subject,
+            "recipient_context": task.recipient_context,
+            "status": task.current_step,
+            "batch_total": task.batch_total,
+            "batch_remaining_after_current": task.batch_remaining_after_current,
         }
         obj = register_object(
             self._work_session,
@@ -2153,7 +2185,7 @@ class AssistantEngine:
             return None
 
         target_phrase = _workspace_clause_target_phrase(normalized_clause)
-        if action == "minimize" and _is_relative_rest_target(normalized_clause):
+        if action in ("minimize", "hide") and _is_relative_rest_target(normalized_clause):
             retained_ids = [object_id for object_id in (anchor_ids or []) if object_id in self._work_session.objects]
             if not retained_ids:
                 return {
@@ -2222,6 +2254,9 @@ class AssistantEngine:
         elif action == "minimize":
             for object_id in object_ids:
                 levels[object_id] = _ATTN_MINIMIZED
+        elif action == "hide":
+            for object_id in object_ids:
+                levels[object_id] = _ATTN_HIDDEN
         else:
             return False
 
@@ -2415,6 +2450,10 @@ class AssistantEngine:
                 target_resolution = resolve_semantic_targets(target_phrase, self._work_session, "workspace_reference")
                 if target_resolution.matches and not target_resolution.ambiguous:
                     target_ref = target_resolution.matches[0].object_id
+                    if command["action"] == "expand" and target_ref in self._task_surface_open_artifact_ids() and len(self._task_surface_open_artifact_ids()) > 1:
+                        expand_response = self._maybe_prepare_task_surface_expand_action(target_ref)
+                        if expand_response:
+                            return expand_response
                 if command["action"] == "expand" and target_phrase in ("email", "mail", "mensagem") and not target_ref:
                     representation_resolution_failed = True
                     if self._turn_trace is not None:
@@ -2568,6 +2607,16 @@ class AssistantEngine:
         target_task = self._find_task_by_id(match.task_id)
         if target_task is None:
             return None
+        target_artifact_id = target_task.active_artifact_id or match.object_id
+        target_level = (
+            self._work_session.attention.object_states.get(target_artifact_id, _ATTN_VISIBLE)
+            if self._work_session.attention is not None
+            else _ATTN_VISIBLE
+        )
+        if target_level == _ATTN_MINIMIZED and len(self._task_surface_open_artifact_ids()) >= 4:
+            capacity_response = self._maybe_prepare_task_surface_capacity_action(user_message, exclude_ids={target_artifact_id})
+            if capacity_response:
+                return capacity_response.replace("para abrir esta", f"para retomar {self._task_surface_label(target_artifact_id)}")
 
         current = self._work_session.active_task
         previous_type = current.task_type if current is not None and current.id != target_task.id else ""
@@ -2746,6 +2795,9 @@ class AssistantEngine:
                 and interpretation.task_type != ctx.task_type
                 and not (ctx.task_type == "compose_email" and interpretation.task_type == "writing")
             ):
+                capacity_response = self._maybe_prepare_task_surface_capacity_action(raw_message)
+                if capacity_response:
+                    return capacity_response
                 previous_type = ctx.task_type
                 self._pause_active_task()
                 new_ctx = self._create_task_context(
@@ -2756,6 +2808,9 @@ class AssistantEngine:
                     goal=interpretation.goal,
                 )
                 updated_fields = self._extract_task_fields(new_ctx, raw_message, interpretation.remaining_content or normalized_message)
+                materialized_options = self._materialize_comparison_options_from_context(new_ctx, raw_message)
+                if materialized_options and "options" not in updated_fields:
+                    updated_fields.append("options")
                 new_ctx.source_turns.append(raw_message)
                 self._active_task_context = new_ctx
                 self._touch_task(new_ctx)
@@ -2821,14 +2876,15 @@ class AssistantEngine:
                     self._turn_trace["task_context_source"] = "deterministic_activity"
                     self._turn_trace["task_turn_intent"] = "continue"
                 return self._task_continuation_response(ctx)
-            allow_unclassified_note = bool(interpretation.continues_task or interpretation.refines_task)
+            same_task_start = bool(interpretation.starts_task and interpretation.task_type == ctx.task_type)
+            allow_unclassified_note = bool(interpretation.continues_task or interpretation.refines_task or same_task_start)
             updated_fields = self._extract_task_fields(
                 ctx,
                 raw_message,
                 normalized_message,
                 allow_unclassified_note=allow_unclassified_note,
             )
-            if not updated_fields and (interpretation.continues_task or interpretation.refines_task):
+            if not updated_fields and (interpretation.continues_task or interpretation.refines_task or same_task_start):
                 updated_fields = _extract_generic_activity_fields(
                     ctx,
                     raw_message,
@@ -2852,12 +2908,15 @@ class AssistantEngine:
                 self._turn_trace["active_task_continuation_rejected_reason"] = ""
                 self._turn_trace["task_fields_updated"] = updated_fields
                 self._turn_trace["task_context_source"] = "deterministic"
-                self._turn_trace["task_turn_intent"] = "refine" if interpretation.refines_task else "data"
+                self._turn_trace["task_turn_intent"] = "refine" if interpretation.refines_task else ("continue" if same_task_start else "data")
             return self._task_continuation_response(ctx)
 
         task_type = interpretation.task_type or _detect_new_task_intent(normalized_message)
         if not task_type:
             return None
+        capacity_response = self._maybe_prepare_task_surface_capacity_action(raw_message)
+        if capacity_response:
+            return capacity_response
         ctx = self._create_task_context(
             task_type,
             activity_family=interpretation.activity_family,
@@ -2866,6 +2925,9 @@ class AssistantEngine:
             goal=interpretation.goal,
         )
         updated_fields = self._extract_task_fields(ctx, raw_message, normalized_message)
+        materialized_options = self._materialize_comparison_options_from_context(ctx, raw_message)
+        if materialized_options and "options" not in updated_fields:
+            updated_fields.append("options")
         ctx.source_turns.append(raw_message)
         self._active_task_context = ctx
         if self._turn_trace is not None:
@@ -3408,12 +3470,63 @@ class AssistantEngine:
         normalized_message = normalize_for_matching(user_message)
         if not _is_open_reference_phrase(normalized_message):
             return None
+        representation_intent = (
+            self._canonical_interpretation.representation
+            if self._canonical_interpretation is not None
+            else None
+        )
+        if representation_intent is not None and representation_intent.present:
+            return None
         target_resolution = resolve_semantic_targets(user_message, self._work_session, "workspace_reference")
-        if target_resolution.ambiguous or not target_resolution.matches:
+        if target_resolution.ambiguous:
+            if self._turn_trace is not None:
+                self._turn_trace["attention_command_detected"] = True
+                self._turn_trace["attention_command_action"] = "open_workspace_reference"
+                self._turn_trace["attention_command_executed"] = False
+                self._turn_trace["workspace_reference_resolution_source"] = target_resolution.source
+                self._turn_trace["workspace_reference_ambiguous"] = True
+            labels = [match.title for match in target_resolution.matches if match.title]
+            if labels:
+                return "Encontrei mais do que uma possibilidade: " + ", ".join(labels) + ". Qual queres abrir?"
+            return "Encontrei mais do que uma possibilidade. Qual queres abrir?"
+        if not target_resolution.matches:
+            target_phrase = _fuzzy_target_phrase(user_message)
+            if target_phrase and self._work_session.objects:
+                if self._turn_trace is not None:
+                    self._turn_trace["attention_command_detected"] = True
+                    self._turn_trace["attention_command_action"] = "open_workspace_reference"
+                    self._turn_trace["attention_command_executed"] = False
+                    self._turn_trace["workspace_reference_resolution_source"] = target_resolution.source
+                return "Não encontrei esse objeto no workspace."
             return None
         match = target_resolution.matches[0]
         if not match.object_id:
             return None
+
+        task_level_open = normalized_message.startswith(("abre ", "abrir ", "volta ", "retoma "))
+        if match.task_id and task_level_open:
+            target_task = self._find_task_by_id(match.task_id)
+            if target_task is not None:
+                target_artifact_id = target_task.active_artifact_id or match.object_id
+                target_level = (
+                    self._work_session.attention.object_states.get(target_artifact_id, _ATTN_VISIBLE)
+                    if self._work_session.attention is not None
+                    else _ATTN_VISIBLE
+                )
+                if target_level == _ATTN_MINIMIZED and len(self._task_surface_open_artifact_ids()) >= 4:
+                    capacity_response = self._maybe_prepare_task_surface_capacity_action(user_message, exclude_ids={target_artifact_id})
+                    if capacity_response:
+                        return capacity_response.replace("para abrir esta", f"para retomar {self._task_surface_label(target_artifact_id)}")
+                current = self._work_session.active_task
+                previous_artifact_id = current.active_artifact_id if current is not None and current.id != target_task.id else ""
+                if current is not None and current.id != target_task.id and current.status not in ("completed", "cancelled"):
+                    self._pause_active_task()
+                self._paused_task_stack = [task for task in self._paused_task_stack if task.id != target_task.id]
+                target_task.status = "ready" if not self._missing_task_fields(target_task) else "collecting"
+                self._touch_task(target_task)
+                self._active_task_context = target_task
+                if previous_artifact_id:
+                    set_attention(self._work_session, previous_artifact_id, _ATTN_ACTIVE, source="voice_command")
 
         current_task = self._work_session.active_task
         levels: dict[str, str] = {}
@@ -3453,6 +3566,7 @@ class AssistantEngine:
 
         if _is_positive_document_confirmation(user_message):
             object_ids = list(pending.get("object_ids") or [])
+            action = str(pending.get("action") or "minimize")
             for object_id in object_ids:
                 set_attention(self._work_session, object_id, _ATTN_MINIMIZED, source="voice_command")
             self._pending_workspace_action = None
@@ -3467,20 +3581,42 @@ class AssistantEngine:
                     },
                 )
             if self._turn_trace is not None:
+                self._turn_trace["pending_workspace_action"] = True
+                self._turn_trace["pending_workspace_action_result"] = "executed"
                 self._turn_trace["pending_workspace_action_resolved"] = "executed"
+                self._turn_trace["pending_workspace_action_object_ids"] = object_ids
+                self._turn_trace["space_pressure_action"] = "minimize_executed"
+                self._turn_trace["minimization_reason"] = pending.get("reason") or "space_pressure"
             titles = [
                 self._work_session.objects[oid].title or oid
                 for oid in object_ids
                 if oid in self._work_session.objects
             ]
             label = ", ".join(t for t in titles if t) or "isso"
+            deferred_message = str(pending.get("deferred_message") or "")
+            if action == "minimize_for_task_surface" and deferred_message:
+                try:
+                    self._task_surface_capacity_override = True
+                    deferred_response = self.respond(deferred_message)
+                finally:
+                    self._task_surface_capacity_override = False
+                return f"Feito, minimizei {label}. {deferred_response}"
             return f"Feito, minimizei {label}."
 
         if _is_negative_confirmation(user_message):
+            object_ids = list(pending.get("object_ids") or [])
+            self._space_pressure_suppressed_candidate_ids.update(object_ids)
             self._pending_workspace_action = None
             if self._turn_trace is not None:
+                self._turn_trace["pending_workspace_action"] = True
+                self._turn_trace["pending_workspace_action_result"] = "cancelled"
                 self._turn_trace["pending_workspace_action_resolved"] = "cancelled"
-            return "Ok, mantenho tudo visível por agora -- vou trabalhar com o espaço que houver."
+                self._turn_trace["pending_workspace_action_object_ids"] = object_ids
+                self._turn_trace["space_pressure_action"] = "cancelled"
+                self._turn_trace["minimization_reason"] = pending.get("reason") or "space_pressure"
+            if str(pending.get("action") or "") == "minimize_for_task_surface":
+                return "Ok, mantenho tudo como está. Para abrir essa tarefa, preciso que minimizes uma das quatro tarefas abertas."
+            return "Ok, mantenho tudo visível por agora. Não volto a sugerir essa minimização enquanto o espaço não mudar."
 
         # Neither a clear yes nor no -- decay like _pending_user_intent's
         # own ttl pattern rather than let an unrelated later "sim" resolve
@@ -3494,7 +3630,7 @@ class AssistantEngine:
             pending["ttl"] = ttl
         return None
 
-    def _maybe_propose_space_pressure_minimize(self) -> str:
+    def _maybe_propose_space_pressure_minimize(self, user_message: str) -> str:
         """Phase 4 (section 12/13/14): called right after a NEW activity/
         task genuinely starts (see _respond_inner's task_started check) --
         never on every turn. Returns an extra sentence to APPEND to that
@@ -3503,32 +3639,71 @@ class AssistantEngine:
         and asks."""
         pressure_state = self._work_session.capacity
         pressure = pressure_state.pressure if pressure_state is not None else "low"
+        if self._turn_trace is not None:
+            self._turn_trace["space_pressure"] = pressure
+            self._turn_trace["space_pressure_visible_object_count"] = (
+                pressure_state.visible_object_count if pressure_state is not None else 0
+            )
+            self._turn_trace["space_pressure_major_surface_count"] = (
+                pressure_state.major_surface_count if pressure_state is not None else 0
+            )
+            self._turn_trace["space_pressure_overflow_risk"] = (
+                pressure_state.overflow_risk if pressure_state is not None else False
+            )
+            self._turn_trace["capacity_revision"] = pressure_state.revision if pressure_state is not None else 0
+            self._turn_trace["capacity_signal_age"] = (
+                max(0.0, time.time() - pressure_state.updated_at)
+                if pressure_state is not None and pressure_state.updated_at
+                else None
+            )
+            self._turn_trace["space_pressure_action"] = "none"
+            self._turn_trace["space_pressure_permission_required"] = False
+            self._turn_trace["space_pressure_candidate_ids"] = []
+            self._turn_trace["space_pressure_protected_ids"] = []
         if pressure != "high":
             return ""
         if self._pending_workspace_action:
             # Already asked this turn/cycle -- never stack a second
             # question on top of an unresolved one.
+            if self._turn_trace is not None:
+                self._turn_trace["space_pressure_action"] = "pending_exists"
+                self._turn_trace["pending_workspace_action"] = True
             return ""
         constraint = self._work_session.constraints
         focus_id = self._work_session.attention.focus_object_id if self._work_session.attention else ""
         protected: set[str] = {focus_id} if focus_id else set()
         if constraint is not None:
+            protected |= set(constraint.keep_visible_ids)
             protected |= set(constraint.do_not_minimize_ids)
+        protected |= set(resolve_mentioned_object_ids(user_message, self._work_session))
+        protected |= set(self._space_pressure_suppressed_candidate_ids)
         candidates = rank_minimization_candidates(self._work_session, exclude_ids=protected)
+        if self._turn_trace is not None:
+            self._turn_trace["space_pressure_candidate_ids"] = candidates
+            self._turn_trace["space_pressure_protected_ids"] = sorted(protected)
         if not candidates:
             if self._turn_trace is not None:
                 self._turn_trace["space_pressure_candidate_found"] = False
-            return " O espaço está cheio e não encontro nada que possa minimizar em segurança -- os do_not_minimize e o foco atual ficam sempre de fora."
+                self._turn_trace["space_pressure_action"] = "no_safe_candidate"
+            return " O espaço está cheio e não encontro nada que possa minimizar em segurança."
         candidate_id = candidates[0]
         obj = self._work_session.objects.get(candidate_id)
         label = (obj.title if obj is not None and obj.title else "isto")
         self._pending_workspace_action = {
-            "action": "minimize", "object_ids": [candidate_id], "reason": "space_pressure", "ttl": 2,
+            "action": "minimize",
+            "object_ids": [candidate_id],
+            "reason": "space_pressure",
+            "ttl": 2,
+            "capacity_revision": pressure_state.revision if pressure_state is not None else 0,
         }
         if self._turn_trace is not None:
             self._turn_trace["space_pressure_candidate_found"] = True
+            self._turn_trace["space_pressure_action"] = "propose_minimize"
+            self._turn_trace["space_pressure_permission_required"] = True
+            self._turn_trace["pending_workspace_action"] = True
             self._turn_trace["pending_workspace_action_created"] = True
             self._turn_trace["pending_workspace_action_object_ids"] = [candidate_id]
+            self._turn_trace["minimization_reason"] = "space_pressure"
         return f" O espaço está com pouca folga -- posso minimizar {label} para abrir espaço?"
 
     def _apply_auto_attention_for_new_activity(self, user_message: str) -> None:
@@ -3579,11 +3754,24 @@ class AssistantEngine:
         pressure = str(payload.get("pressure") or "low").strip().lower()
         if pressure not in ("low", "medium", "high"):
             pressure = "low"
+        current = self._work_session.capacity
+        changed = (
+            current is None
+            or current.pressure != pressure
+            or current.visible_object_count != int(payload.get("visible_object_count") or 0)
+            or current.major_surface_count != int(payload.get("major_surface_count") or 0)
+            or current.overflow_risk != bool(payload.get("overflow_risk", False))
+        )
+        if changed:
+            self._workspace_capacity_revision += 1
+            self._space_pressure_suppressed_candidate_ids.clear()
         self._work_session.capacity = SpacePressureState(
             pressure=pressure,
             visible_object_count=int(payload.get("visible_object_count") or 0),
             major_surface_count=int(payload.get("major_surface_count") or 0),
             overflow_risk=bool(payload.get("overflow_risk", False)),
+            revision=self._workspace_capacity_revision,
+            updated_at=time.time(),
         )
 
     def _try_representation_command(self, user_message: str) -> str | None:
@@ -3646,6 +3834,9 @@ class AssistantEngine:
                 response = "Ainda não tenho uma vista anterior para mostrar outra vez."
             else:
                 new_state = restore_representation(self._work_session, source="voice_command")
+                if intent.style in ("cards", "list"):
+                    new_state = transform_representation(self._work_session, intent.style, source="voice_command")
+                    self._set_representation_constraint(prefer_style=intent.style, avoid_style="", conversation_only=False)
                 # A restore ends the "hide everything" constraint (there is
                 # something to show again), but a prior explicit prefer/
                 # avoid_style is not implicated by "mostra outra vez" alone,
@@ -3802,36 +3993,53 @@ class AssistantEngine:
         if len(candidates) < 2:
             return None
 
-        activity_ctx = self._ensure_activity_for_explicit_alternatives(user_message, candidates)
+        category = extract_comparison_category(user_message)
+        if self._explicit_alternatives_would_create_new_activity(user_message, candidates, category):
+            capacity_response = self._maybe_prepare_task_surface_capacity_action(user_message)
+            if capacity_response:
+                return capacity_response
+        activity_ctx = self._ensure_activity_for_explicit_alternatives(user_message, candidates, category=category)
 
-        # Phase 4 integration fix (section 10): task ownership -- when a
-        # task is active (e.g. plan_trip) and it names its own options while
-        # active, the new SemanticObjects are related to that activity via
-        # the SAME task_id relation _update_task_artifact_ui already uses,
-        # not a second/parallel identity or relation mechanism.
-        owning_task_id = self._work_session.active_task.id if self._work_session.active_task is not None else ""
+        # Phase 4 stabilization: explicit alternatives are owned by the
+        # activity this turn created/resumed, not by whichever task happened
+        # to be active before routing reached this handler.
+        owning_task_id = activity_ctx.id if activity_ctx is not None else (
+            self._work_session.active_task.id if self._work_session.active_task is not None else ""
+        )
+        created_ids = self._materialize_comparison_options(candidates, user_message, owning_task_id=owning_task_id)
+        if self._turn_trace is not None:
+            if category:
+                self._turn_trace["comparison_category"] = category
+            if activity_ctx is not None:
+                if self._turn_trace.get("task_started"):
+                    self._turn_trace["generic_activity_created"] = True
+                    self._turn_trace["active_task_selected_path"] = "TASK_START"
+                elif self._turn_trace.get("task_resumed"):
+                    self._turn_trace["active_task_selected_path"] = "TASK_RESUME"
+        labels = candidates[0] if len(candidates) == 1 else ", ".join(candidates[:-1]) + " e " + candidates[-1]
+        return f"Boa, temos {labels} como opções -- já estão no espaço de trabalho."
+
+    def _materialize_comparison_options(self, candidates: list[str], user_message: str, *, owning_task_id: str) -> list[str]:
+        """Registers comparison options and their initial visual state.
+
+        This is the canonical bridge from a comparison activity to real
+        SemanticObjects. It is intentionally idempotent: registering the same
+        stable object id updates/reuses the existing object instead of creating
+        duplicate semantic children.
+        """
         created_ids: list[str] = []
         for title in candidates:
             object_id = f"option-{slugify_title(title)}"
             obj = register_object(self._work_session, SemanticObject(id=object_id, kind="option", title=title, task_id=owning_task_id))
-            # Phase 3B integration fix #2: the frontend has no equivalent
-            # of WorkSession.objects on its own -- every new/changed
-            # SemanticObject must be synced BEFORE any representation_
-            # changed event that references its id, or the renderer
-            # receives ids it has never heard of (the exact missing-bridge
-            # bug this fix addresses).
+            # The frontend has no equivalent of WorkSession.objects on its
+            # own, so sync objects before any representation event references
+            # their ids.
             self._queue_semantic_object_sync(obj)
             created_ids.append(object_id)
 
-        # Phase 4 (section 6/7/8): Echo now CHOOSES the initial
-        # representation from the semantic shape of what was just
-        # materialized (object count + whether the trigger verb sounded
-        # like a comparison), instead of always hardcoding "cards" --
-        # never asks permission first (section 8: reversible, low-risk).
-        # choose_representation() itself is the one place that also
-        # respects a PRIOR explicit user style constraint (section 9/10),
-        # so "não quero cartões, põe em lista" earlier in the conversation
-        # is never immediately undone by this auto-trigger.
+        if not created_ids:
+            return []
+
         proposal = choose_representation(
             self._work_session,
             {"object_count": len(created_ids), "comparison_intent": message_implies_comparison(user_message)},
@@ -3852,15 +4060,6 @@ class AssistantEngine:
                 "source": new_state.source,
             },
         )
-        # Phase 4 (section 1/2/4): a brand-new generic set gets a
-        # conservative default attention assignment -- the first-named
-        # alternative becomes FOCUS ("the primary/newly-created work"),
-        # the rest ACTIVE ("directly relevant, readily accessible").
-        # Deliberately does NOT touch any OTHER already-registered object's
-        # attention level -- materializing a new set is not itself a
-        # reason to demote something unrelated (that only happens via
-        # _apply_auto_attention_for_new_activity, wired to actual new-
-        # ACTIVITY starts, not every representation materialization).
         attention_levels = {oid: (_ATTN_FOCUS if index == 0 else _ATTN_ACTIVE) for index, oid in enumerate(created_ids)}
         new_attention = set_bulk_attention(self._work_session, attention_levels, source="auto")
         self._queue_ui_event(
@@ -3882,13 +4081,27 @@ class AssistantEngine:
             self._turn_trace["representation_proposal_confidence"] = proposal.confidence
             self._turn_trace["attention_command_detected"] = True
             self._turn_trace["attention_command_action"] = "materialize_alternatives"
-            if activity_ctx is not None:
-                self._turn_trace["generic_activity_created"] = True
-                self._turn_trace["active_task_selected_path"] = "TASK_START"
-        labels = candidates[0] if len(candidates) == 1 else ", ".join(candidates[:-1]) + " e " + candidates[-1]
-        return f"Boa, temos {labels} como opções -- já estão no espaço de trabalho."
+        return created_ids
 
-    def _ensure_activity_for_explicit_alternatives(self, user_message: str, candidates: list[str]) -> ActiveTaskContext | None:
+    def _materialize_comparison_options_from_context(self, ctx: ActiveTaskContext, user_message: str) -> list[str]:
+        if ctx.task_type != "generic_comparison":
+            return []
+        candidates = _split_option_text(ctx.parameters.get("options", ""))
+        if len(candidates) < 2:
+            candidates = _extract_comparison_options_from_text(user_message)
+            if len(candidates) >= 2:
+                ctx.parameters["options"] = " e ".join(candidates)
+        if len(candidates) < 2:
+            return []
+        return self._materialize_comparison_options(candidates, user_message, owning_task_id=ctx.id)
+
+    def _ensure_activity_for_explicit_alternatives(
+        self,
+        user_message: str,
+        candidates: list[str],
+        *,
+        category: str = "",
+    ) -> ActiveTaskContext | None:
         normalized = _normalize_text(user_message)
         interpretation = _interpret_activity(user_message, normalized, self._active_task_context, self._paused_task_stack)
         if not (interpretation.starts_task and interpretation.task_type == "generic_comparison"):
@@ -3902,6 +4115,8 @@ class AssistantEngine:
             self._paused_task_stack = [task for task in self._paused_task_stack if task.id != equivalent.id]
             equivalent.status = "ready" if not self._missing_task_fields(equivalent) else "collecting"
             equivalent.parameters["options"] = " e ".join(candidates)
+            if category:
+                equivalent.parameters["category"] = category
             if user_message not in equivalent.source_turns:
                 equivalent.source_turns.append(user_message)
             self._touch_task(equivalent)
@@ -3911,23 +4126,43 @@ class AssistantEngine:
                 self._turn_trace["generic_activity_reused"] = True
                 self._turn_trace["active_task_selected_path"] = "TASK_RESUME"
                 self._turn_trace["new_active_task_type"] = equivalent.task_type
-                self._turn_trace["task_fields_updated"] = ["options"]
+                self._turn_trace["task_fields_updated"] = ["options"] + (["category"] if category else [])
                 self._turn_trace["task_context_source"] = "deterministic_activity"
                 self._turn_trace["task_turn_intent"] = "resume"
             self._task_continuation_response(equivalent)
             return equivalent
 
-        if (
-            current is not None
-            and current.status not in ("completed", "cancelled", "paused")
-            and current.task_type != "generic_comparison"
-            and not contains_any_phrase(normalized, _ACTIVITY_SWITCH_PHRASES)
-        ):
-            return current
-
         if current is not None and current.status not in ("completed", "cancelled", "paused"):
             if current.task_type == "generic_comparison":
-                ctx = current
+                current_category = _normalize_text(current.parameters.get("category", ""))
+                next_category = _normalize_text(category)
+                starts_additional_comparison = contains_any_phrase(
+                    normalized,
+                    (
+                        "para alem disso",
+                        "para além disso",
+                        "vamos tambem comparar",
+                        "vamos também comparar",
+                        "tambem vamos comparar",
+                        "também vamos comparar",
+                        "outra comparacao",
+                        "outra comparação",
+                        "nova comparacao",
+                        "nova comparação",
+                    ),
+                )
+                if (next_category and current_category and next_category != current_category) or starts_additional_comparison:
+                    self._pause_active_task()
+                    ctx = self._create_task_context(
+                        "generic_comparison",
+                        activity_family=interpretation.activity_family,
+                        domain=interpretation.domain,
+                        artifact_type=interpretation.artifact_type,
+                        goal=interpretation.goal,
+                    )
+                    self._active_task_context = ctx
+                else:
+                    ctx = current
             else:
                 self._pause_active_task()
                 ctx = self._create_task_context(
@@ -3949,13 +4184,15 @@ class AssistantEngine:
             self._active_task_context = ctx
 
         ctx.parameters["options"] = " e ".join(candidates)
+        if category:
+            ctx.parameters["category"] = category
         if user_message not in ctx.source_turns:
             ctx.source_turns.append(user_message)
         self._touch_task(ctx)
         if self._turn_trace is not None:
             self._turn_trace["task_started"] = True
             self._turn_trace["new_active_task_type"] = ctx.task_type
-            self._turn_trace["task_fields_updated"] = ["options"]
+            self._turn_trace["task_fields_updated"] = ["options"] + (["category"] if category else [])
             self._turn_trace["task_context_source"] = "deterministic_activity"
             self._turn_trace["task_turn_intent"] = "switch" if self._turn_trace.get("task_paused") else "data"
         self._task_continuation_response(ctx)
@@ -3976,6 +4213,133 @@ class AssistantEngine:
             if existing == wanted:
                 return task
         return None
+
+    def _task_surface_artifact_ids(self) -> list[str]:
+        """Task Surface membership is semantic: top-level task artifacts
+        only. Child objects such as options/criteria keep their task_id
+        ownership but never consume one of the four task slots."""
+        return [
+            object_id
+            for object_id, obj in self._work_session.objects.items()
+            if obj.kind in {"task_artifact", "writing_task"}
+        ]
+
+    def _task_surface_open_artifact_ids(self) -> list[str]:
+        open_ids: list[str] = []
+        attention = self._work_session.attention
+        states = attention.object_states if attention is not None else {}
+        for object_id in self._task_surface_artifact_ids():
+            level = states.get(object_id, _ATTN_VISIBLE)
+            if level not in (_ATTN_MINIMIZED, _ATTN_HIDDEN):
+                open_ids.append(object_id)
+        return open_ids
+
+    def _task_surface_label(self, object_id: str) -> str:
+        obj = self._work_session.objects.get(object_id)
+        return (obj.title if obj is not None and obj.title else object_id)
+
+    def _task_surface_minimize_candidate(self, *, exclude_ids: set[str] | None = None) -> str:
+        excluded = set(exclude_ids or set())
+        constraint = self._work_session.constraints
+        if constraint is not None:
+            excluded.update(constraint.keep_visible_ids)
+            excluded.update(constraint.do_not_minimize_ids)
+        focus_id = self._work_session.attention.focus_object_id if self._work_session.attention else ""
+        if focus_id:
+            excluded.add(focus_id)
+        candidates = [oid for oid in self._task_surface_open_artifact_ids() if oid not in excluded]
+        if not candidates:
+            return ""
+        # Prefer a paused/background task before the currently active one.
+        active_artifact = self._work_session.active_task.active_artifact_id if self._work_session.active_task else ""
+        candidates.sort(key=lambda oid: (1 if oid == active_artifact else 0, self._task_surface_label(oid).lower()))
+        return candidates[0]
+
+    def _maybe_prepare_task_surface_capacity_action(self, user_message: str, *, exclude_ids: set[str] | None = None) -> str:
+        if self._task_surface_capacity_override:
+            return ""
+        open_task_ids = self._task_surface_open_artifact_ids()
+        if len(open_task_ids) < 4:
+            return ""
+        candidate_id = self._task_surface_minimize_candidate(exclude_ids=exclude_ids)
+        if not candidate_id:
+            if self._turn_trace is not None:
+                self._turn_trace["task_surface_capacity_blocked"] = True
+                self._turn_trace["task_surface_open_task_count"] = len(open_task_ids)
+                self._turn_trace["pending_workspace_action_created"] = False
+                self._turn_trace["minimization_reason"] = "task_surface_capacity"
+            return "Já tens quatro tarefas abertas. Preciso que minimizes uma delas antes de abrir outra."
+        self._pending_workspace_action = {
+            "action": "minimize_for_task_surface",
+            "object_ids": [candidate_id],
+            "reason": "task_surface_capacity",
+            "ttl": 2,
+            "deferred_message": user_message,
+        }
+        if self._turn_trace is not None:
+            self._turn_trace["task_surface_capacity_blocked"] = True
+            self._turn_trace["task_surface_open_task_count"] = len(open_task_ids)
+            self._turn_trace["task_surface_candidate_id"] = candidate_id
+            self._turn_trace["pending_workspace_action"] = True
+            self._turn_trace["pending_workspace_action_created"] = True
+            self._turn_trace["pending_workspace_action_object_ids"] = [candidate_id]
+            self._turn_trace["minimization_reason"] = "task_surface_capacity"
+        return f"Já tens quatro tarefas abertas. Posso minimizar {self._task_surface_label(candidate_id)} para abrir esta?"
+
+    def _maybe_prepare_task_surface_expand_action(self, target_id: str) -> str:
+        open_task_ids = self._task_surface_open_artifact_ids()
+        if target_id not in open_task_ids or len(open_task_ids) <= 1:
+            return ""
+        candidate_id = self._task_surface_minimize_candidate(exclude_ids={target_id})
+        if not candidate_id:
+            return f"Posso focar {self._task_surface_label(target_id)}, mas não encontro outra tarefa que possa minimizar em segurança."
+        self._pending_workspace_action = {
+            "action": "minimize_for_task_surface",
+            "object_ids": [candidate_id],
+            "reason": "task_surface_expand",
+            "ttl": 2,
+        }
+        if self._turn_trace is not None:
+            self._turn_trace["task_surface_expand_requested"] = True
+            self._turn_trace["task_surface_expand_target_id"] = target_id
+            self._turn_trace["task_surface_candidate_id"] = candidate_id
+            self._turn_trace["pending_workspace_action"] = True
+            self._turn_trace["pending_workspace_action_created"] = True
+            self._turn_trace["pending_workspace_action_object_ids"] = [candidate_id]
+            self._turn_trace["minimization_reason"] = "task_surface_expand"
+        return (
+            f"Posso dar mais espaço a {self._task_surface_label(target_id)}, "
+            f"mas preciso de minimizar uma das outras tarefas. Posso minimizar {self._task_surface_label(candidate_id)}?"
+        )
+
+    def _explicit_alternatives_would_create_new_activity(self, user_message: str, candidates: list[str], category: str) -> bool:
+        equivalent = self._find_equivalent_generic_comparison(candidates)
+        if equivalent is not None:
+            return False
+        current = self._work_session.active_task
+        if current is None or current.status in ("completed", "cancelled", "paused"):
+            return True
+        if current.task_type != "generic_comparison":
+            return True
+        normalized = _normalize_text(user_message)
+        current_category = _normalize_text(current.parameters.get("category", ""))
+        next_category = _normalize_text(category)
+        starts_additional_comparison = contains_any_phrase(
+            normalized,
+            (
+                "para alem disso",
+                "para além disso",
+                "vamos tambem comparar",
+                "vamos também comparar",
+                "tambem vamos comparar",
+                "também vamos comparar",
+                "outra comparacao",
+                "outra comparação",
+                "nova comparacao",
+                "nova comparação",
+            ),
+        )
+        return bool((next_category and current_category and next_category != current_category) or starts_additional_comparison)
 
     def _try_mixed_representation_intent(self, user_message: str) -> str | None:
         """Phase 3C (FIX 10/11/12), generalized in the Phase 4 manual-test
@@ -5623,7 +5987,7 @@ class AssistantEngine:
                 self._last_response_blocked = True
                 self._record_memory_grounding(False, [], True, history_claim_reason)
 
-        if final_response_source in {"RESPONSE_COMPOSER", "AGENT_DIRECT", "COMPOSER_REGENERATED"} and not tools_used:
+        if final_response_source in {"RESPONSE_COMPOSER", "AGENT_DIRECT", "COMPOSER_REGENERATED"} and not tools_used and not technical:
             activity_claim_reason = _detect_ungrounded_activity_claim(final_response)
             if activity_claim_reason:
                 final_response = "Não tenho essa informação sobre a tua atividade real — só o Context Observer sabe isso."
@@ -5632,6 +5996,15 @@ class AssistantEngine:
                 if self._turn_trace is not None:
                     self._turn_trace["response_grounded"] = False
                     self._turn_trace["grounding_sources"] = []
+
+        if final_response_source in {"RESPONSE_COMPOSER", "AGENT_DIRECT", "COMPOSER_REGENERATED"} and not tools_used and not technical:
+            workspace_claim_reason = _detect_ungrounded_workspace_operation_claim(user_message, final_response)
+            if workspace_claim_reason:
+                final_response = "Não alterei nada no workspace. Preciso de identificar um objeto real antes de agir."
+                final_response_source = "WORKSPACE_CLAIM_BLOCKED"
+                self._last_response_blocked = True
+                if self._turn_trace is not None:
+                    self._turn_trace["ungrounded_workspace_operation_claim"] = workspace_claim_reason
 
         self._update_pending_user_intent(user_message, final_response, final_response_source, technical, tool_confirmation)
         self._response_debug(
@@ -6106,10 +6479,23 @@ class AssistantEngine:
             "representation_proposal_reason_code": self._turn_trace.get("representation_proposal_reason_code") or "",
             "representation_proposal_confidence": float(self._turn_trace.get("representation_proposal_confidence") or 0.0),
             "reasoning_visible": bool(self._turn_trace.get("reasoning_visible")),
+            "space_pressure": self._turn_trace.get("space_pressure") or "",
+            "space_pressure_visible_object_count": int(self._turn_trace.get("space_pressure_visible_object_count") or 0),
+            "space_pressure_major_surface_count": int(self._turn_trace.get("space_pressure_major_surface_count") or 0),
+            "space_pressure_overflow_risk": bool(self._turn_trace.get("space_pressure_overflow_risk")),
+            "capacity_revision": int(self._turn_trace.get("capacity_revision") or 0),
+            "capacity_signal_age": self._turn_trace.get("capacity_signal_age"),
+            "space_pressure_candidate_ids": self._turn_trace.get("space_pressure_candidate_ids") or [],
+            "space_pressure_protected_ids": self._turn_trace.get("space_pressure_protected_ids") or [],
+            "space_pressure_action": self._turn_trace.get("space_pressure_action") or "",
+            "space_pressure_permission_required": bool(self._turn_trace.get("space_pressure_permission_required")),
             "space_pressure_candidate_found": self._turn_trace.get("space_pressure_candidate_found"),
+            "pending_workspace_action": bool(self._turn_trace.get("pending_workspace_action")),
             "pending_workspace_action_created": bool(self._turn_trace.get("pending_workspace_action_created")),
             "pending_workspace_action_object_ids": self._turn_trace.get("pending_workspace_action_object_ids") or [],
+            "pending_workspace_action_result": self._turn_trace.get("pending_workspace_action_result") or "",
             "pending_workspace_action_resolved": self._turn_trace.get("pending_workspace_action_resolved") or "",
+            "minimization_reason": self._turn_trace.get("minimization_reason") or "",
             # Passo 3.5: memory relevance gate (section 9). Never the raw
             # memory content itself, only score/reason/pass-fail.
             "memory_candidate_present": bool(self._turn_trace.get("memory_candidate_present")),
@@ -9748,12 +10134,13 @@ def _remaining_workspace_intent_ack(remaining_clauses: list[str]) -> str:
 
 
 _COMPOUND_WORKSPACE_SEPARATORS_RE = re.compile(
-    r"\s*(?:[,;]\s*|\s+mas\s+|\s+depois\s+|\s+enquanto\s+|\s+e tambem\s+|\s+e\s+(?=(?:minimiza|compacta|abre|abrir|abras|mostra|mostrar|traz|aumenta|expande|maximiza|faz|vamos comparar|compara)\b))",
+    r"\s*(?:[,;]\s*|\s+mas\s+|\s+depois\s+|\s+enquanto\s+|\s+e tambem\s+|\s+e\s+(?=(?:minimiza|compacta|esconde|oculta|abre|abrir|abras|mostra|mostrar|traz|aumenta|expande|maximiza|faz|vamos comparar|compara)\b))",
     flags=re.IGNORECASE,
 )
 _WORKSPACE_SHOW_VERBS = ("abre", "abrir", "abras", "mostra", "mostrar", "mostra-me", "traz")
 _WORKSPACE_EXPAND_VERBS = ("aumenta", "expande", "maximiza", "faz")
 _WORKSPACE_MINIMIZE_VERBS = ("minimiza", "compacta")
+_WORKSPACE_HIDE_VERBS = ("esconde", "esconder", "oculta", "ocultar")
 _WORKSPACE_TARGET_FILLERS = (
     "preciso que", "podes", "pode", "quero", "queria", "para ver", "rapidamente",
     "por favor", "me", "o", "a", "os", "as", "um", "uma", "isto", "isso",
@@ -9772,6 +10159,8 @@ def _compound_workspace_clauses(normalized: str) -> list[str]:
 
 
 def _workspace_clause_action(normalized_clause: str) -> str:
+    if contains_any_phrase(normalized_clause, _WORKSPACE_HIDE_VERBS):
+        return "hide"
     if contains_any_phrase(normalized_clause, _WORKSPACE_MINIMIZE_VERBS):
         return "minimize"
     if contains_any_phrase(normalized_clause, _WORKSPACE_EXPAND_VERBS):
@@ -9783,7 +10172,7 @@ def _workspace_clause_action(normalized_clause: str) -> str:
 
 def _workspace_clause_target_phrase(normalized_clause: str) -> str:
     cleaned = normalized_clause
-    for phrase in _WORKSPACE_TARGET_FILLERS + _WORKSPACE_SHOW_VERBS + _WORKSPACE_EXPAND_VERBS + _WORKSPACE_MINIMIZE_VERBS:
+    for phrase in _WORKSPACE_TARGET_FILLERS + _WORKSPACE_SHOW_VERBS + _WORKSPACE_EXPAND_VERBS + _WORKSPACE_MINIMIZE_VERBS + _WORKSPACE_HIDE_VERBS:
         cleaned = re.sub(rf"\b{re.escape(phrase)}\b", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" .!?")
     return cleaned
@@ -9897,7 +10286,21 @@ def _single_owner_task_id(matches: list[WorkspaceReferenceMatch]) -> str:
 
 
 def _is_relative_rest_target(normalized_clause: str) -> bool:
-    return "resto" in normalized_clause and contains_any_phrase(normalized_clause, ("tudo", "todos", "outras", "outros", "restante"))
+    return contains_any_phrase(
+        normalized_clause,
+        (
+            "tudo o resto",
+            "todo o resto",
+            "o resto",
+            "os outros",
+            "as outras",
+            "outros",
+            "outras",
+            "os restantes",
+            "as restantes",
+            "restantes",
+        ),
+    )
 
 
 def _semantic_association_target_reference(raw_message: str) -> str:
@@ -9913,9 +10316,9 @@ def _compound_workspace_success_summary(operations: list[dict[str, object]]) -> 
     actions = [str(operation.get("action") or "") for operation in operations]
     if "add_criteria" in actions and "show" in actions:
         return "Feito — mostrei as opções e acrescentei os critérios à comparação."
-    if "show" in actions and "minimize" in actions:
+    if "show" in actions and ("minimize" in actions or "hide" in actions):
         if any(operation.get("relative_scope") == "all_except" for operation in operations):
-            return "Feito — abri o email para veres e minimizei o resto."
+            return "Feito — mantive isso em foco e afastei o resto."
         return "Feito — abri o email para veres e minimizei as opções."
     if "add_criteria" in actions:
         return "Acrescentei esses critérios à comparação."
@@ -10240,6 +10643,44 @@ def _detect_ungrounded_activity_claim(response: str) -> str:
     normalized = _normalize_text(response)
     for marker in _UNGROUNDED_ACTIVITY_CLAIM_MARKERS:
         if _normalize_text(marker) in normalized:
+            return marker
+    return ""
+
+
+_WORKSPACE_OPERATION_REQUEST_MARKERS = (
+    "abre",
+    "abrir",
+    "mostra",
+    "mostrar",
+    "foca",
+    "minimiza",
+    "compacta",
+    "esconde",
+    "oculta",
+)
+
+_WORKSPACE_OPERATION_SUCCESS_CLAIM_MARKERS = (
+    "esta a abrir",
+    "está a abrir",
+    "abri",
+    "ja abri",
+    "já abri",
+    "minimizei",
+    "minimizado",
+    "escondi",
+    "foquei",
+    "esta em foco",
+    "está em foco",
+)
+
+
+def _detect_ungrounded_workspace_operation_claim(user_message: str, response: str) -> str:
+    normalized_message = _normalize_text(user_message)
+    if not contains_any_phrase(normalized_message, _WORKSPACE_OPERATION_REQUEST_MARKERS):
+        return ""
+    normalized_response = _normalize_text(response)
+    for marker in _WORKSPACE_OPERATION_SUCCESS_CLAIM_MARKERS:
+        if _normalize_text(marker) in normalized_response:
             return marker
     return ""
 
@@ -11224,6 +11665,11 @@ def _looks_like_incomplete_writing_request(normalized_message: str) -> bool:
     text = normalized_message.replace("-", " ").strip(" .,!?:;")
     if not re.search(r"\b(?:preciso|quero|ajuda|ajuda me|podes|consegues)\b", text):
         return False
+    if _extract_writing_batch_count(text) > 1 and re.search(r"\b(?:escrever|redigir|preparar)\b", text) and re.search(
+        r"\b(?:emails?|e mails?|mails?|mensagens?)\b",
+        text,
+    ):
+        return True
     if any(marker in text for marker in ("escrever um email", "escrever um mail", "redigir um email", "redigir um mail", "preparar um email", "preparar um mail", "escrever uma mensagem")):
         return True
     return bool(
@@ -11232,6 +11678,34 @@ def _looks_like_incomplete_writing_request(normalized_message: str) -> bool:
             text,
         )
     )
+
+
+_PT_NUMBER_WORDS = {
+    "um": 1,
+    "uma": 1,
+    "dois": 2,
+    "duas": 2,
+    "tres": 3,
+    "três": 3,
+    "quatro": 4,
+    "cinco": 5,
+    "seis": 6,
+    "sete": 7,
+    "oito": 8,
+    "nove": 9,
+    "dez": 10,
+}
+
+
+def _extract_writing_batch_count(normalized_message: str) -> int:
+    text = normalized_message.replace("-", " ").strip(" .,!?:;")
+    match = re.search(r"\b(?:mais\s+)?(\d+|um|uma|dois|duas|tres|três|quatro|cinco|seis|sete|oito|nove|dez)\s+(?:emails?|e mails?|mails?|mensagens?)\b", text)
+    if not match:
+        return 1
+    token = match.group(1)
+    if token.isdigit():
+        return max(1, int(token))
+    return _PT_NUMBER_WORDS.get(token, 1)
 
 
 def _looks_like_complete_writing_request(normalized_message: str) -> bool:
@@ -11258,6 +11732,39 @@ def _looks_like_writing_followup(normalized_message: str, task: PendingWritingTa
     if any(marker in text for marker in ("projeto", "projecto", "apoio", "financiamento", "parceria", "rever", "marcar", "pedir")):
         return True
     if task.current_step == "collecting_context" and len(text.split()) <= 14:
+        return True
+    return False
+
+
+def _is_explicit_non_writing_activity_or_command(
+    raw_message: str,
+    normalized_message: str,
+    active_task: "ActiveTaskContext | None",
+    paused_tasks: list["ActiveTaskContext"],
+) -> bool:
+    """Reject email slot-filling when another deterministic router has evidence.
+
+    A pending writing task may consume short/person-like field answers, but it
+    must not preempt explicit activity starts, resumes, workspace commands or
+    representation/comparison commands. This is deterministic only; no LLM is
+    used for the compatibility check.
+    """
+    interpretation = _interpret_activity(raw_message, normalized_message, active_task, paused_tasks)
+    if (
+        (interpretation.starts_task or interpretation.resumes_task or interpretation.refines_task)
+        and interpretation.task_type
+        and interpretation.task_type not in {"compose_email", "writing"}
+        and interpretation.confidence >= 0.7
+    ):
+        return True
+    workspace_commands, _remaining = _workspace_command_actions(normalized_message)
+    if workspace_commands:
+        return True
+    if message_implies_comparison(normalized_message) and len(extract_explicit_alternatives(raw_message)) >= 2:
+        return True
+    if extract_explicit_alternatives(raw_message) and contains_any_phrase(
+        normalized_message, ("em cartoes", "em cartões", "em lista", "lado a lado")
+    ):
         return True
     return False
 
@@ -11447,8 +11954,14 @@ _ACTIVITY_SWITCH_PHRASES = (
     "enquanto isso",
     "primeiro preciso de",
     "antes disso",
+    "para alem disso",
+    "para além disso",
     "deixa isso por agora",
     "vamos fazer outra coisa",
+    "vamos tambem comparar",
+    "vamos também comparar",
+    "tambem vamos comparar",
+    "também vamos comparar",
     "lembrei me que",
     "lembrei-me que",
     "voltamos a isto depois",
@@ -11528,14 +12041,53 @@ def _task_metadata(task_type: str, activity_family: str = "unknown", domain: str
     }
 
 
-def _activity_start_from_message(normalized_text: str) -> tuple[str, str]:
+def _activity_start_from_message(raw_text: str, normalized_text: str) -> tuple[str, str]:
     if contains_any_phrase(normalized_text, _TASK_TRIGGER_PHRASES["compose_email"]):
         return "compose_email", "compose_email_trigger"
-    if contains_any_phrase(normalized_text, ("vamos comparar", "quero comparar", "preciso de comparar", "ajuda me a comparar", "estou a pensar")) and contains_any_phrase(normalized_text, ("comparar", "com", "entre")):
+    if contains_any_phrase(
+        normalized_text,
+        (
+            "compara",
+            "comparar",
+            "vamos comparar",
+            "vamos tambem comparar",
+            "vamos também comparar",
+            "tambem vamos comparar",
+            "também vamos comparar",
+            "quero comparar",
+            "preciso de comparar",
+            "ajuda me a comparar",
+            "estou a pensar",
+            "vamos avaliar",
+            "quero avaliar",
+            "preciso de avaliar",
+        ),
+    ) and (
+        contains_any_phrase(normalized_text, ("comparar", "avaliar", "com", "entre"))
+        or len(extract_explicit_alternatives(raw_text)) >= 2
+    ):
         return "generic_comparison", "generic_comparison_trigger"
     if contains_any_phrase(normalized_text, ("planear umas ferias", "planear ferias", "planear uma viagem", "planear viagem", "road trip")):
         return "plan_trip", "travel_planning_trigger"
-    if "ferias" in normalized_text and contains_any_phrase(normalized_text, ("vamos planear", "quero planear", "gostava de planear", "prepara te")):
+    if ("ferias" in normalized_text or "viagem" in normalized_text) and contains_any_phrase(
+        normalized_text,
+        (
+            "vamos planear",
+            "quero planear",
+            "gostava de planear",
+            "ajuda me a planear",
+            "ajuda-me a planear",
+            "ajuda a planear",
+            "preciso da tua ajuda a planear",
+            "preciso de ajuda a planear",
+            "vamos tambem preparar",
+            "vamos também preparar",
+            "preparar umas",
+            "preparar ferias",
+            "preparar férias",
+            "prepara te",
+        ),
+    ):
         return "plan_trip", "travel_planning_trigger"
     if contains_any_phrase(normalized_text, ("vamos estudar",)):
         return "study_topic", "study_trigger"
@@ -11543,6 +12095,8 @@ def _activity_start_from_message(normalized_text: str) -> tuple[str, str]:
         return "make_decision", "decision_trigger"
     if contains_any_phrase(normalized_text, ("quero investigar", "vamos investigar", "preciso de investigar", "investigar opcoes", "investigar opções")):
         return "research_topic", "research_trigger"
+    if contains_any_phrase(normalized_text, ("prepara uma apresentacao", "prepara uma apresentação", "preparar uma apresentacao", "preparar uma apresentação")):
+        return "generic_activity", "generic_activity_trigger"
     if contains_any_phrase(normalized_text, ("vamos organizar", "vamos preparar")):
         return "generic_activity", "generic_activity_trigger"
     if contains_any_phrase(normalized_text, ("vamos escrever juntos", "vamos escrever")):
@@ -11556,7 +12110,7 @@ def _interpret_activity(
     active_task: "ActiveTaskContext | None",
     paused_tasks: list["ActiveTaskContext"],
 ) -> ActivityInterpretation:
-    task_type, reason = _activity_start_from_message(normalized_text)
+    task_type, reason = _activity_start_from_message(raw_message, normalized_text)
     metadata = _task_metadata(task_type) if task_type else _task_metadata("")
     has_switch = contains_any_phrase(normalized_text, _ACTIVITY_SWITCH_PHRASES)
     has_resume = contains_any_phrase(normalized_text, _ACTIVITY_RESUME_PHRASES)
@@ -11680,6 +12234,11 @@ _TASK_TRIGGER_PHRASES = {
         "vamos escrever uma mensagem",
         "preciso de escrever um mail",
         "preciso de escrever um email",
+        "preciso de escrever mais",
+        "preciso de escrever dois mails",
+        "preciso de escrever duas mensagens",
+        "quero escrever mais",
+        "ajuda me a escrever mais",
         # 1st-person-plural infinitive form ("...para escrevermos um
         # email") -- distinct wording from "vamos escrever", found in a
         # real mixed workspace+task utterance ("chega para a esquerda
@@ -11916,7 +12475,25 @@ def _looks_like_content_request(cleaned: str, normalized_text: str) -> bool:
 
 
 def _extract_comparison_options_from_text(raw_text: str) -> list[str]:
-    return extract_explicit_alternatives(raw_text)
+    options = extract_explicit_alternatives(raw_text)
+    if options:
+        return options
+    # Direct imperatives ("compara Samsung com Apple") are routed by the
+    # activity layer as comparison starts, but they do not use the broader
+    # "vamos comparar ..." alternatives trigger. For a new comparison, those
+    # operands are still the semantic options; criteria remain follow-up
+    # requests once the comparison already has options.
+    direct_options = extract_comparison_criteria(raw_text)
+    if len(direct_options) >= 2 and message_implies_comparison(raw_text):
+        return [_capitalize_initial_word(option) for option in direct_options]
+    return []
+
+
+def _capitalize_initial_word(text: str) -> str:
+    cleaned = text.strip()
+    if not cleaned:
+        return ""
+    return cleaned[:1].upper() + cleaned[1:]
 
 
 def _extract_generic_activity_fields(
@@ -12044,6 +12621,9 @@ def _generic_task_title(ctx: "ActiveTaskContext") -> str:
     if ctx.task_type == "research_topic":
         return "Investigação"
     if ctx.task_type == "generic_comparison":
+        category = ctx.parameters.get("category") or ""
+        if category:
+            return f"Comparação: {category}"
         options = ctx.parameters.get("options") or ""
         return f"Comparação: {options}" if options else "Comparação"
     if ctx.task_type == "generic_activity":
@@ -12061,6 +12641,8 @@ def _generic_task_card_content(ctx: "ActiveTaskContext") -> str:
         lines.append(f"Preferência: {ctx.parameters['travel_style']}")
     if ctx.parameters.get("topic"):
         lines.append(f"Tema: {ctx.parameters['topic']}")
+    if ctx.parameters.get("category"):
+        lines.append(f"Categoria: {ctx.parameters['category']}")
     if ctx.parameters.get("options"):
         lines.append(f"Opções: {ctx.parameters['options']}")
     if ctx.parameters.get("criteria"):
@@ -12156,6 +12738,61 @@ def _title_match_confidence(normalized_message: str, title: str) -> float:
     if title_norm in normalized_message:
         return 0.9
     return 0.6 if _title_alias_index(normalized_message, title_norm) >= 0 else 0.0
+
+
+def _fuzzy_target_phrase(raw_message: str) -> str:
+    normalized = normalize_for_matching(raw_message)
+    target = _workspace_clause_target_phrase(normalized)
+    tokens = [
+        token
+        for token in re.findall(r"\b[\wÀ-ÿ]{3,}\b", target)
+        if token not in _SEMANTIC_TARGET_STOPWORDS
+    ]
+    return " ".join(tokens)
+
+
+def _fuzzy_title_score(target_phrase: str, title: str) -> float:
+    title_norm = normalize_for_matching(title)
+    if not target_phrase or not title_norm:
+        return 0.0
+    target_tokens = target_phrase.split()
+    title_tokens = title_norm.split()
+    if len(target_tokens) == 1 and len(title_tokens) == 1:
+        if abs(len(target_tokens[0]) - len(title_tokens[0])) > 2:
+            return 0.0
+        return SequenceMatcher(None, target_tokens[0], title_tokens[0]).ratio()
+    if abs(len(target_phrase) - len(title_norm)) > 4:
+        return 0.0
+    return SequenceMatcher(None, target_phrase, title_norm).ratio()
+
+
+def _resolve_fuzzy_semantic_targets(raw_message: str, work_session: "WorkSession") -> TargetResolution:
+    target_phrase = _fuzzy_target_phrase(raw_message)
+    if len(target_phrase) < 4:
+        return TargetResolution(matches=[], confidence=0.0, ambiguous=False, source="fuzzy_target_too_short")
+
+    candidates: list[WorkspaceReferenceMatch] = []
+    for object_id, obj in work_session.objects.items():
+        score = _fuzzy_title_score(target_phrase, obj.title)
+        if score < 0.86:
+            continue
+        candidates.append(
+            WorkspaceReferenceMatch(
+                object_id=object_id,
+                task_id=obj.task_id,
+                title=obj.title,
+                confidence=score,
+            )
+        )
+
+    if not candidates:
+        return TargetResolution(matches=[], confidence=0.0, ambiguous=False, source="no_fuzzy_match")
+    candidates.sort(key=lambda match: match.confidence, reverse=True)
+    best = candidates[0]
+    close = [match for match in candidates if best.confidence - match.confidence < 0.04]
+    if len(close) > 1:
+        return TargetResolution(matches=close, confidence=best.confidence, ambiguous=True, source="ambiguous_fuzzy_workspace_reference")
+    return TargetResolution(matches=[best], confidence=best.confidence, ambiguous=False, source="fuzzy_workspace_reference")
 
 
 def resolve_workspace_reference(raw_message: str, work_session: "WorkSession") -> "WorkspaceReferenceMatch | None":
@@ -12269,6 +12906,11 @@ def resolve_semantic_targets(raw_message: str, work_session: "WorkSession", inte
     reference = resolve_workspace_reference(raw_message, work_session)
     if reference is not None:
         return TargetResolution(matches=[reference], confidence=reference.confidence, ambiguous=False, source="workspace_reference")
+
+    if intent_context in ("attention", "workspace_reference", "attention_show_again", "activity_resume"):
+        fuzzy = _resolve_fuzzy_semantic_targets(raw_message, work_session)
+        if fuzzy.matches or fuzzy.ambiguous:
+            return fuzzy
 
     if intent_context == "attention_show_again" and work_session.attention is not None:
         minimized_ids = [oid for oid, level in work_session.attention.object_states.items() if level == _ATTN_MINIMIZED]
@@ -12601,6 +13243,10 @@ def _update_pending_writing_task(task: PendingWritingTask, message: str, *, awai
     raw = str(message or "").strip()
     if "email" in text or "e-mail" in text or "mail" in text:
         task.task_type = "compose_email"
+    batch_count = _extract_writing_batch_count(text)
+    if batch_count > 1:
+        task.batch_total = max(task.batch_total, batch_count)
+        task.batch_remaining_after_current = max(task.batch_remaining_after_current, task.batch_total - 1)
     details = _extract_pending_writing_recipient_details(raw)
     if details.get("recipient") and not task.recipient:
         task.recipient = details["recipient"]

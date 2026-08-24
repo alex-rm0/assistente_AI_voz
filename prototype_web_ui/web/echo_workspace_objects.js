@@ -30,6 +30,7 @@
     comparison: "COMPARAÇÃO",
     excerpt: "TRECHO",
     task_artifact: "TAREFA",
+    writing_task: "TAREFA",
   };
 
   // Phase 3B (Cognitive Workspace Blueprint v2): REPRESENTATION RENDERER.
@@ -153,6 +154,12 @@
     // as "visible" (the neutral default) via attentionLevelFor() below.
     let attentionState = { objectStates: {}, focusObjectId: "", source: "auto" };
     let lastReportedCapacity = null;
+    const TASK_SURFACE_MAX_OPEN = 4;
+    const TASK_SURFACE_STORAGE_KEY = "echo_os.task_surface.v1";
+    const TASK_SURFACE_DEFAULT_RATIO = 0.36;
+    let taskSurfaceWidthRatio = loadTaskSurfaceWidthRatio();
+    let taskSurfaceResizeState = null;
+    let taskSurfaceResizeHandle = null;
 
     // WorkspaceScene: the one piece of state that decides what the
     // workspace currently looks like. layoutIntent is one of "single" |
@@ -887,9 +894,13 @@
       // suppressed as "unchanged" against stale pre-reset numbers).
       attentionState = { objectStates: {}, focusObjectId: "", source: "auto" };
       lastReportedCapacity = null;
+      removeTaskSurfaceResizeHandle();
       if (container) {
         container.innerHTML = "";
         delete container.dataset.representationStyle;
+        delete container.dataset.taskSurface;
+        delete container.dataset.openTaskCount;
+        delete container.dataset.minimizedTaskCount;
       }
       updatePresentation();
       renderTethers();
@@ -903,7 +914,8 @@
     // Unlike the old click-to-focus toggle, this reflects the WHOLE
     // lifetime of a workspace session, not a momentary "open" click.
     function updatePresentation() {
-      const hasSurface = Boolean(activeSurfaceId());
+      const taskState = taskSurfaceState();
+      const hasSurface = Boolean(activeSurfaceId()) || taskState.openTasks.length > 0 || taskState.minimizedTasks.length > 0;
       setEntityLayoutRole(hasSurface ? "focus" : "normal");
       if (hasSurface !== hadSurface) {
         onFocusChange(hasSurface);
@@ -1292,6 +1304,342 @@
       fillNodeContent(node, obj, actions, []);
     }
 
+    function resetTransientLayoutState(node) {
+      if (!node) return;
+      // Idempotence rule: geometry from a previous render is never
+      // semantic state. Each render re-applies layout from objects,
+      // representation, attention and the current viewport only.
+      delete node.dataset.split;
+      delete node.dataset.compactMajor;
+      delete node.dataset.dragging;
+      delete node.dataset.taskSurfaceSlot;
+      delete node.dataset.taskSlotIndex;
+      delete node.dataset.taskCount;
+      delete node.dataset.minimizedRail;
+      delete node.dataset.containedByTask;
+      node.style.removeProperty("left");
+      node.style.removeProperty("top");
+      node.style.removeProperty("right");
+      node.style.removeProperty("width");
+      node.style.removeProperty("height");
+      node.style.removeProperty("max-height");
+      node.style.removeProperty("transform");
+      node.style.removeProperty("margin");
+    }
+
+    function loadTaskSurfaceWidthRatio() {
+      if (typeof window === "undefined" || !window.localStorage) return null;
+      try {
+        const raw = window.localStorage.getItem(TASK_SURFACE_STORAGE_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        const ratio = Number(parsed && parsed.widthRatio);
+        return Number.isFinite(ratio) && ratio > 0 ? ratio : null;
+      } catch (err) {
+        return null;
+      }
+    }
+
+    function saveTaskSurfaceWidthRatio() {
+      if (typeof window === "undefined" || !window.localStorage || !Number.isFinite(taskSurfaceWidthRatio)) return;
+      try {
+        window.localStorage.setItem(TASK_SURFACE_STORAGE_KEY, JSON.stringify({ widthRatio: taskSurfaceWidthRatio }));
+      } catch (err) {
+        /* localStorage can be disabled in embedded runtimes -- non-fatal */
+      }
+    }
+
+    function taskSurfaceWidthLimits(hostRect) {
+      const hostWidth = Math.max(1, Number(hostRect && hostRect.width) || 1);
+      const minWidth = Math.min(360, Math.max(280, Math.floor(hostWidth * 0.26)));
+      const maxWidth = Math.max(minWidth, Math.min(620, Math.floor(hostWidth * 0.44)));
+      const defaultWidth = clampNumber(Math.floor(hostWidth * TASK_SURFACE_DEFAULT_RATIO), minWidth, maxWidth);
+      return { minWidth, maxWidth, defaultWidth };
+    }
+
+    function clampNumber(value, min, max) {
+      return Math.min(max, Math.max(min, value));
+    }
+
+    function taskSurfaceWidth(hostRect) {
+      const hostWidth = Math.max(1, Number(hostRect && hostRect.width) || 1);
+      const limits = taskSurfaceWidthLimits(hostRect);
+      if (!Number.isFinite(taskSurfaceWidthRatio)) return limits.defaultWidth;
+      return clampNumber(Math.floor(taskSurfaceWidthRatio * hostWidth), limits.minWidth, limits.maxWidth);
+    }
+
+    function setTaskSurfaceWidthFromPixels(width, hostRect, options = {}) {
+      const hostWidth = Math.max(1, Number(hostRect && hostRect.width) || 1);
+      const limits = taskSurfaceWidthLimits(hostRect);
+      const nextWidth = clampNumber(Math.floor(width), limits.minWidth, limits.maxWidth);
+      taskSurfaceWidthRatio = nextWidth / hostWidth;
+      if (options.persist) saveTaskSurfaceWidthRatio();
+      return nextWidth;
+    }
+
+    function applyTaskSurfaceBoundsToContainer(bounds) {
+      if (!container || !container.style) return;
+      container.style.setProperty("--task-surface-left", `${bounds.left}px`);
+      container.style.setProperty("--task-surface-top", `${bounds.top}px`);
+      container.style.setProperty("--task-surface-width", `${bounds.width}px`);
+      container.style.setProperty("--task-surface-height", `${bounds.height}px`);
+    }
+
+    function ensureTaskSurfaceResizeHandle(bounds) {
+      if (!container) return null;
+      if (!taskSurfaceResizeHandle) {
+        taskSurfaceResizeHandle = document.createElement("div");
+        taskSurfaceResizeHandle.className = "task-surface-resize-handle";
+        taskSurfaceResizeHandle.dataset.taskSurfaceResizeHandle = "true";
+        taskSurfaceResizeHandle.setAttribute("role", "separator");
+        taskSurfaceResizeHandle.setAttribute("aria-orientation", "vertical");
+        taskSurfaceResizeHandle.setAttribute("title", "Redimensionar superfície de tarefas");
+        taskSurfaceResizeHandle.addEventListener("pointerdown", startTaskSurfaceResize);
+      }
+      if (taskSurfaceResizeHandle.parentNode !== container) container.appendChild(taskSurfaceResizeHandle);
+      if (bounds) {
+        taskSurfaceResizeHandle.style.left = `${bounds.left + bounds.width - 5}px`;
+        taskSurfaceResizeHandle.style.top = `${bounds.top}px`;
+        taskSurfaceResizeHandle.style.height = `${bounds.height}px`;
+      }
+      return taskSurfaceResizeHandle;
+    }
+
+    function removeTaskSurfaceResizeHandle() {
+      if (taskSurfaceResizeHandle && taskSurfaceResizeHandle.parentNode) {
+        taskSurfaceResizeHandle.parentNode.removeChild(taskSurfaceResizeHandle);
+      }
+      taskSurfaceResizeHandle = null;
+      if (container && container.style) {
+        container.style.removeProperty("--task-surface-left");
+        container.style.removeProperty("--task-surface-top");
+        container.style.removeProperty("--task-surface-width");
+        container.style.removeProperty("--task-surface-height");
+      }
+    }
+
+    function isTaskSurfaceObject(obj) {
+      return obj && (obj.type === "task_artifact" || obj.type === "writing_task");
+    }
+
+    function taskSurfaceObjects() {
+      return listObjects().filter((obj) => isTaskSurfaceObject(obj));
+    }
+
+    function isAttentionVisible(level) {
+      return level !== "minimized" && level !== "hidden";
+    }
+
+    function taskSurfaceState() {
+      const tasks = taskSurfaceObjects();
+      const openTasks = tasks.filter((obj) => isAttentionVisible(attentionLevelFor(obj.id))).slice(0, TASK_SURFACE_MAX_OPEN);
+      const minimizedTasks = tasks.filter((obj) => attentionLevelFor(obj.id) === "minimized");
+      const focusedTaskId = openTasks.find((obj) => attentionLevelFor(obj.id) === "focus")?.id || "";
+      return { tasks, openTasks, minimizedTasks, focusedTaskId };
+    }
+
+    function taskSurfaceBounds(hostRect) {
+      const gap = 24;
+      const top = 74;
+      const bottomRail = 70;
+      const width = taskSurfaceWidth(hostRect);
+      const bottom = Math.max(top + 240, hostRect.height - bottomRail);
+      return {
+        left: gap,
+        top,
+        width,
+        height: Math.max(220, bottom - top),
+      };
+    }
+
+    function taskSurfaceSlots(bounds, count) {
+      const gap = 14;
+      if (count <= 0) return [];
+      if (count === 1) return [{ left: bounds.left, top: bounds.top, width: bounds.width, height: bounds.height }];
+      if (count === 2) {
+        const h = (bounds.height - gap) / 2;
+        return [0, 1].map((index) => ({ left: bounds.left, top: bounds.top + index * (h + gap), width: bounds.width, height: h }));
+      }
+      if (count === 3) {
+        const h = (bounds.height - gap * 2) / 3;
+        return [0, 1, 2].map((index) => ({ left: bounds.left, top: bounds.top + index * (h + gap), width: bounds.width, height: h }));
+      }
+      const w = (bounds.width - gap) / 2;
+      const h = (bounds.height - gap) / 2;
+      return [0, 1, 2, 3].map((index) => ({
+        left: bounds.left + (index % 2) * (w + gap),
+        top: bounds.top + Math.floor(index / 2) * (h + gap),
+        width: w,
+        height: h,
+      }));
+    }
+
+    function placeTaskNode(node, slot) {
+      node.style.setProperty("left", `${slot.left}px`, "important");
+      node.style.setProperty("top", `${slot.top}px`, "important");
+      node.style.setProperty("width", `${slot.width}px`, "important");
+      node.style.setProperty("height", `${slot.height}px`, "important");
+      node.style.setProperty("right", "auto", "important");
+      node.style.setProperty("max-height", `${slot.height}px`, "important");
+    }
+
+    function placeMinimizedTaskNode(node, bounds, index) {
+      const chipWidth = Math.min(210, Math.max(150, bounds.width / 2 - 8));
+      const chipHeight = 38;
+      const gap = 10;
+      const x = bounds.left + (index % 2) * (chipWidth + gap);
+      const y = bounds.top + bounds.height + 14 + Math.floor(index / 2) * (chipHeight + gap);
+      placeTaskNode(node, { left: x, top: y, width: chipWidth, height: chipHeight });
+    }
+
+    function taskIdForObject(obj) {
+      return obj && obj.metadata ? (obj.metadata.taskId || "") : "";
+    }
+
+    function objectBelongsToOpenTask(obj, openTasks) {
+      const taskId = taskIdForObject(obj);
+      if (!taskId) return false;
+      return openTasks.some((task) => taskIdForObject(task) === taskId && obj.id !== task.id);
+    }
+
+    function placeEchoForTaskSurface(bounds, hostRect) {
+      const entityRadius = 150;
+      const rightZoneLeft = bounds.left + bounds.width + 40;
+      const point = {
+        x: Math.min(Math.max(rightZoneLeft + (hostRect.width - rightZoneLeft) * 0.52, rightZoneLeft + entityRadius), Math.max(entityRadius, hostRect.width - entityRadius)),
+        y: Math.min(Math.max(hostRect.height * 0.38, entityRadius), Math.max(entityRadius, hostRect.height - entityRadius)),
+      };
+      setEntityPoint(point);
+    }
+
+    function renderTaskSurface() {
+      if (!container) return false;
+      const state = taskSurfaceState();
+      const hasSurface = state.openTasks.length > 0 || state.minimizedTasks.length > 0;
+      if (!hasSurface) {
+        delete container.dataset.taskSurface;
+        delete container.dataset.openTaskCount;
+        delete container.dataset.minimizedTaskCount;
+        removeTaskSurfaceResizeHandle();
+        return false;
+      }
+      const hostRect = container.getBoundingClientRect();
+      const bounds = taskSurfaceBounds(hostRect);
+      const slots = taskSurfaceSlots(bounds, state.openTasks.length);
+      applyTaskSurfaceBoundsToContainer(bounds);
+      ensureTaskSurfaceResizeHandle(bounds);
+      container.dataset.taskSurface = "active";
+      container.dataset.openTaskCount = String(state.openTasks.length);
+      container.dataset.minimizedTaskCount = String(state.minimizedTasks.length);
+      delete container.dataset.representationStyle;
+
+      const renderIds = new Set(state.tasks.map((obj) => obj.id));
+      listObjects().forEach((obj) => {
+        if (objectBelongsToOpenTask(obj, state.openTasks)) {
+          const node = nodes.get(obj.id);
+          if (node && node.parentNode) node.parentNode.removeChild(node);
+          return;
+        }
+        if (!isTaskSurfaceObject(obj)) {
+          const node = nodes.get(obj.id);
+          if (node && node.parentNode) node.parentNode.removeChild(node);
+        }
+      });
+      nodes.forEach((node, id) => {
+        if (!objects.has(id)) {
+          node.remove();
+          nodes.delete(id);
+        }
+      });
+
+      state.openTasks.forEach((obj, index) => {
+        let node = nodes.get(obj.id);
+        if (!node) {
+          node = buildNode(obj);
+          nodes.set(obj.id, node);
+        }
+        if (node.parentNode !== container) container.appendChild(node);
+        node.dataset.role = "primary";
+        node.dataset.taskSurfaceSlot = "true";
+        node.dataset.taskSlotIndex = String(index);
+        node.dataset.taskCount = String(state.openTasks.length);
+        node.dataset.closable = "false";
+        node.dataset.hidden = "false";
+        node.dataset.attention = attentionLevelFor(obj.id);
+        fillNodeContent(node, obj, actionsFor(obj, true), []);
+        placeTaskNode(node, slots[index]);
+        renderIds.delete(obj.id);
+      });
+
+      state.minimizedTasks.forEach((obj, index) => {
+        let node = nodes.get(obj.id);
+        if (!node) {
+          node = buildNode(obj);
+          nodes.set(obj.id, node);
+        }
+        if (node.parentNode !== container) container.appendChild(node);
+        node.dataset.role = "reference";
+        node.dataset.minimizedRail = "true";
+        node.dataset.closable = "false";
+        node.dataset.hidden = "false";
+        node.dataset.attention = "minimized";
+        fillNodeContent(node, obj, ["open"], []);
+        placeMinimizedTaskNode(node, bounds, index);
+        renderIds.delete(obj.id);
+      });
+
+      renderIds.forEach((id) => {
+        const node = nodes.get(id);
+        if (node && node.parentNode) node.parentNode.removeChild(node);
+      });
+
+      if (state.openTasks.length > 0) {
+        placeEchoForTaskSurface(bounds, hostRect);
+      } else {
+        setEntityAnchor("center");
+      }
+      return true;
+    }
+
+    function startTaskSurfaceResize(event) {
+      if (!container || !taskSurfaceResizeHandle) return;
+      const hostRect = container.getBoundingClientRect();
+      const startWidth = taskSurfaceWidth(hostRect);
+      taskSurfaceResizeState = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startWidth,
+        hostRect,
+      };
+      taskSurfaceResizeHandle.dataset.dragging = "true";
+      try {
+        taskSurfaceResizeHandle.setPointerCapture(event.pointerId);
+      } catch (err) {
+        /* pointer capture not available in this environment -- non-fatal */
+      }
+      event.preventDefault();
+    }
+
+    function continueTaskSurfaceResize(event) {
+      if (!taskSurfaceResizeState || event.pointerId !== taskSurfaceResizeState.pointerId) return;
+      const nextWidth = taskSurfaceResizeState.startWidth + (event.clientX - taskSurfaceResizeState.startX);
+      setTaskSurfaceWidthFromPixels(nextWidth, taskSurfaceResizeState.hostRect, { persist: true });
+      render();
+    }
+
+    function endTaskSurfaceResize(event) {
+      if (!taskSurfaceResizeState || event.pointerId !== taskSurfaceResizeState.pointerId) return;
+      if (taskSurfaceResizeHandle) {
+        delete taskSurfaceResizeHandle.dataset.dragging;
+        try {
+          taskSurfaceResizeHandle.releasePointerCapture(event.pointerId);
+        } catch (err) {
+          /* non-fatal */
+        }
+      }
+      taskSurfaceResizeState = null;
+    }
+
     // Phase 3C final patch (section 2): the ONE place that turns "here is
     // a rectangle Echo should stay adjacent to, never overlap" into an
     // actual point -- tries the right side first, falls back below when
@@ -1591,6 +1939,23 @@
       node.style.top = `${obj.position.y}px`;
     }
 
+    function canonicalSurfaceBounds(hostRect) {
+      const gap = 24;
+      const echoReserve = hostRect.width <= 860 ? 0 : 374;
+      const left = gap;
+      const top = 72;
+      const right = Math.max(left + 240, hostRect.width - echoReserve - gap);
+      const bottom = Math.min(hostRect.height - gap, top + Math.min(660, Math.max(260, hostRect.height * 0.72)));
+      return {
+        left,
+        top,
+        right,
+        bottom,
+        width: Math.max(240, right - left),
+        height: Math.max(180, bottom - top),
+      };
+    }
+
     // Section 14 (generic geometry engine, no advanced solver): when more
     // than one object is "major" at once (side_by_side/split/stack), gives
     // each an equal share of the same safe area the single-primary CSS
@@ -1631,11 +1996,10 @@
         // and placeEchoAdjacentTo's own comments for why (section 2).
         return layoutCompactMajorSurfaces(surfaceIds, hostRect);
       }
-      const anchorNode = nodes.get(surfaceIds[0]);
-      const anchorRect = anchorNode ? anchorNode.getBoundingClientRect() : null;
-      const top = anchorRect ? anchorRect.top - hostRect.top : 72;
-      const left0 = anchorRect ? anchorRect.left - hostRect.left : 12;
-      const rightEdge = anchorRect ? anchorRect.right - hostRect.left : hostRect.width - 386;
+      const bounds = canonicalSurfaceBounds(hostRect);
+      const top = bounds.top;
+      const left0 = bounds.left;
+      const rightEdge = bounds.right;
       const margin = 12;
       const availableWidth = Math.max(240, rightEdge - left0);
       const stack = scene.layoutIntent === "stack";
@@ -1945,6 +2309,7 @@
 
     function render() {
       if (!container) return;
+      nodes.forEach((node) => resetTransientLayoutState(node));
       // Phase 3B: a flat representation (cards/list/conversation_only) has
       // no primary/reference concept at all -- ensurePrimarySurface()'s
       // invariant ("some object is always primary") is deliberately not
@@ -1956,7 +2321,10 @@
       // taps and every existing document/email flow renders exactly as it
       // did before this phase.
       let majorLayoutResult = null;
-      if (representation && FLAT_REPRESENTATION_STYLES.indexOf(representation.style) !== -1) {
+      const taskSurfaceRendered = renderTaskSurface();
+      if (taskSurfaceRendered) {
+        majorLayoutResult = {echoPlaced: true, bottomEdge: null};
+      } else if (representation && FLAT_REPRESENTATION_STYLES.indexOf(representation.style) !== -1) {
         renderRepresentation();
       } else {
         // side_by_side (or no representation at all) uses this unchanged
@@ -2027,13 +2395,17 @@
     function computeSpacePressure() {
       if (!container) return null;
       const hostRect = container.getBoundingClientRect();
-      const visibleIds = representation
+      const surfaceState = taskSurfaceState();
+      const hasTaskSurface = surfaceState.openTasks.length > 0 || surfaceState.minimizedTasks.length > 0;
+      const visibleIds = hasTaskSurface
+        ? surfaceState.openTasks.map((obj) => obj.id)
+        : representation
         ? visibleIdsForRepresentation().map((obj) => obj.id)
         : listObjects().filter((obj) => obj.visibility !== "hidden").map((obj) => obj.id);
       const visibleCount = visibleIds.filter((id) => attentionLevelFor(id) !== "hidden").length;
-      const majorCount = representation ? representation.majorIds.length : activeSurfaceIds().length;
+      const majorCount = hasTaskSurface ? surfaceState.openTasks.length : representation ? representation.majorIds.length : activeSurfaceIds().length;
       let pressure = "low";
-      if (visibleCount >= 5) pressure = "high";
+      if (!hasTaskSurface && visibleCount >= 5) pressure = "high";
       else if (visibleCount >= 3) pressure = "medium";
       let overflowRisk = false;
       if (representationGroupEl && representationGroupEl.isConnected) {
@@ -2199,6 +2571,9 @@
       document.addEventListener("pointermove", continueDrag);
       document.addEventListener("pointerup", endDrag);
       document.addEventListener("pointercancel", endDrag);
+      document.addEventListener("pointermove", continueTaskSurfaceResize);
+      document.addEventListener("pointerup", endTaskSurfaceResize);
+      document.addEventListener("pointercancel", endTaskSurfaceResize);
     }
 
     return {

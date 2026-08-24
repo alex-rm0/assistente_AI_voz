@@ -1058,6 +1058,85 @@ body.workspace-dragging {
 .workspace-object[data-type="draft"] { border-color: rgba(255,196,110,.28); }
 .workspace-object[data-type="comparison"] { border-color: rgba(180,140,255,.28); }
 .workspace-object[data-type="excerpt"] { border-color: rgba(120,220,170,.28); }
+.workspace-object[data-type="task_artifact"],
+.workspace-object[data-type="writing_task"] { border-color: rgba(70,197,255,.18); }
+
+.workspace-objects[data-task-surface="active"]::before {
+  content: "";
+  position: absolute;
+  left: calc(var(--task-surface-left, 24px) - 8px);
+  top: calc(var(--task-surface-top, 74px) - 12px);
+  width: calc(var(--task-surface-width, 460px) + 16px);
+  height: calc(var(--task-surface-height, 520px) + 18px);
+  border: 1px solid rgba(110,190,255,.08);
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(70,197,255,.045), rgba(255,255,255,.015)),
+    rgba(5,8,14,.18);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.035);
+  pointer-events: none;
+}
+
+.task-surface-resize-handle {
+  position: absolute;
+  width: 10px;
+  border-radius: 999px;
+  cursor: ew-resize;
+  pointer-events: auto;
+  opacity: .16;
+  background:
+    linear-gradient(90deg, transparent 0, rgba(93,210,255,.36) 48%, transparent 100%);
+  transition: opacity .18s ease, filter .18s ease;
+}
+
+.task-surface-resize-handle:hover,
+.task-surface-resize-handle[data-dragging="true"] {
+  opacity: .42;
+  filter: drop-shadow(0 0 10px rgba(93,210,255,.32));
+}
+
+.task-surface-resize-handle[data-dragging="true"] {
+  transition: none;
+}
+
+.workspace-object[data-task-surface-slot="true"] {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  padding: 14px 15px;
+  background: rgba(10,13,20,.82);
+}
+
+.workspace-object[data-task-surface-slot="true"] .workspace-object__title {
+  white-space: normal;
+}
+
+.workspace-object[data-task-surface-slot="true"] .workspace-object__body {
+  max-height: calc(100% - 86px);
+}
+
+.workspace-object[data-minimized-rail="true"] {
+  opacity: .76;
+  transform: translateY(0) scale(1);
+  padding: 8px 10px;
+  border-radius: 999px;
+  background: rgba(12,18,28,.7);
+}
+
+.workspace-object[data-minimized-rail="true"] .workspace-object__header,
+.workspace-object[data-minimized-rail="true"] .workspace-object__body,
+.workspace-object[data-minimized-rail="true"] .workspace-object__actions-secondary {
+  display: none;
+}
+
+.workspace-object[data-minimized-rail="true"] .workspace-object__title {
+  margin: 0;
+  font-size: 11px;
+}
+
+.workspace-object[data-minimized-rail="true"] .workspace-object__actions {
+  margin-top: 0;
+  justify-content: flex-end;
+}
 
 /* --- Reference role: small, one action, fully legible (never dimmed --
    section 4 asked for a clean small card, not greyed-out clutter). --- */
@@ -1551,6 +1630,10 @@ body.workspace-dragging {
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--text-quiet, rgba(255,255,255,.55));
+}
+
+.workspace-object[data-minimized-rail="true"] .workspace-object__actions {
+  display: flex;
 }
 
 @media (max-width: 860px) {

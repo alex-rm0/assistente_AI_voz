@@ -15,6 +15,23 @@ def _telemetry(engine) -> dict:
     return engine.get_last_turn_telemetry() or {}
 
 
+def _task_surface_ids(engine) -> list[str]:
+    return [
+        object_id
+        for object_id, obj in engine._work_session.objects.items()
+        if obj.kind in {"task_artifact", "writing_task"}
+    ]
+
+
+def _open_task_surface_ids(engine) -> list[str]:
+    states = engine._work_session.attention.object_states if engine._work_session.attention else {}
+    return [
+        object_id
+        for object_id in _task_surface_ids(engine)
+        if states.get(object_id, "visible") not in ("minimized", "hidden")
+    ]
+
+
 def test_unrelated_social_turn_is_not_captured_by_active_task_notes(tmp_path: Path) -> None:
     engine, _llm, _ollama, _anthropic = make_engine(
         tmp_path,
@@ -237,7 +254,7 @@ def test_generic_comparison_activity_starts_with_owned_options(tmp_path: Path) -
     telemetry = _telemetry(engine)
     activity = engine._work_session.active_task
 
-    assert telemetry["selected_path"] == "REPRESENTATION_COMMAND"
+    assert telemetry["selected_path"] == "TASK_START"
     assert telemetry["llm_calls"] == 0
     assert activity is not None
     assert activity.task_type == "generic_comparison"
@@ -259,7 +276,7 @@ def test_generic_comparison_start_materializes_lowercase_subjects_with_reason_cl
     telemetry = _telemetry(engine)
     activity = engine._work_session.active_task
 
-    assert telemetry["selected_path"] == "REPRESENTATION_COMMAND"
+    assert telemetry["selected_path"] == "TASK_START"
     assert telemetry["llm_calls"] == 0
     assert activity is not None
     assert activity.task_type == "generic_comparison"
@@ -269,6 +286,130 @@ def test_generic_comparison_start_materializes_lowercase_subjects_with_reason_cl
     assert option_objects["Apple"].task_id == activity.id
     assert "telefone novo" in activity.source_turns[0]
     assert "Samsung" in response and "Apple" in response
+    assert ollama.calls == []
+
+
+def test_p0_direct_comparison_from_empty_session_materializes_options(tmp_path: Path) -> None:
+    engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
+
+    response = engine.respond("compara proposta A com proposta B")
+    telemetry = _telemetry(engine)
+    comparison = engine._work_session.active_task
+
+    assert telemetry["selected_path"] == "TASK_START"
+    assert telemetry["llm_calls"] == 0
+    assert comparison is not None
+    assert comparison.task_type == "generic_comparison"
+    assert comparison.active_artifact_id == "artifact-task-1"
+    option_objects = {obj.title: obj for obj in engine._work_session.objects.values() if obj.kind == "option"}
+    assert set(option_objects) == {"Proposta A", "Proposta B"}
+    assert option_objects["Proposta A"].task_id == comparison.id
+    assert option_objects["Proposta B"].task_id == comparison.id
+    assert response
+    assert ollama.calls == []
+
+
+def test_p0_direct_comparison_while_email_active_materializes_options_and_preserves_email(tmp_path: Path) -> None:
+    engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
+
+    engine.respond("vamos escrever um mail")
+    email = engine._work_session.active_task
+    assert email is not None
+    email_snapshot = (email.id, email.active_artifact_id, dict(email.entities), dict(email.parameters), list(email.missing_information))
+
+    response = engine.respond("compara samsung com apple")
+    telemetry = _telemetry(engine)
+    comparison = engine._work_session.active_task
+
+    assert telemetry["selected_path"] == "TASK_SWITCH"
+    assert telemetry["llm_calls"] == 0
+    assert comparison is not None
+    assert comparison.task_type == "generic_comparison"
+    assert comparison.id != email.id
+    assert any(task.id == email.id for task in engine._work_session.paused_task_stack)
+    assert (email.id, email.active_artifact_id, dict(email.entities), dict(email.parameters), list(email.missing_information)) == email_snapshot
+    option_objects = {obj.title: obj for obj in engine._work_session.objects.values() if obj.kind == "option"}
+    assert set(option_objects) == {"Samsung", "Apple"}
+    assert option_objects["Samsung"].task_id == comparison.id
+    assert option_objects["Apple"].task_id == comparison.id
+    assert option_objects["Samsung"].task_id != email.id
+    assert option_objects["Apple"].task_id != email.id
+    assert response
+    assert ollama.calls == []
+
+
+def test_p0_direct_comparison_while_travel_active_materializes_independent_options(tmp_path: Path) -> None:
+    engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
+
+    engine.respond("vamos também preparar umas férias")
+    travel = engine._work_session.active_task
+    assert travel is not None
+
+    response = engine.respond("compara proposta A com proposta B")
+    telemetry = _telemetry(engine)
+    comparison = engine._work_session.active_task
+
+    assert telemetry["selected_path"] == "TASK_SWITCH"
+    assert telemetry["llm_calls"] == 0
+    assert comparison is not None
+    assert comparison.task_type == "generic_comparison"
+    assert comparison.id != travel.id
+    assert any(task.id == travel.id for task in engine._work_session.paused_task_stack)
+    option_objects = {obj.title: obj for obj in engine._work_session.objects.values() if obj.kind == "option"}
+    assert set(option_objects) == {"Proposta A", "Proposta B"}
+    assert all(obj.task_id == comparison.id for obj in option_objects.values())
+    assert all(obj.task_id != travel.id for obj in option_objects.values())
+    assert response
+    assert ollama.calls == []
+
+
+def test_p0_direct_comparison_followup_add_option_keeps_same_owner_without_duplicates(tmp_path: Path) -> None:
+    engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
+
+    engine.respond("compara samsung com apple")
+    comparison = engine._work_session.active_task
+    assert comparison is not None
+    artifact_ids_before = [
+        obj.id
+        for obj in engine._work_session.objects.values()
+        if obj.kind == "task_artifact" and obj.task_id == comparison.id
+    ]
+
+    response = engine.respond("adiciona Pixel")
+    telemetry = _telemetry(engine)
+
+    assert telemetry["selected_path"] == "REPRESENTATION_COMMAND"
+    assert telemetry["llm_calls"] == 0
+    option_objects = {obj.title: obj for obj in engine._work_session.objects.values() if obj.kind == "option"}
+    assert set(option_objects) == {"Samsung", "Apple", "Pixel"}
+    assert all(obj.task_id == comparison.id for obj in option_objects.values())
+    assert [
+        obj.id
+        for obj in engine._work_session.objects.values()
+        if obj.kind == "task_artifact" and obj.task_id == comparison.id
+    ] == artifact_ids_before
+    assert "Pixel" in response
+    assert ollama.calls == []
+
+
+def test_generic_comparison_with_category_does_not_materialize_category_as_option(tmp_path: Path) -> None:
+    engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
+
+    response = engine.respond("vamos comparar telefones, samsung, apple e pixel")
+    telemetry = _telemetry(engine)
+    activity = engine._work_session.active_task
+
+    assert telemetry["selected_path"] == "TASK_START"
+    assert telemetry["llm_calls"] == 0
+    assert activity is not None
+    assert activity.task_type == "generic_comparison"
+    assert activity.parameters["category"] == "telefones"
+    assert activity.parameters["options"] == "Samsung e Apple e Pixel"
+    option_objects = {obj.title: obj for obj in engine._work_session.objects.values() if obj.kind == "option"}
+    assert set(option_objects) == {"Samsung", "Apple", "Pixel"}
+    assert "Telefones" not in option_objects
+    assert "option-telefones" not in engine._work_session.objects
+    assert "Samsung" in response and "Apple" in response and "Pixel" in response
     assert ollama.calls == []
 
 
@@ -295,7 +436,7 @@ def test_generic_comparison_can_start_while_email_is_preserved(tmp_path: Path) -
     engine.respond("Enquanto isso, estou a pensar comprar um telefone novo, vamos comparar Samsung com iPhone.")
     telemetry = _telemetry(engine)
     comparison = engine._work_session.active_task
-    assert telemetry["selected_path"] == "REPRESENTATION_COMMAND"
+    assert telemetry["selected_path"] == "TASK_START"
     assert telemetry["llm_calls"] == 0
     assert comparison is not None
     assert comparison.task_type == "generic_comparison"
@@ -328,6 +469,202 @@ def test_generic_comparison_can_start_while_email_is_preserved(tmp_path: Path) -
     assert ollama.calls == []
 
 
+def test_p0_email_then_additional_phone_comparison_creates_independent_activity(tmp_path: Path) -> None:
+    engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
+
+    engine.respond("vamos escrever um mail")
+    email_task = engine._work_session.active_task
+    assert email_task is not None
+    email_artifact_id = email_task.active_artifact_id
+
+    response = engine.respond("para além disso, vamos comparar telefones, Samsung e Apple")
+    telemetry = _telemetry(engine)
+    comparison = engine._work_session.active_task
+
+    assert telemetry["selected_path"] == "TASK_START"
+    assert telemetry["llm_calls"] == 0
+    assert comparison is not None
+    assert comparison.task_type == "generic_comparison"
+    assert comparison.id != email_task.id
+    assert comparison.parameters["category"] == "telefones"
+    assert comparison.parameters["options"] == "Samsung e Apple"
+    assert any(task.id == email_task.id for task in engine._work_session.paused_task_stack)
+    assert email_task.active_artifact_id == email_artifact_id
+    option_objects = {obj.title: obj for obj in engine._work_session.objects.values() if obj.kind == "option"}
+    assert set(option_objects) == {"Samsung", "Apple"}
+    assert all(obj.task_id == comparison.id for obj in option_objects.values())
+    assert all(obj.task_id != email_task.id for obj in option_objects.values())
+    assert "Samsung" in response and "Apple" in response
+    assert ollama.calls == []
+
+
+def test_p0_second_generic_comparison_creates_distinct_activity_and_owners(tmp_path: Path) -> None:
+    engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
+
+    engine.respond("vamos comparar telefones, Samsung e Apple")
+    phone_task = engine._work_session.active_task
+    assert phone_task is not None
+
+    response = engine.respond("vamos também comparar carros: Audi, Mercedes, Alfa Romeo, Peugeot, Ford e BMW")
+    telemetry = _telemetry(engine)
+    car_task = engine._work_session.active_task
+
+    assert telemetry["selected_path"] == "TASK_START"
+    assert telemetry["llm_calls"] == 0
+    assert car_task is not None
+    assert car_task.task_type == "generic_comparison"
+    assert car_task.id != phone_task.id
+    assert car_task.parameters["category"] == "carros"
+    assert car_task.parameters["options"] == "Audi e Mercedes e Alfa Romeo e Peugeot e Ford e BMW"
+    assert any(task.id == phone_task.id for task in engine._work_session.paused_task_stack)
+    options_by_task: dict[str, set[str]] = {}
+    for obj in engine._work_session.objects.values():
+        if obj.kind == "option":
+            options_by_task.setdefault(obj.task_id, set()).add(obj.title)
+    assert options_by_task[phone_task.id] == {"Samsung", "Apple"}
+    assert options_by_task[car_task.id] == {"Audi", "Mercedes", "Alfa Romeo", "Peugeot", "Ford", "BMW"}
+    assert "Audi" in response and "BMW" in response
+    assert ollama.calls == []
+
+
+@pytest.mark.parametrize(
+    ("message", "category", "expected"),
+    [
+        ("vamos comparar hotéis: Porto, Braga e Gerês", "hotéis", {"Porto", "Braga", "Gerês"}),
+        ("vamos avaliar propostas: Plano A, Plano B e Plano C", "propostas", {"Plano A", "Plano B", "Plano C"}),
+        ("quero avaliar fornecedores: Sanfil, COP e Águas de Coimbra", "fornecedores", {"Sanfil", "COP", "Águas de Coimbra"}),
+    ],
+)
+def test_p0_generic_comparison_domains_create_real_activities(tmp_path: Path, message: str, category: str, expected: set[str]) -> None:
+    engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
+
+    engine.respond(message)
+    telemetry = _telemetry(engine)
+    activity = engine._work_session.active_task
+
+    assert telemetry["selected_path"] == "TASK_START"
+    assert telemetry["llm_calls"] == 0
+    assert activity is not None
+    assert activity.task_type == "generic_comparison"
+    assert activity.parameters["category"] == category
+    option_objects = {obj.title: obj for obj in engine._work_session.objects.values() if obj.kind == "option"}
+    assert set(option_objects) == expected
+    assert all(obj.task_id == activity.id for obj in option_objects.values())
+    assert ollama.calls == []
+
+
+def test_p0_plural_more_emails_starts_real_writing_workflow_not_general_conversation(tmp_path: Path) -> None:
+    engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
+
+    engine.respond("vamos comparar telefones, Samsung e Apple")
+    comparison_task = engine._work_session.active_task
+    assert comparison_task is not None
+
+    response = engine.respond("preciso de escrever mais dois mails")
+    telemetry = _telemetry(engine)
+    writing_task = engine._work_session.writing_context
+
+    assert telemetry["selected_path"] == "WRITING_TASK"
+    assert telemetry["llm_calls"] == 0
+    assert writing_task is not None
+    assert writing_task.task_type == "compose_email"
+    assert writing_task.batch_total == 2
+    assert writing_task.batch_remaining_after_current == 1
+    assert writing_task.active_artifact_id in engine._work_session.objects
+    assert engine._work_session.objects[writing_task.active_artifact_id].payload["batch_total"] == 2
+    assert any(task.id == comparison_task.id for task in engine._work_session.paused_task_stack)
+    assert "Para quem é o email?" in response
+    assert ollama.calls == []
+
+
+def test_phase45_task_surface_counts_tasks_not_child_options(tmp_path: Path) -> None:
+    engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
+
+    engine.respond("vamos escrever um mail")
+    engine.respond("para além disso, vamos comparar telefones, Samsung e Apple")
+    engine.respond("vamos também comparar carros: Audi, Mercedes e BMW")
+
+    assert len(_open_task_surface_ids(engine)) == 3
+    assert {
+        obj.title
+        for obj in engine._work_session.objects.values()
+        if obj.kind == "option"
+    } == {"Samsung", "Apple", "Audi", "Mercedes", "BMW"}
+    assert len(_task_surface_ids(engine)) == 3
+    assert ollama.calls == []
+
+
+def test_phase45_fifth_task_creates_pending_minimize_action_without_llm(tmp_path: Path) -> None:
+    engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
+
+    engine.respond("vamos escrever um mail")
+    engine.respond("para além disso, vamos comparar telefones, Samsung e Apple")
+    engine.respond("vamos também comparar carros: Audi, Mercedes e BMW")
+    engine.respond("vamos planear umas férias")
+    before_ids = set(_task_surface_ids(engine))
+
+    response = engine.respond("vamos preparar uma apresentação")
+    telemetry = _telemetry(engine)
+
+    assert "quatro tarefas abertas" in response
+    assert "posso minimizar" in response.lower()
+    assert telemetry["pending_workspace_action_created"] is True
+    assert telemetry["minimization_reason"] == "task_surface_capacity"
+    assert telemetry["llm_calls"] == 0
+    assert set(_task_surface_ids(engine)) == before_ids
+    assert len(_open_task_surface_ids(engine)) == 4
+    assert ollama.calls == []
+
+
+def test_phase45_confirming_fifth_task_minimizes_candidate_and_creates_new_task(tmp_path: Path) -> None:
+    engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
+
+    engine.respond("vamos escrever um mail")
+    engine.respond("para além disso, vamos comparar telefones, Samsung e Apple")
+    engine.respond("vamos também comparar carros: Audi, Mercedes e BMW")
+    engine.respond("vamos planear umas férias")
+    response = engine.respond("vamos preparar uma apresentação")
+    assert "quatro tarefas abertas" in response
+    assert engine._pending_workspace_action is not None
+    minimized_candidate = engine._pending_workspace_action["object_ids"][0]
+
+    response = engine.respond("sim")
+
+    assert "minimizei" in response.lower()
+    assert engine._work_session.attention.object_states[minimized_candidate] == MINIMIZED
+    assert len(_task_surface_ids(engine)) == 5
+    assert len(_open_task_surface_ids(engine)) == 4
+    assert any(
+        obj.title == "Atividade em curso"
+        for obj in engine._work_session.objects.values()
+        if obj.kind == "task_artifact"
+    )
+    assert ollama.calls == []
+
+
+def test_phase45_rejecting_fifth_task_preserves_existing_tasks(tmp_path: Path) -> None:
+    engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
+
+    engine.respond("vamos escrever um mail")
+    engine.respond("para além disso, vamos comparar telefones, Samsung e Apple")
+    engine.respond("vamos também comparar carros: Audi, Mercedes e BMW")
+    engine.respond("vamos planear umas férias")
+    engine.respond("vamos preparar uma apresentação")
+    before_ids = set(_task_surface_ids(engine))
+
+    response = engine.respond("não")
+
+    assert "mantenho tudo" in response.lower()
+    assert set(_task_surface_ids(engine)) == before_ids
+    assert len(_open_task_surface_ids(engine)) == 4
+    assert not any(
+        obj.title == "Atividade em curso"
+        for obj in engine._work_session.objects.values()
+        if obj.kind == "task_artifact"
+    )
+    assert ollama.calls == []
+
+
 def test_compound_workspace_command_shows_email_and_minimizes_owned_comparison_options(tmp_path: Path) -> None:
     engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
     engine.respond("Vamos escrever um mail.")
@@ -335,7 +672,7 @@ def test_compound_workspace_command_shows_email_and_minimizes_owned_comparison_o
     assert email_task is not None
     email_artifact_id = email_task.active_artifact_id
 
-    engine.respond("Enquanto isso, estou a pensar comprar um telefone novo, vamos comparar Samsung com iPhone.")
+    engine.respond("Enquanto isso, estou a pensar comprar um telefone novo, vamos comparar Samsung com Apple.")
     comparison_task = engine._work_session.active_task
     engine.respond("Adiciona o Pixel.")
     assert comparison_task is not None
@@ -344,7 +681,7 @@ def test_compound_workspace_command_shows_email_and_minimizes_owned_comparison_o
         for object_id, obj in engine._work_session.objects.items()
         if obj.kind == "option" and obj.task_id == comparison_task.id
     }
-    assert {"Samsung", "iPhone", "Pixel"} == set(option_ids)
+    assert {"Samsung", "Apple", "Pixel"} == set(option_ids)
 
     response = engine.respond("preciso que abras o mail para ver, minimiza os telefones")
     telemetry = _telemetry(engine)
@@ -509,9 +846,10 @@ def test_qt_flow_add_collection_minimize_expand_then_resume_writing(tmp_path: Pa
     telemetry_c = _telemetry(engine)
     assert telemetry_c["selected_path"] == "WORKSPACE_COMMAND"
     assert telemetry_c["llm_calls"] == 0
-    assert response_c in ("Claro.", "Feito.", "Aumentei o email.")
+    assert "posso dar mais espaço" in response_c.lower()
+    assert telemetry_c["pending_workspace_action_created"] is True
+    assert telemetry_c["minimization_reason"] == "task_surface_expand"
     assert "Para quem" not in response_c
-    assert engine._work_session.representation.major_object_ids == [email_task.active_artifact_id]
     assert engine._work_session.active_task.id == email_task.id
     assert engine._work_session.active_task.missing_information == ["recipient"]
 
@@ -640,6 +978,25 @@ def test_relative_all_except_preserves_anchor_and_minimizes_rest(tmp_path: Path)
     assert ollama.calls == []
 
 
+def test_relative_others_uses_first_operation_as_anchor(tmp_path: Path) -> None:
+    engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
+    engine.respond("vamos comparar Samsung com Apple, preciso de um telefone novo")
+    engine.respond("acrescenta Pixel aos telefones")
+
+    response = engine.respond("abre o Pixel e minimiza os outros")
+    telemetry = _telemetry(engine)
+
+    assert telemetry["selected_path"] == "WORKSPACE_COMMAND"
+    assert telemetry["executed_operations"] == 2
+    assert telemetry["failed_operations"] == 0
+    assert telemetry["llm_calls"] == 0
+    assert engine._work_session.attention.object_states["option-pixel"] == FOCUS
+    assert engine._work_session.attention.object_states["option-samsung"] == MINIMIZED
+    assert engine._work_session.attention.object_states["option-apple"] == MINIMIZED
+    assert "resto" in response
+    assert ollama.calls == []
+
+
 def test_relative_all_except_without_anchor_asks_clarification_without_llm(tmp_path: Path) -> None:
     engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
     engine.respond("vamos comparar Samsung com Apple")
@@ -737,14 +1094,15 @@ def test_representation_and_spatial_commands_bypass_active_task_and_llm(tmp_path
     engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
 
     engine.respond("Vamos planear umas férias.")
-    active_task_id = engine._work_session.active_task.id
+    plan_task_id = engine._work_session.active_task.id
 
     engine.respond("Vamos comparar Suécia, Itália e Açores.")
     telemetry = _telemetry(engine)
-    assert telemetry["canonical_interpretation_primary_route"] == "REPRESENTATION_COMMAND"
-    assert telemetry["selected_path"] == "REPRESENTATION_COMMAND"
+    assert telemetry["canonical_interpretation_primary_route"] == "TASK_CONTINUATION"
+    assert telemetry["selected_path"] == "TASK_START"
     assert telemetry["llm_calls"] == 0
-    assert engine._work_session.active_task.id == active_task_id
+    assert engine._work_session.active_task.task_type == "generic_comparison"
+    assert any(task.id == plan_task_id for task in engine._work_session.paused_task_stack)
     option_titles = {obj.title for obj in engine._work_session.objects.values() if obj.id.startswith("option-")}
     assert option_titles == {"Suécia", "Itália", "Açores"}
 
@@ -948,7 +1306,7 @@ def test_equivalent_generic_comparison_is_resumed_not_duplicated(tmp_path: Path)
     engine.respond("Enquanto isso, vamos comparar Samsung com iPhone.")
     telemetry = _telemetry(engine)
 
-    assert telemetry["selected_path"] == "REPRESENTATION_COMMAND"
+    assert telemetry["selected_path"] == "TASK_RESUME"
     assert telemetry["task_resumed"] is True
     assert telemetry["generic_activity_reused"] is True
     assert engine._work_session.active_task.id == comparison_task.id
