@@ -79,6 +79,13 @@ from assistant.task_intelligence import (
     task_option_titles,
     update_task_knowledge,
 )
+from assistant.task_research import (
+    build_research_request,
+    exclude_research_source,
+    is_task_research_intent,
+    research_sources_response,
+    run_task_research,
+)
 from assistant.memory_recall import (
     build_memory_retrieval,
     build_task_retrieval,
@@ -977,6 +984,20 @@ class AssistantEngine:
                 )
                 self._perf_log("resposta total", request_started_at, time.perf_counter())
                 return writing_workflow_response
+
+        task_research_response = self._try_research_request(user_message)
+        if task_research_response is not None:
+            task_research_response = self._complete_turn(
+                user_message=user_message,
+                response=task_research_response,
+                source="RESEARCH_REQUEST",
+                remember=True,
+                technical=True,
+                selected_path="RESEARCH_REQUEST",
+                tools_used=self._last_fast_tools_used,
+            )
+            self._perf_log("resposta total", request_started_at, time.perf_counter())
+            return task_research_response
 
         task_intelligence_response = self._try_task_intelligence_query(user_message)
         if task_intelligence_response is not None:
@@ -1927,6 +1948,31 @@ class AssistantEngine:
                 query = self._active_operation_topic
                 followup = True
 
+        task = self._active_task_context
+        if task is not None and task.status not in ("completed", "cancelled"):
+            excluded_sources = exclude_research_source(self._work_session, task, user_message)
+            if excluded_sources:
+                self._update_task_artifact_ui(task)
+                if self._turn_trace is not None:
+                    self._turn_trace["research_source_excluded"] = True
+                    self._turn_trace["research_task_id"] = task.id
+                    self._turn_trace["research_result_count"] = 0
+                    self._turn_trace["response_grounded"] = True
+                    self._turn_trace["grounding_sources"] = ["TASK_KNOWLEDGE"]
+                return "Certo. Vou deixar essa fonte fora do raciocínio atual, sem apagar o histórico."
+
+            source_response = research_sources_response(self._work_session, task, user_message)
+            if source_response:
+                if self._turn_trace is not None:
+                    self._turn_trace["research_sources_requested"] = True
+                    self._turn_trace["research_task_id"] = task.id
+                    self._turn_trace["response_grounded"] = True
+                    self._turn_trace["grounding_sources"] = ["TASK_KNOWLEDGE", "WEB_SOURCE"]
+                return source_response
+
+            if not query and is_task_research_intent(user_message):
+                query = user_message.strip(" .!?")
+
         if not query:
             return None
 
@@ -1942,6 +1988,108 @@ class AssistantEngine:
         self._queue_ui_event("research_started", {"operation_id": operation_id, "topic": query})
 
         research_tool = self.tools.get("web_search") or self.tools.get("research_web")
+        if task is not None and task.status not in ("completed", "cancelled"):
+            task_research_tool = self.tools.get("task_web_search") or research_tool
+            request = build_research_request(self._work_session, task, user_message, request_id=operation_id)
+            if request.clarification:
+                self._active_operation_type = ""
+                self._active_operation_topic = ""
+                self._active_operation_id = ""
+                self._active_operation_ttl = 0
+                if self._turn_trace is not None:
+                    self._turn_trace["research_task_id"] = task.id
+                    self._turn_trace["research_needs_clarification"] = True
+                    self._turn_trace["research_plan"] = request.plan_text
+                    self._turn_trace["research_tool_called"] = False
+                    self._turn_trace["response_grounded"] = True
+                    self._turn_trace["grounding_sources"] = ["TASK_KNOWLEDGE"]
+                self._queue_ui_event(
+                    "research_completed",
+                    {"operation_id": operation_id, "topic": query, "status": "needs_clarification"},
+                )
+                return request.clarification
+            if task_research_tool is None:
+                _debug_print("ECHO_DEBUG_UI", "research_tool_available=False")
+                _debug_print("ECHO_DEBUG_UI", "research_tool_called=False")
+                self._active_operation_type = ""
+                self._active_operation_topic = ""
+                self._active_operation_id = ""
+                self._active_operation_ttl = 0
+                if self._turn_trace is not None:
+                    self._turn_trace["research_task_id"] = task.id
+                    self._turn_trace["research_plan"] = request.plan_text
+                    self._turn_trace["research_tool_available"] = False
+                    self._turn_trace["research_tool_called"] = False
+                    self._turn_trace["response_grounded"] = False
+                    self._turn_trace["grounding_sources"] = ["TASK_KNOWLEDGE"]
+                self._queue_ui_event(
+                    "research_unavailable",
+                    {
+                        "operation_id": operation_id,
+                        "topic": query,
+                        "status": "unavailable",
+                        "message": "Ainda não tenho uma ferramenta de pesquisa ligada.",
+                        "summary": request.plan_text,
+                        "results": [],
+                    },
+                )
+                self._queue_ui_event(
+                    "research_completed",
+                    {"operation_id": operation_id, "topic": query, "status": "unavailable"},
+                )
+                return request.plan_text + " Ainda não tenho uma ferramenta de pesquisa ligada."
+
+            run = run_task_research(self._work_session, task, request, task_research_tool)
+            self._last_fast_tools_used = (task_research_tool.name,)
+            self._update_task_artifact_ui(task)
+            _debug_print("ECHO_DEBUG_UI", "research_tool_available=True")
+            _debug_print("ECHO_DEBUG_UI", "research_tool_called=True")
+            _debug_print("ECHO_DEBUG_UI", f"research_result_count={len(run.ingested_entries)}")
+            _debug_print("ECHO_DEBUG_UI", f"research_sources={[entry.source.reference for entry in run.ingested_entries]}")
+            _debug_print("ECHO_DEBUG_UI", f"research_grounded={bool(run.ingested_entries)}")
+            self._queue_ui_event(
+                "research_results_ready",
+                {
+                    "operation_id": operation_id,
+                    "topic": query,
+                    "task_id": task.id,
+                    "status": run.request.status,
+                    "summary": run.summary,
+                    "plan": run.request.plan_text,
+                    "results": run.raw_results,
+                    "sources": [
+                        {
+                            "title": str(entry.metadata.get("source_title") or entry.source.reference),
+                            "url": entry.source.reference,
+                            "subject": entry.subject,
+                            "predicate": entry.predicate,
+                            "value": entry.value,
+                        }
+                        for entry in run.ingested_entries
+                    ],
+                },
+            )
+            self._queue_ui_event(
+                "research_completed",
+                {"operation_id": operation_id, "topic": query, "task_id": task.id, "status": run.request.status},
+            )
+            self._active_operation_type = ""
+            self._active_operation_topic = ""
+            self._active_operation_id = ""
+            self._active_operation_ttl = 0
+            if self._turn_trace is not None:
+                self._turn_trace["research_task_id"] = task.id
+                self._turn_trace["research_request_id"] = request.id
+                self._turn_trace["research_plan"] = request.plan_text
+                self._turn_trace["research_query_plan"] = list(request.query_plan)
+                self._turn_trace["research_tool_available"] = True
+                self._turn_trace["research_tool_called"] = True
+                self._turn_trace["research_result_count"] = len(run.ingested_entries)
+                self._turn_trace["research_status"] = run.request.status
+                self._turn_trace["response_grounded"] = bool(run.ingested_entries)
+                self._turn_trace["grounding_sources"] = ["TASK_KNOWLEDGE", "WEB_SOURCE"]
+            return run.request.plan_text + " " + run.summary
+
         if research_tool is None:
             _debug_print("ECHO_DEBUG_UI", "research_tool_available=False")
             _debug_print("ECHO_DEBUG_UI", "research_tool_called=False")
@@ -6377,6 +6525,17 @@ class AssistantEngine:
             "history_matches": self._turn_trace.get("history_matches"),
             "memory_write_action": self._turn_trace.get("memory_write_action"),
             "grounding_sources": self._turn_trace.get("grounding_sources") or [],
+            "research_task_id": self._turn_trace.get("research_task_id") or "",
+            "research_request_id": self._turn_trace.get("research_request_id") or "",
+            "research_plan": self._turn_trace.get("research_plan") or "",
+            "research_query_plan": self._turn_trace.get("research_query_plan") or [],
+            "research_status": self._turn_trace.get("research_status") or "",
+            "research_result_count": int(self._turn_trace.get("research_result_count") or 0),
+            "research_tool_available": self._turn_trace.get("research_tool_available"),
+            "research_tool_called": self._turn_trace.get("research_tool_called"),
+            "research_needs_clarification": bool(self._turn_trace.get("research_needs_clarification")),
+            "research_sources_requested": bool(self._turn_trace.get("research_sources_requested")),
+            "research_source_excluded": bool(self._turn_trace.get("research_source_excluded")),
             # Passo 3.2 (section 18): scene_before/after and target
             # resolution/confidence are deliberately NOT tracked here -- the
             # WorkspaceScene lives entirely client-side (echo_workspace_
@@ -12156,6 +12315,11 @@ def _activity_start_from_message(raw_text: str, normalized_text: str) -> tuple[s
         return "plan_trip", "travel_planning_trigger"
     if ("ferias" in normalized_text or "viagem" in normalized_text) and contains_any_phrase(
         normalized_text,
+        ("quero ferias", "queria ferias", "gostava de ferias", "preciso de ferias"),
+    ):
+        return "plan_trip", "travel_planning_trigger"
+    if ("ferias" in normalized_text or "viagem" in normalized_text) and contains_any_phrase(
+        normalized_text,
         (
             "vamos planear",
             "quero planear",
@@ -12176,6 +12340,11 @@ def _activity_start_from_message(raw_text: str, normalized_text: str) -> tuple[s
         return "plan_trip", "travel_planning_trigger"
     if contains_any_phrase(normalized_text, ("quero ajuda a planear", "ajuda a planear", "ajuda me a planear")) and re.search(
         r"\b(vou|vamos|iremos)\s+(?:a|para)\s+\w+",
+        normalized_text,
+    ):
+        return "plan_trip", "travel_planning_trigger"
+    if re.search(r"\b(vou|vamos|iremos)\s+(?:a|para)\s+\w+", normalized_text) and re.search(
+        r"\b\d{1,2}\s+a\s+\d{1,2}\s+de\s+\w+",
         normalized_text,
     ):
         return "plan_trip", "travel_planning_trigger"

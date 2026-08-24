@@ -18,6 +18,7 @@ from assistant.desktop_actions import (
     resolve_special_folder,
     validate_url,
 )
+from assistant.live_web_research import LiveWebResearchProvider
 from assistant.tool_registry import tool_registry
 from assistant.workspace import WorkspaceFileContent, WorkspaceGuard
 
@@ -33,6 +34,7 @@ DOCUMENT_EXTENSIONS = {".docx", ".pdf"}
 ALL_READABLE_EXTENSIONS = READABLE_EXTENSIONS | DOCUMENT_EXTENSIONS
 WRITABLE_EXTENSIONS = {".txt"}
 DESKTOP_ACTION_RUNNER = WindowsDesktopActionRunner()
+LIVE_WEB_RESEARCH_PROVIDER = LiveWebResearchProvider()
 
 
 def _normalize_name(text: str) -> str:
@@ -254,6 +256,19 @@ def open_url(
     if result.ok:
         remember_desktop_action(long_term_memory, "abriu URL", safe_url)
     return result.message
+
+
+@tool_registry.register(
+    name="task_web_search",
+    description=(
+        "Pesquisa web real, limitada e sem credenciais, para anexar fontes a uma tarefa ativa. "
+        "Argumentos: query. Devolve resultados estruturados com URL, excerto e claims."
+    ),
+    permissions=("web_search", "task-scoped"),
+    remember_result=False,
+)
+def task_web_search(query: str) -> str:
+    return LIVE_WEB_RESEARCH_PROVIDER.run({"query": query})
 
 
 @tool_registry.register(

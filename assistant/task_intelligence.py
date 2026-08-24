@@ -158,11 +158,16 @@ def classify_task_query(message: str) -> str:
         ),
     ):
         return "recommendation"
-    if normalized in {"porque", "porquê", "por que"} or contains_any_phrase(normalized, ("porque?", "porquê?", "porque e que", "porquê é que")):
+    if (
+        normalized in {"porque", "porquê", "por que"}
+        or normalized.startswith("porque ")
+        or normalized.startswith("porquê ")
+        or contains_any_phrase(normalized, ("porque?", "porquê?", "porque e que", "porquê é que"))
+    ):
         return "why"
     if contains_any_phrase(normalized, ("de onde veio", "qual e a fonte", "qual é a fonte", "fonte desse", "origem desse")):
         return "source"
-    if contains_any_phrase(normalized, ("informacao contraditoria", "informação contraditória", "contradicoes", "contradições", "fontes discordam")):
+    if contains_any_phrase(normalized, ("informacao contraditoria", "informação contraditória", "contradicoes", "contradições", "fontes discordam", "fontes que discordem")):
         return "conflicts"
     if contains_any_phrase(normalized, ("proximo passo", "próximo passo", "o que temos de organizar", "que temos de organizar")):
         return "next_step"
@@ -983,6 +988,9 @@ def _extract_travel_entries(work_session, task, message: str, turn_id: str) -> l
     destination = _extract_destination(message)
     if destination:
         entries.append(_upsert_entry(work_session, task.id, "fact", "trip", "destination", destination, message, turn_id, replace_active=True))
+    origin = _extract_origin(message)
+    if origin:
+        entries.append(_upsert_entry(work_session, task.id, "fact", "trip", "origin", origin, message, turn_id, replace_active=True))
     date_range = _extract_date_range(message)
     if date_range:
         entries.append(_upsert_entry(work_session, task.id, "fact", "trip", "date_range", date_range, message, turn_id, replace_active=True))
@@ -999,8 +1007,8 @@ def _extract_travel_entries(work_session, task, message: str, turn_id: str) -> l
         styles.append("ter coisas para ver")
     if styles:
         entries.append(_upsert_entry(work_session, task.id, "preference", "user", "travel_style", " + ".join(styles), message, turn_id, replace_active=True))
-    if contains_any_phrase(normalized, ("evitar voos muito longos", "voos muito longos")):
-        entries.append(_upsert_entry(work_session, task.id, "constraint", "trip", "flight_constraint", "evitar voos muito longos", message, turn_id, replace_active=True))
+    if contains_any_phrase(normalized, ("evitar voos muito longos", "voos muito longos", "voos curtos", "voo curto")):
+        entries.append(_upsert_entry(work_session, task.id, "constraint", "trip", "flight_constraint", "voos curtos", message, turn_id, replace_active=True))
     return [entry for entry in entries if entry is not None]
 
 
@@ -1024,6 +1032,8 @@ def _upsert_entry(
     *,
     replace_active: bool = True,
     confidence: float = 1.0,
+    source: KnowledgeSource | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> KnowledgeEntry | None:
     if not task_id or not subject or not predicate or value == "":
         return None
@@ -1057,7 +1067,8 @@ def _upsert_entry(
         subject=subject,
         predicate=predicate,
         value=str(value),
-        source=KnowledgeSource(
+        source=source
+        or KnowledgeSource(
             source_type="user",
             reference=turn_id or f"turn-{len(entries) + 1}",
             original_text=message,
@@ -1065,6 +1076,7 @@ def _upsert_entry(
         ),
         confidence=confidence,
         replaces=replaced,
+        metadata=dict(metadata or {}),
     )
     entries.append(entry)
     work_session.relations.append(entry)
@@ -1256,6 +1268,10 @@ def _format_sources(knowledge: list[KnowledgeEntry], message: str) -> str:
     if not matching:
         return "Ainda não tenho uma fonte concreta para isso."
     entry = matching[-1]
+    if entry.source.source_type == "web":
+        title = str(entry.metadata.get("source_title") or entry.source.reference or "fonte web")
+        evidence = entry.source.original_text or entry.value
+        return f"Veio de {title}: “{evidence}”" + (f" ({entry.source.reference})." if entry.source.reference else ".")
     return f"Veio do que me disseste: “{entry.source.original_text}”."
 
 
@@ -1400,6 +1416,13 @@ def _extract_destination(message: str) -> str:
     normalized = normalize_for_matching(message)
     if "estocolmo" in normalized:
         return "Estocolmo"
+    return ""
+
+
+def _extract_origin(message: str) -> str:
+    match = re.search(r"\b(?:a partir(?:\s+de|\s+do|\s+da)?|partir\s+de|desde(?:\s+de|\s+do|\s+da)?)\s+([A-ZÀ-Ý][\wÀ-ÿ]+(?:\s+[A-ZÀ-Ý][\wÀ-ÿ]+){0,3})", message)
+    if match:
+        return match.group(1).strip(" .,!?:;")
     return ""
 
 
