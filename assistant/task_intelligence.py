@@ -45,6 +45,45 @@ class TaskReasoningState:
     updated_at: str = ""
 
 
+@dataclass(frozen=True)
+class CognitiveTaskSection:
+    role: str
+    title: str
+    priority: str
+    items: list[dict[str, Any]] = field(default_factory=list)
+    text: str = ""
+
+
+@dataclass(frozen=True)
+class CognitiveTaskViewModel:
+    task_id: str
+    task_type: str
+    title: str
+    stage: str
+    sections: list[CognitiveTaskSection] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class TaskDialoguePlan:
+    acknowledgement: str = ""
+    implication: str = ""
+    next_question: str = ""
+    recommendation: str = ""
+    uncertainty: str = ""
+    next_step: str = ""
+
+    def render(self) -> str:
+        parts = [
+            self.acknowledgement,
+            self.implication,
+            self.recommendation,
+            self.uncertainty,
+            self.next_step,
+            self.next_question,
+        ]
+        return " ".join(part.strip() for part in parts if part and part.strip()).strip()
+
+
 def task_knowledge(work_session, task_id: str) -> list[KnowledgeEntry]:
     bucket = work_session.knowledge.setdefault("task_knowledge", {})
     return bucket.setdefault(task_id, [])
@@ -81,17 +120,29 @@ def classify_task_query(message: str) -> str:
     if contains_any_phrase(
         normalized,
         (
+            "resume me so o importante",
+            "resume-me só o importante",
+            "resume so o importante",
+            "resume só o importante",
+            "so o importante",
+            "só o importante",
+        ),
+    ):
+        return "important"
+    if contains_any_phrase(
+        normalized,
+        (
             "o que sabemos",
             "que sabemos",
             "o que ja sabes",
             "o que já sabes",
             "o que sabes sobre",
-            "resume me so o importante",
-            "resume-me só o importante",
         ),
     ):
         return "known"
-    if contains_any_phrase(normalized, ("o que ainda falta", "o que falta saber", "o que falta decidir", "ainda nao sabemos", "ainda não sabemos", "precisas de saber")):
+    if contains_any_phrase(normalized, ("o que falta decidir", "que falta decidir", "decisoes em aberto", "decisões em aberto")):
+        return "decisions"
+    if contains_any_phrase(normalized, ("o que ainda falta", "o que falta saber", "ainda nao sabemos", "ainda não sabemos", "precisas de saber")):
         return "unknowns"
     if contains_any_phrase(
         normalized,
@@ -127,8 +178,12 @@ def answer_task_query(work_session, task, message: str) -> str:
     knowledge = _active_entries(task_knowledge(work_session, task.id))
     if query == "known":
         return _format_known(task, knowledge)
+    if query == "important":
+        return _format_important(task, knowledge, task_reasoning(work_session, task.id))
     if query == "unknowns":
         return _format_unknowns(task, knowledge)
+    if query == "decisions":
+        return _format_decisions(task, knowledge)
     if query == "recommendation":
         if task.task_type == "plan_trip":
             return _format_travel_recommendation(task, knowledge)
@@ -146,6 +201,33 @@ def answer_task_query(work_session, task, message: str) -> str:
     if query == "next_step":
         return _format_next_step(task, knowledge)
     return ""
+
+
+def task_dialogue_response(
+    work_session,
+    task,
+    message: str = "",
+    *,
+    knowledge_delta: list[KnowledgeEntry] | None = None,
+) -> str:
+    """Natural task dialogue grounded in the current structured state.
+
+    The UI projection and this text both derive from the same TaskKnowledge
+    and TaskReasoningState. The delta only explains what changed this turn.
+    """
+    if task is None:
+        return ""
+    knowledge = _knowledge_with_task_fields(task, _active_entries(task_knowledge(work_session, task.id)))
+    reasoning = _refresh_reasoning(work_session, task)
+    delta = [entry for entry in (knowledge_delta or []) if entry and entry.status == "active"]
+    if task.task_type == "plan_trip":
+        plan = _plan_travel_dialogue(task, knowledge, reasoning, delta, message)
+    elif task.task_type == "generic_comparison":
+        plan = _plan_comparison_dialogue(task, knowledge, reasoning, delta)
+    else:
+        plan = _plan_generic_dialogue(task, knowledge, reasoning, delta)
+    rendered = plan.render()
+    return rendered or _fallback_task_dialogue(task, knowledge, reasoning)
 
 
 def task_card_summary(work_session, task) -> list[str]:
@@ -176,6 +258,596 @@ def task_card_summary(work_session, task) -> list[str]:
     if unknowns:
         lines.append("Em aberto: " + _join_pt(unknowns[:3]))
     return lines
+
+
+def cognitive_task_view_model(work_session, task, *, title: str = "") -> dict[str, Any]:
+    """Read-only projection for the Task Surface.
+
+    This deliberately derives from task knowledge/reasoning every time. It
+    does not create a second mutable source of truth for the UI.
+    """
+    if task is None:
+        return {}
+    knowledge = _knowledge_with_task_fields(task, _active_entries(task_knowledge(work_session, task.id)))
+    reasoning = _refresh_reasoning(work_session, task)
+    stage = infer_task_stage(task, knowledge) or reasoning.stage
+    sections: list[CognitiveTaskSection] = []
+
+    overview_items = _overview_items(task, knowledge)
+    if overview_items:
+        sections.append(CognitiveTaskSection("overview", _overview_title(task), "high", overview_items))
+
+    if task.task_type == "generic_comparison":
+        option_items = _option_view_items(knowledge)
+        if option_items:
+            sections.append(CognitiveTaskSection("options", "Opções", "high", option_items))
+
+    constraints = _entries_for_roles(knowledge, {"constraint"})
+    if constraints:
+        sections.append(CognitiveTaskSection("constraints", "Limites", "high", _entry_view_items(constraints[:3])))
+
+    preferences = _entries_for_roles(knowledge, {"preference"})
+    if preferences:
+        sections.append(CognitiveTaskSection("priorities", "Prioridades", "medium", _entry_view_items(preferences[:4])))
+
+    decisions = _entries_for_roles(knowledge, {"decision"})
+    if decisions:
+        sections.append(CognitiveTaskSection("decisions", "Decisões", "high", _entry_view_items(decisions[:3])))
+
+    facts = _non_duplicated_fact_items(task, knowledge)
+    if facts:
+        sections.append(CognitiveTaskSection("key_information", "O que já sabemos", "medium", facts[:6]))
+
+    if reasoning.current_recommendation:
+        sections.append(
+            CognitiveTaskSection(
+                "recommendation",
+                "Neste momento",
+                "high",
+                [{"label": f"{reasoning.current_recommendation} parece a melhor opção", "details": reasoning.reasons[:3]}],
+            )
+        )
+    elif task.task_type == "plan_trip" and stage == "plan":
+        sections.append(
+            CognitiveTaskSection(
+                "plan_areas",
+                "A organizar",
+                "medium",
+                [{"label": item, "details": []} for item in ("Alojamento", "Transportes", "Itinerário", "Custos")],
+            )
+        )
+
+    conflicts = _conflict_items(knowledge)
+    if conflicts:
+        sections.append(CognitiveTaskSection("conflicts", "Atenção", "high", conflicts[:3]))
+
+    unknowns = _prioritized_unknowns(task, knowledge, reasoning)
+    if unknowns:
+        sections.append(CognitiveTaskSection("unknowns", "Ainda falta", "medium", [{"label": item, "details": []} for item in unknowns[:4]]))
+
+    next_step = _next_step_label(task, knowledge, reasoning)
+    if next_step:
+        sections.append(CognitiveTaskSection("next_step", "Próximo passo", "high", text=next_step))
+
+    view = CognitiveTaskViewModel(
+        task_id=task.id,
+        task_type=task.task_type,
+        title=title or getattr(task, "goal", "") or task.task_type,
+        stage=stage,
+        sections=sections,
+    )
+    return _view_model_to_dict(view)
+
+
+def _view_model_to_dict(view: CognitiveTaskViewModel) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "task_id": view.task_id,
+        "task_type": view.task_type,
+        "title": view.title,
+        "stage": view.stage,
+        "sections": [
+            {
+                "role": section.role,
+                "title": section.title,
+                "priority": section.priority,
+                "text": section.text,
+                "items": [
+                    {
+                        "label": str(item.get("label", "")),
+                        "details": [str(detail) for detail in item.get("details", []) if str(detail)],
+                    }
+                    for item in section.items
+                    if str(item.get("label", ""))
+                ],
+            }
+            for section in view.sections
+            if section.text or section.items
+        ],
+    }
+
+
+def _overview_title(task) -> str:
+    if task.task_type == "generic_comparison":
+        return "Comparação"
+    if task.task_type == "plan_trip":
+        return "Planeamento"
+    return "Objetivo"
+
+
+def _overview_items(task, knowledge: list[KnowledgeEntry]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    category = getattr(task, "parameters", {}).get("category", "")
+    if category and task.task_type == "generic_comparison":
+        items.append({"label": f"Categoria: {category}", "details": []})
+    if getattr(task, "goal", ""):
+        items.append({"label": task.goal, "details": []})
+    for predicate in ("destination", "date_range"):
+        value = _latest_value(knowledge, "trip", predicate)
+        if value:
+            items.append({"label": _entry_phrase(KnowledgeEntry("", "", "fact", "trip", predicate, value, KnowledgeSource())), "details": []})
+    return _dedupe_view_items(items)
+
+
+def _knowledge_with_task_fields(task, knowledge: list[KnowledgeEntry]) -> list[KnowledgeEntry]:
+    projected = list(knowledge)
+    if task.task_type == "plan_trip":
+        existing = {(normalize_for_matching(entry.subject), normalize_for_matching(entry.predicate)) for entry in projected}
+        for predicate in ("destination", "travel_style"):
+            value = getattr(task, "parameters", {}).get(predicate, "")
+            key = (normalize_for_matching("trip" if predicate == "destination" else "user"), normalize_for_matching(predicate))
+            if value and key not in existing:
+                projected.append(
+                    KnowledgeEntry(
+                        id=f"projected-{task.id}-{predicate}",
+                        task_id=task.id,
+                        kind="fact" if predicate == "destination" else "preference",
+                        subject="trip" if predicate == "destination" else "user",
+                        predicate=predicate,
+                        value=value,
+                        source=KnowledgeSource(source_type="task_field"),
+                    )
+                )
+        return projected
+    if task.task_type != "generic_comparison":
+        return projected
+    existing_options = {normalize_for_matching(entry.subject) for entry in projected if entry.kind == "option"}
+    for option in _split_task_options(getattr(task, "parameters", {}).get("options", "")):
+        if normalize_for_matching(option) in existing_options:
+            continue
+        projected.append(
+            KnowledgeEntry(
+                id=f"projected-{task.id}-{normalize_for_matching(option)}",
+                task_id=task.id,
+                kind="option",
+                subject=option,
+                predicate="is_option",
+                value="true",
+                source=KnowledgeSource(source_type="task_field"),
+            )
+        )
+    return projected
+
+
+def _option_view_items(knowledge: list[KnowledgeEntry]) -> list[dict[str, Any]]:
+    options = _subjects_with_kind(knowledge, "option")
+    items: list[dict[str, Any]] = []
+    for option in options:
+        details: list[str] = []
+        price = _latest_value(knowledge, option, "price")
+        if price:
+            details.append(f"{price} €")
+        for entry in knowledge:
+            if normalize_for_matching(entry.subject) != normalize_for_matching(option):
+                continue
+            if entry.predicate in {"battery", "camera_quality", "support_quality"}:
+                details.append(_short_detail(entry))
+        items.append({"label": option, "details": _dedupe(details)[:3]})
+    return items
+
+
+def _entries_for_roles(knowledge: list[KnowledgeEntry], roles: set[str]) -> list[KnowledgeEntry]:
+    return [entry for entry in knowledge if entry.kind in roles]
+
+
+def _entry_view_items(entries: list[KnowledgeEntry]) -> list[dict[str, Any]]:
+    return _dedupe_view_items([{"label": _entry_phrase(entry), "details": []} for entry in entries])
+
+
+def _non_duplicated_fact_items(task, knowledge: list[KnowledgeEntry]) -> list[dict[str, Any]]:
+    skipped_predicates = {"is_option", "price", "budget_max", "camera_priority", "battery_priority", "support_priority"}
+    if task.task_type == "plan_trip":
+        skipped_predicates |= {"destination", "date_range"}
+    if task.task_type == "generic_comparison":
+        skipped_predicates |= {"battery", "camera_quality", "support_quality"}
+    facts = [
+        {"label": _entry_phrase(entry), "details": []}
+        for entry in knowledge
+        if entry.kind in {"fact", "claim", "opinion", "derived_insight"} and entry.predicate not in skipped_predicates
+    ]
+    return _dedupe_view_items(facts)
+
+
+def _conflict_items(knowledge: list[KnowledgeEntry]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], set[str]] = {}
+    for entry in knowledge:
+        grouped.setdefault((entry.subject, entry.predicate), set()).add(entry.value)
+    items = []
+    for (subject, predicate), values in grouped.items():
+        if len(values) > 1:
+            items.append({"label": f"{subject}: {_join_pt(sorted(values))}", "details": [predicate]})
+    return items
+
+
+def _prioritized_unknowns(task, knowledge: list[KnowledgeEntry], reasoning: TaskReasoningState) -> list[str]:
+    unknowns = infer_unknowns(task, knowledge) or reasoning.uncertainties
+    if task.task_type == "generic_comparison":
+        priority = ("critérios de decisão", "preço", "câmara", "autonomia", "suporte")
+    elif task.task_type == "plan_trip":
+        priority = ("tipo de destino", "datas", "duração", "orçamento", "ritmo", "alojamento", "transportes")
+    else:
+        priority = ("próximo passo",)
+    return sorted(_dedupe(unknowns), key=lambda item: _priority_index(item, priority))
+
+
+def _priority_index(item: str, priority: tuple[str, ...]) -> int:
+    normalized = normalize_for_matching(item)
+    for index, marker in enumerate(priority):
+        if marker in normalized:
+            return index
+    return len(priority)
+
+
+def _next_step_label(task, knowledge: list[KnowledgeEntry], reasoning: TaskReasoningState) -> str:
+    unknowns = _prioritized_unknowns(task, knowledge, reasoning)
+    if unknowns:
+        return "Fechar " + _join_pt(unknowns[:2])
+    if task.task_type == "plan_trip" and reasoning.stage == "plan":
+        return "Organizar alojamento, transportes, itinerário e custos"
+    if reasoning.current_recommendation:
+        return "Confirmar os pontos em aberto antes de decidir"
+    return ""
+
+
+def _plan_travel_dialogue(
+    task,
+    knowledge: list[KnowledgeEntry],
+    reasoning: TaskReasoningState,
+    delta: list[KnowledgeEntry],
+    message: str,
+) -> TaskDialoguePlan:
+    predicates = {entry.predicate for entry in knowledge}
+    delta_predicates = {entry.predicate for entry in delta}
+    stage = infer_task_stage(task, knowledge)
+    destination = _latest_value(knowledge, "trip", "destination")
+    date_range = _latest_value(knowledge, "trip", "date_range")
+    duration = _latest_value(knowledge, "trip", "duration")
+    budget = _latest_value(knowledge, "trip", "budget_max")
+    travel_style = _latest_value(knowledge, "user", "travel_style")
+    flight_constraint = _latest_value(knowledge, "trip", "flight_constraint")
+    normalized = normalize_for_matching(message)
+
+    if stage == "plan":
+        if {"destination", "date_range"}.intersection(delta_predicates):
+            ack = f"Ótimo. Já temos {destination}"
+            if date_range:
+                ack += f" e as datas, {date_range}"
+            ack += "."
+            return TaskDialoguePlan(
+                acknowledgement=ack,
+                implication="Agora faz sentido organizar alojamento, transportes, itinerário e orçamento.",
+                next_question="Por onde queres começar?",
+            )
+        if "budget_max" in delta_predicates:
+            scope = " para alojamento, transportes, alimentação e atividades, sem contar os voos" if contains_any_phrase(normalized, ("sem contar os voos", "sem voos")) else ""
+            return TaskDialoguePlan(
+                acknowledgement=f"Ficamos então com até {budget} €{scope}.",
+                next_step="O próximo passo mais útil é perceber o tipo de alojamento e a zona onde faz sentido ficar.",
+            )
+        return TaskDialoguePlan(
+            acknowledgement="Temos destino e datas definidos.",
+            next_step="Agora precisamos de organizar alojamento, transportes, itinerário e orçamento.",
+        )
+
+    if {"duration", "budget_max"}.intersection(delta_predicates):
+        known = []
+        if duration:
+            known.append(duration)
+        if budget:
+            known.append(f"até {budget} €")
+        return TaskDialoguePlan(
+            acknowledgement=f"Ótimo, já temos {_join_pt(known)}.",
+            implication="Falta-me perceber melhor o estilo da viagem." if "travel_style" not in predicates else "",
+            next_question=_travel_next_question(knowledge, reasoning),
+        )
+    if "travel_style" in delta_predicates:
+        return TaskDialoguePlan(
+            acknowledgement=f"Então procuramos {travel_style}.",
+            next_question=_travel_next_question(knowledge, reasoning),
+        )
+    if "flight_constraint" in delta_predicates:
+        summary = _travel_basis_summary(duration, budget, travel_style, flight_constraint)
+        return TaskDialoguePlan(
+            acknowledgement=f"Perfeito. {summary}.",
+            next_step="Já consigo começar a procurar destinos adequados.",
+        )
+    if not delta:
+        if destination and "travel_style" not in predicates:
+            return TaskDialoguePlan(
+                acknowledgement="Acho que ainda me falta perceber como gostas de viajar.",
+                next_question=_travel_next_question(knowledge, reasoning),
+            )
+        return TaskDialoguePlan(
+            acknowledgement="Claro.",
+            next_question=_travel_next_question(knowledge, reasoning),
+        )
+    return TaskDialoguePlan(
+        acknowledgement="Certo, isso já ajuda.",
+        next_question=_travel_next_question(knowledge, reasoning),
+    )
+
+
+def _plan_comparison_dialogue(
+    task,
+    knowledge: list[KnowledgeEntry],
+    reasoning: TaskReasoningState,
+    delta: list[KnowledgeEntry],
+) -> TaskDialoguePlan:
+    options = _subjects_with_kind(knowledge, "option")
+    delta_predicates = {entry.predicate for entry in delta}
+    budget = _latest_value(knowledge, "current_task", "budget_max")
+
+    if not delta:
+        if options:
+            return TaskDialoguePlan(
+                acknowledgement=f"Certo. Temos a comparação entre {_join_pt(options)} ativa.",
+                next_question=_comparison_next_question(task, knowledge, reasoning),
+            )
+        return TaskDialoguePlan(next_question="Certo. Que opções queres comparar?")
+
+    if "budget_max" in delta_predicates and "battery_priority" in delta_predicates:
+        return TaskDialoguePlan(
+            acknowledgement=f"Isso muda a comparação. O limite passa para {budget} € e a bateria passa a pesar menos.",
+            implication=_comparison_budget_implication(knowledge, budget),
+            recommendation=_comparison_recommendation_sentence(reasoning),
+            uncertainty=_comparison_uncertainty_sentence(reasoning),
+        )
+    if "budget_max" in delta_predicates:
+        return TaskDialoguePlan(
+            acknowledgement=f"Perfeito. Fica definido um limite de {budget} €.",
+            implication=_comparison_budget_implication(knowledge, budget),
+            next_question=_comparison_next_question(task, knowledge, reasoning),
+        )
+    if {"camera_priority", "battery_priority", "support_priority"}.intersection(delta_predicates):
+        return TaskDialoguePlan(
+            acknowledgement=_comparison_preference_ack(delta),
+            implication=_comparison_current_implication(knowledge, reasoning),
+            next_question=_comparison_next_question(task, knowledge, reasoning),
+        )
+    if "price" in delta_predicates:
+        return TaskDialoguePlan(
+            acknowledgement=_comparison_prices_ack(knowledge),
+            implication=_comparison_budget_implication(knowledge, budget),
+            next_question=_comparison_next_question(task, knowledge, reasoning),
+        )
+    if {"camera_quality", "battery", "support_quality"}.intersection(delta_predicates):
+        return TaskDialoguePlan(
+            acknowledgement=_comparison_tradeoff_ack(delta),
+            recommendation=_comparison_recommendation_sentence(reasoning),
+            uncertainty=_comparison_uncertainty_sentence(reasoning),
+            next_question=_comparison_next_question(task, knowledge, reasoning),
+        )
+    return TaskDialoguePlan(
+        acknowledgement="Certo, isso fica como contexto da comparação.",
+        next_question=_comparison_next_question(task, knowledge, reasoning),
+    )
+
+
+def _plan_generic_dialogue(
+    task,
+    knowledge: list[KnowledgeEntry],
+    reasoning: TaskReasoningState,
+    delta: list[KnowledgeEntry],
+) -> TaskDialoguePlan:
+    if delta:
+        return TaskDialoguePlan(acknowledgement="Certo, isso já ajuda.", next_question=_generic_next_question(reasoning))
+    return TaskDialoguePlan(acknowledgement="Certo.", next_question=_generic_next_question(reasoning))
+
+
+def _fallback_task_dialogue(task, knowledge: list[KnowledgeEntry], reasoning: TaskReasoningState) -> str:
+    if task.task_type == "plan_trip":
+        return _travel_next_question(knowledge, reasoning)
+    if task.task_type == "generic_comparison":
+        return _comparison_next_question(task, knowledge, reasoning) or "Certo. Continuamos a comparação por partes."
+    return _generic_next_question(reasoning) or "Certo. Continuamos por partes."
+
+
+def _travel_next_question(knowledge: list[KnowledgeEntry], reasoning: TaskReasoningState) -> str:
+    predicates = {entry.predicate for entry in knowledge}
+    stage = infer_task_stage(type("Task", (), {"task_type": "plan_trip"})(), knowledge)
+    if stage == "plan":
+        return "Por onde queres começar?"
+    if "travel_style" not in predicates:
+        return "Procuras mais descanso, conhecer sítios novos ou um equilíbrio para descansar e explorar?"
+    if "duration" not in predicates and "date_range" not in predicates:
+        return "Quantos dias tens para a viagem?"
+    if "budget_max" not in predicates:
+        return "Tens algum limite de orçamento?"
+    if "flight_constraint" not in predicates:
+        return "Tens alguma limitação importante em relação à duração dos voos?"
+    return ""
+
+
+def _travel_basis_summary(duration: str, budget: str, travel_style: str, flight_constraint: str) -> str:
+    parts = []
+    if duration:
+        parts.append(duration)
+    if budget:
+        parts.append(f"até {budget} €")
+    if travel_style:
+        parts.append(travel_style)
+    if flight_constraint:
+        parts.append("preferência por voos curtos")
+    return "Temos " + _join_pt(parts) if parts else "Temos uma base inicial"
+
+
+def _comparison_next_question(task, knowledge: list[KnowledgeEntry], reasoning: TaskReasoningState) -> str:
+    unknowns = infer_unknowns(task, knowledge)
+    if not unknowns:
+        return ""
+    first = unknowns[0]
+    normalized = normalize_for_matching(first)
+    if "criterios" in normalized or "critérios" in normalized:
+        return "Que fator pesa mais para ti nesta escolha?"
+    if normalized.startswith("preco") or normalized.startswith("preço"):
+        return f"Sabes o {first}?"
+    if normalized.startswith("camara") or normalized.startswith("câmara"):
+        return f"Falta perceber a {first}. Tens alguma referência?"
+    if normalized.startswith("autonomia"):
+        return f"Falta perceber a {first}. Isso é decisivo para ti?"
+    if "suporte" in normalized:
+        return f"Falta comparar o {first}."
+    return f"Falta perceber {first}."
+
+
+def _generic_next_question(reasoning: TaskReasoningState) -> str:
+    if reasoning.uncertainties:
+        return "Diz-me o próximo passo concreto quando quiseres."
+    return ""
+
+
+def _comparison_budget_implication(knowledge: list[KnowledgeEntry], budget: str) -> str:
+    if not budget:
+        return ""
+    try:
+        budget_num = float(budget)
+    except ValueError:
+        return ""
+    inside: list[str] = []
+    outside: list[str] = []
+    for option in _subjects_with_kind(knowledge, "option"):
+        price = _latest_value(knowledge, option, "price")
+        if not price:
+            continue
+        try:
+            price_num = float(price)
+        except ValueError:
+            continue
+        if price_num <= budget_num:
+            inside.append(option)
+        else:
+            outside.append(f"{option} fica {int(price_num - budget_num)} € acima")
+    if inside and outside:
+        verb = "ficam" if len(inside) > 1 else "fica"
+        return f"{_join_pt(inside)} {verb} dentro do limite; {_join_pt(outside)}."
+    if inside:
+        verb = "ficam" if len(inside) > 1 else "fica"
+        return f"{_join_pt(inside)} {verb} dentro do limite."
+    if outside:
+        return _join_pt(outside) + "."
+    return ""
+
+
+def _comparison_preference_ack(delta: list[KnowledgeEntry]) -> str:
+    predicates = {entry.predicate for entry in delta}
+    if "camera_priority" in predicates and "battery_priority" in predicates:
+        return "Percebi: a câmara pesa mais, e a bateria fica como fator secundário."
+    if "camera_priority" in predicates:
+        return "Percebi: a câmara passa a pesar mais na decisão."
+    if "battery_priority" in predicates:
+        value = _latest_delta_value(delta, "battery_priority")
+        if value == "low":
+            return "Percebi: a bateria passa a pesar menos na decisão."
+        return "Percebi: a bateria também conta na decisão."
+    if "support_priority" in predicates:
+        return "Percebi: suporte passa a pesar mais do que escolher apenas pelo preço."
+    return "Percebi a prioridade."
+
+
+def _comparison_current_implication(knowledge: list[KnowledgeEntry], reasoning: TaskReasoningState) -> str:
+    if reasoning.current_recommendation:
+        return f"Com os dados atuais, {reasoning.current_recommendation} começa a ganhar força."
+    options = _subjects_with_kind(knowledge, "option")
+    if options:
+        return "Agora precisamos de comparar essa prioridade nas opções."
+    return ""
+
+
+def _comparison_prices_ack(knowledge: list[KnowledgeEntry]) -> str:
+    prices = []
+    for option in _subjects_with_kind(knowledge, "option"):
+        price = _latest_value(knowledge, option, "price")
+        if price:
+            prices.append((option, int(price) if price.isdigit() else price))
+    if not prices:
+        return "Certo, já temos mais dados de preço."
+    numeric = [(option, price) for option, price in prices if isinstance(price, int)]
+    if len(numeric) >= 2:
+        ranked = sorted(numeric, key=lambda item: item[1])
+        return "Já temos os preços: " + ", ".join(f"{option} {price} €" for option, price in ranked) + "."
+    return "Já temos o preço: " + ", ".join(f"{option} {price} €" for option, price in prices) + "."
+
+
+def _comparison_tradeoff_ack(delta: list[KnowledgeEntry]) -> str:
+    quality = [entry for entry in delta if entry.predicate in {"camera_quality", "battery", "support_quality"}]
+    if len(quality) >= 2:
+        return "Boa, já temos um tradeoff mais claro: " + _join_pt([_quality_delta_phrase(entry) for entry in quality[:3]]) + "."
+    if quality:
+        return "Certo. " + _entry_phrase(quality[0]).capitalize() + "."
+    return "Certo, isso ajuda a comparar melhor."
+
+
+def _quality_delta_phrase(entry: KnowledgeEntry) -> str:
+    if entry.predicate == "support_quality" and entry.value == "limited":
+        return f"{entry.subject}: suporte limitado"
+    return _short_detail(entry).replace("+ ", f"{entry.subject}: ")
+
+
+def _comparison_recommendation_sentence(reasoning: TaskReasoningState) -> str:
+    if not reasoning.current_recommendation:
+        return ""
+    reasons = "; ".join(reasoning.reasons[:2]) if reasoning.reasons else "encaixa melhor nos dados atuais"
+    return f"Neste momento, {reasoning.current_recommendation} parece mais forte, porque {reasons}."
+
+
+def _comparison_uncertainty_sentence(reasoning: TaskReasoningState) -> str:
+    if not reasoning.current_recommendation or not reasoning.uncertainties:
+        return ""
+    return "Ainda é provisório: falta " + _join_pt(reasoning.uncertainties[:2]) + "."
+
+
+def _latest_delta_value(delta: list[KnowledgeEntry], predicate: str) -> str:
+    for entry in reversed(delta):
+        if entry.predicate == predicate:
+            return entry.value
+    return ""
+
+
+def _short_detail(entry: KnowledgeEntry) -> str:
+    if entry.predicate == "battery":
+        return "+ autonomia" if entry.value == "better" else f"bateria: {entry.value}"
+    if entry.predicate == "camera_quality":
+        return "+ câmara" if entry.value == "better" else f"câmara: {entry.value}"
+    if entry.predicate == "support_quality":
+        return "+ suporte" if entry.value == "better" else "suporte limitado"
+    return _entry_phrase(entry)
+
+
+def _dedupe_view_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    result: list[dict[str, Any]] = []
+    for item in items:
+        label = str(item.get("label", ""))
+        key = _ascii_key(label)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
+def _split_task_options(options_text: str) -> list[str]:
+    return [part.strip(" ,.!?;:") for part in re.split(r"\s+e\s+|,", options_text or "") if part.strip(" ,.!?;:")]
 
 
 def needs_task_reference_clarification(work_session, task, message: str) -> bool:
@@ -293,12 +965,12 @@ def _extract_comparison_entries(work_session, task, message: str, turn_id: str) 
             entries.append(_upsert_entry(work_session, task.id, "fact", option, "price", price, message, turn_id, replace_active=True))
         subject_fragment = _fragment_after_subject(message, option, options)
         subject_norm = normalize_for_matching(subject_fragment)
-        if contains_any_phrase(subject_norm, ("melhor bateria", "melhor na bateria", "dura mais", "melhor autonomia", "aguenta mais tempo")):
+        if contains_any_phrase(subject_norm, ("melhor bateria", "melhor na bateria", "dura mais", "melhor autonomia", "aguenta mais tempo", "aguenta mais")):
             entries.append(_upsert_entry(work_session, task.id, "claim", option, "battery", "better", message, turn_id, replace_active=True, confidence=0.78))
         if contains_any_phrase(subject_norm, ("melhor camara", "melhor câmara")):
             kind = "opinion" if contains_any_phrase(normalized, ("acho", "parece", "parece me", "parece-me")) else "claim"
             entries.append(_upsert_entry(work_session, task.id, kind, option, "camera_quality", "better", message, turn_id, replace_active=True, confidence=0.7 if kind == "opinion" else 0.78))
-        if contains_any_phrase(subject_norm, ("suporte 24", "suporte vinte e quatro", "melhor suporte")):
+        if contains_any_phrase(subject_norm, ("suporte 24h", "suporte 24", "suporte vinte e quatro", "melhor suporte")):
             entries.append(_upsert_entry(work_session, task.id, "claim", option, "support_quality", "better", message, turn_id, replace_active=True, confidence=0.78))
         if contains_any_phrase(subject_norm, ("horario laboral", "horário laboral", "so em horario", "só em horário")):
             entries.append(_upsert_entry(work_session, task.id, "claim", option, "support_quality", "limited", message, turn_id, replace_active=True, confidence=0.78))
@@ -490,11 +1162,65 @@ def _format_known(task, knowledge: list[KnowledgeEntry]) -> str:
     return " ".join(lines)
 
 
+def _format_important(task, knowledge: list[KnowledgeEntry], reasoning: TaskReasoningState) -> str:
+    if not knowledge:
+        return "O essencial é simples: ainda não temos dados suficientes para decidir bem."
+    if task.task_type == "generic_comparison":
+        parts: list[str] = []
+        budget = _latest_value(knowledge, "current_task", "budget_max")
+        if budget:
+            parts.append(f"o limite é {budget} €")
+        if reasoning.current_recommendation:
+            parts.append(f"{reasoning.current_recommendation} parece melhor neste momento")
+        priorities = [entry for entry in knowledge if entry.kind == "preference"]
+        if priorities:
+            parts.append(_entry_phrase(priorities[-1]))
+        unknowns = infer_unknowns(task, knowledge)
+        if unknowns:
+            parts.append("a maior lacuna é " + unknowns[0])
+        return "O mais importante: " + "; ".join(parts[:4]) + "."
+    if task.task_type == "plan_trip":
+        essentials = []
+        for subject, predicate in (
+            ("trip", "destination"),
+            ("trip", "date_range"),
+            ("trip", "duration"),
+            ("trip", "budget_max"),
+            ("user", "travel_style"),
+            ("trip", "flight_constraint"),
+        ):
+            value = _latest_value(knowledge, subject, predicate)
+            if value:
+                essentials.append(_entry_phrase(KnowledgeEntry("", "", "fact", subject, predicate, value, KnowledgeSource())))
+        unknowns = infer_unknowns(task, knowledge)
+        if unknowns:
+            essentials.append("falta " + unknowns[0])
+        return "O essencial: " + "; ".join(essentials[:4]) + "."
+    return "O essencial: " + "; ".join(_entry_phrase(entry) for entry in knowledge[:3]) + "."
+
+
 def _format_unknowns(task, knowledge: list[KnowledgeEntry]) -> str:
     unknowns = infer_unknowns(task, knowledge)
     if not unknowns:
         return "Neste momento não vejo nenhuma lacuna essencial. Podemos começar a decidir ou aprofundar um ponto específico."
     return "Ainda falta perceber sobretudo " + _join_pt(unknowns[:4]) + "."
+
+
+def _format_decisions(task, knowledge: list[KnowledgeEntry]) -> str:
+    decisions = [entry for entry in knowledge if entry.kind == "decision"]
+    if decisions:
+        return "Já há uma decisão registada: " + _join_pt([_entry_phrase(entry) for entry in decisions[:3]]) + "."
+    if task.task_type == "generic_comparison":
+        unknowns = infer_unknowns(task, knowledge)
+        if unknowns:
+            return "Ainda falta decidir a opção final. Antes disso, convém fechar " + _join_pt(unknowns[:2]) + "."
+        return "Falta decidir qual opção escolhes."
+    if task.task_type == "plan_trip":
+        stage = infer_task_stage(task, knowledge)
+        if stage == "plan":
+            return "Ainda falta decidir alojamento, transportes, itinerário e custos."
+        return "Ainda falta decidir o destino ou o tipo de destino."
+    return "Ainda falta transformar isto numa decisão concreta."
 
 
 def _format_recommendation(reasoning: TaskReasoningState) -> str:
@@ -597,7 +1323,15 @@ def _extract_price_for_subject(message: str, subject: str, subjects: list[str] |
     matched = _matched_subject_text(normalized_message, subject, index)
     fragment = normalized_message[index + len(matched): index + len(matched) + 60]
     match = re.search(r"(?:custa|esta a|está a|por|pelos?)?\s*(\d{2,5})\s*(?:euros|eur|€)?", fragment)
-    return match.group(1) if match else ""
+    if not match:
+        return ""
+    before = fragment[: match.start(1)]
+    after = fragment[match.end(1): match.end(1) + 2].lower()
+    has_price_marker = bool(re.search(r"(?:custa|esta a|está a|por|pelos?)\s*$", before))
+    has_currency = bool(re.match(r"\s*(?:euros|eur|€)", fragment[match.end(1):]))
+    if after.startswith("h") and not (has_price_marker or has_currency):
+        return ""
+    return match.group(1)
 
 
 def _fragment_after_subject(message: str, subject: str, subjects: list[str] | None = None) -> str:
@@ -692,13 +1426,17 @@ def _is_correction(normalized: str) -> bool:
 def _entry_phrase(entry: KnowledgeEntry) -> str:
     pred = entry.predicate
     if pred == "budget_max":
-        return f"orçamento máximo de {entry.value} euros"
+        return f"limite de orçamento: {entry.value} euros"
     if pred == "price":
         return f"{entry.subject} custa {entry.value} euros"
     if pred == "camera_priority":
         return "a câmara pesa mais na decisão"
     if pred == "battery_priority":
-        return f"a bateria tem prioridade {entry.value}"
+        if entry.value == "low":
+            return "a bateria pesa menos na decisão"
+        if entry.value == "medium":
+            return "a bateria fica como fator secundário"
+        return "a bateria pesa bastante na decisão"
     if pred == "camera_quality":
         return f"{entry.subject} parece melhor em câmara"
     if pred == "battery":
@@ -706,7 +1444,11 @@ def _entry_phrase(entry: KnowledgeEntry) -> str:
     if pred == "support_priority":
         return "o suporte pesa bastante na decisão"
     if pred == "support_quality":
-        return f"{entry.subject} tem suporte {entry.value}"
+        if entry.value == "better":
+            return f"{entry.subject} tem melhor suporte"
+        if entry.value == "limited":
+            return f"{entry.subject} tem suporte limitado"
+        return f"{entry.subject}: suporte {entry.value}"
     if pred == "destination":
         return f"destino: {entry.value}"
     if pred == "date_range":

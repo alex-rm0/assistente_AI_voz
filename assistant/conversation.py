@@ -72,7 +72,9 @@ from assistant.representation import (
 from assistant.task_intelligence import (
     answer_task_query,
     classify_task_query,
+    cognitive_task_view_model,
     needs_task_reference_clarification,
+    task_dialogue_response,
     task_card_summary,
     task_option_titles,
     update_task_knowledge,
@@ -2868,7 +2870,7 @@ class AssistantEngine:
                     self._turn_trace["task_knowledge_updated_count"] = len(knowledge_entries)
                     self._turn_trace["task_context_source"] = "deterministic_activity"
                     self._turn_trace["task_turn_intent"] = "switch"
-                return self._task_continuation_response(new_ctx)
+                return self._task_continuation_response(new_ctx, raw_message, knowledge_entries)
             if contains_any_phrase(normalized_message, _TASK_EXPLICIT_EXIT_PHRASES):
                 # Section 13: only an EXPLICIT signal ("já agora explica-me
                 # X") lets a mention of the task's own topic fall through to
@@ -2882,7 +2884,7 @@ class AssistantEngine:
                     if self._turn_trace is not None:
                         self._turn_trace["task_continuation_detected"] = True
                         self._turn_trace["active_task_status"] = ctx.status
-                    return self._task_continuation_response(ctx)
+                    return self._task_continuation_response(ctx, raw_message, [])
                 return None  # a paused task never silently swallows unrelated turns
             # Section 1/5: classify TASK_CONTROL ("podes escrever", "escreve",
             # a bare "podes"/"sim" confirming a just-asked pending offer)
@@ -2904,7 +2906,7 @@ class AssistantEngine:
                     return None
                 # Not ready yet, or an unrecognized control action -- surface
                 # what's still missing instead of silently doing nothing.
-                return self._task_continuation_response(ctx)
+                return self._task_continuation_response(ctx, raw_message, [])
             if interpretation.refines_task and interpretation.task_type and interpretation.task_type != ctx.task_type:
                 previous_type = ctx.task_type
                 self._specialize_task(ctx, interpretation)
@@ -2918,7 +2920,7 @@ class AssistantEngine:
                     self._turn_trace["task_fields_updated"] = []
                     self._turn_trace["task_context_source"] = "deterministic_activity"
                     self._turn_trace["task_turn_intent"] = "continue"
-                return self._task_continuation_response(ctx)
+                return self._task_continuation_response(ctx, raw_message, [])
             if needs_task_reference_clarification(self._work_session, ctx, raw_message):
                 options = task_option_titles(self._work_session, ctx)
                 labels = " ou ".join(options[:3]) if options else "qual opção"
@@ -2963,7 +2965,7 @@ class AssistantEngine:
                 self._turn_trace["task_knowledge_updated_count"] = len(knowledge_entries)
                 self._turn_trace["task_context_source"] = "deterministic"
                 self._turn_trace["task_turn_intent"] = "refine" if interpretation.refines_task else ("continue" if same_task_start else "data")
-            return self._task_continuation_response(ctx)
+            return self._task_continuation_response(ctx, raw_message, knowledge_entries)
 
         task_type = interpretation.task_type or _detect_new_task_intent(normalized_message)
         if not task_type:
@@ -2995,7 +2997,7 @@ class AssistantEngine:
             self._turn_trace["task_knowledge_updated_count"] = len(knowledge_entries)
             self._turn_trace["task_context_source"] = "deterministic_activity" if interpretation.task_type else "deterministic"
             self._turn_trace["task_turn_intent"] = "data"
-        return self._task_continuation_response(ctx)
+        return self._task_continuation_response(ctx, raw_message, knowledge_entries)
 
     def _record_activity_interpretation(self, interpretation: ActivityInterpretation) -> None:
         if self._turn_trace is None:
@@ -3106,7 +3108,7 @@ class AssistantEngine:
             return _missing_compose_email_fields(ctx)
         return _missing_generic_activity_fields(ctx)
 
-    def _task_continuation_response(self, ctx: ActiveTaskContext) -> str:
+    def _task_continuation_response(self, ctx: ActiveTaskContext, user_message: str = "", knowledge_delta: list | None = None) -> str:
         ctx.missing_information = self._missing_task_fields(ctx)
         ctx.status = "ready" if not ctx.missing_information else "collecting"
         # _update_task_artifact_ui assigns ctx.active_artifact_id the FIRST
@@ -3123,7 +3125,13 @@ class AssistantEngine:
             self._turn_trace["task_artifact_id"] = ctx.active_artifact_id
         if ctx.task_type == "compose_email":
             return _compose_email_question(ctx)
-        return _generic_activity_question(ctx)
+        response = task_dialogue_response(
+            self._work_session,
+            ctx,
+            user_message,
+            knowledge_delta=knowledge_delta or [],
+        )
+        return response or _generic_activity_question(ctx)
 
     def _update_task_artifact_ui(self, ctx: ActiveTaskContext) -> None:
         # Section 9/10/16: a progressive WorkspaceObject that fills in as
@@ -3140,6 +3148,7 @@ class AssistantEngine:
             intelligence_lines = task_card_summary(self._work_session, ctx)
             if intelligence_lines:
                 content = content + "\n" + "\n".join(intelligence_lines)
+            presentation = cognitive_task_view_model(self._work_session, ctx, title=title)
             if not ctx.active_artifact_id:
                 ctx.active_artifact_id = f"artifact-{ctx.id}"
             ctx.active_artifact_revision += 1
@@ -3164,6 +3173,7 @@ class AssistantEngine:
                     "title": title,
                     "subtitle": ctx.status,
                     "content": content,
+                    "presentation": presentation,
                 },
             )
             return

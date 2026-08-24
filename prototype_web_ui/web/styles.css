@@ -1283,6 +1283,96 @@ body.workspace-dragging {
   color: var(--cyan-soft);
 }
 
+.workspace-object__cognitive {
+  display: grid;
+  gap: 10px;
+  color: var(--text-mid);
+  font: 300 12px/1.45 var(--sans);
+}
+
+.workspace-object__cognitive-section {
+  min-width: 0;
+}
+
+.workspace-object__cognitive-section h4 {
+  margin: 0 0 5px;
+  color: var(--text-faint);
+  font: 400 9px var(--mono);
+  letter-spacing: .07em;
+  text-transform: uppercase;
+}
+
+.workspace-object__cognitive-section ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.workspace-object__cognitive-section li {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.workspace-object__cognitive-section li span,
+.workspace-object__cognitive-text {
+  color: var(--text-mid);
+}
+
+.workspace-object__cognitive-section li small {
+  color: var(--cyan-soft);
+  font: 300 11px/1.35 var(--sans);
+}
+
+.workspace-object__cognitive-section[data-role="options"] ul {
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 7px;
+}
+
+.workspace-object__cognitive-section[data-role="options"] li,
+.workspace-object__cognitive-section[data-role="recommendation"],
+.workspace-object__cognitive-section[data-role="conflicts"] {
+  border: 1px solid rgba(255,255,255,.07);
+  border-radius: 8px;
+  background: rgba(255,255,255,.025);
+  padding: 8px 9px;
+}
+
+.workspace-object__cognitive-section[data-role="recommendation"] li span {
+  color: var(--text-high);
+}
+
+.workspace-object__cognitive-section[data-role="conflicts"] li span {
+  color: #ffcf9a;
+}
+
+.workspace-object[data-task-count="3"] .workspace-object__cognitive,
+.workspace-object[data-task-count="4"] .workspace-object__cognitive {
+  gap: 7px;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.workspace-object[data-task-count="3"] .workspace-object__cognitive-section[data-priority="low"],
+.workspace-object[data-task-count="4"] .workspace-object__cognitive-section[data-priority="low"],
+.workspace-object[data-task-count="4"] .workspace-object__cognitive-section[data-role="key_information"] {
+  display: none;
+}
+
+.workspace-object[data-task-count="4"] .workspace-object__cognitive-section ul {
+  gap: 3px;
+}
+
+.workspace-object[data-task-count="4"] .workspace-object__cognitive-section li small {
+  display: none;
+}
+
+.workspace-object[data-task-count="4"] .workspace-object__cognitive-section[data-role="options"] ul {
+  grid-template-columns: 1fr 1fr;
+}
+
 .workspace-object[data-working="true"] .workspace-object__working {
   animation: workspace-object-pulse 1.6s ease-in-out infinite;
 }

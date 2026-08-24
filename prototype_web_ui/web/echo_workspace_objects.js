@@ -741,6 +741,7 @@
         revision: 0,
         metadata: { createdAt: Date.now(), updatedAt: Date.now() },
       };
+      if (f.presentation) obj.metadata.presentation = f.presentation;
       objects.set(obj.id, obj);
       if (f.primary) setPrimary(obj.id);
       scheduleRender();
@@ -763,11 +764,13 @@
         if (f.title) existing.title = f.title;
         if (f.subtitle) existing.subtitle = f.subtitle;
         if (f.content) existing.content = f.content;
+        if (f.presentation) existing.metadata.presentation = f.presentation;
         touch(existing);
         scheduleRender();
         return existing;
       }
       const created = createObject({id: stableId || null, type: "task_artifact", title: f.title, subtitle: f.subtitle, content: f.content, primary: true});
+      if (f.presentation) created.metadata.presentation = f.presentation;
       created.metadata.taskId = f.taskId;
       return created;
     }
@@ -2131,6 +2134,7 @@
     }
 
     function buildBody(obj) {
+      if (obj.metadata && obj.metadata.presentation) return "";
       if (obj.type === "comparison") {
         const original = truncatePreview(obj.metadata.originalContent, 600);
         const draftText = truncatePreview(obj.metadata.draftContent, 600);
@@ -2145,6 +2149,72 @@
         return '<p class="workspace-object__working">A reescrever…</p>';
       }
       return `<p class="workspace-object__text">${escapeHtml(truncatePreview(obj.content, obj.workspaceRole === "primary" ? 2000 : 140))}</p>`;
+    }
+
+    function fillBody(host, obj) {
+      while (host.firstChild || (host.children && host.children.length)) {
+        host.removeChild(host.firstChild || host.children[0]);
+      }
+      const presentation = obj && obj.metadata ? obj.metadata.presentation : null;
+      if (presentation && Array.isArray(presentation.sections)) {
+        host.appendChild(buildCognitiveTaskProjection(obj, presentation));
+        return;
+      }
+      const wrapper = document.createElement("div");
+      wrapper.innerHTML = buildBody(obj);
+      while (wrapper.firstChild) host.appendChild(wrapper.firstChild);
+    }
+
+    function buildCognitiveTaskProjection(obj, presentation) {
+      const root = document.createElement("div");
+      root.className = "workspace-object__cognitive";
+      root.dataset.stage = presentation.stage || "";
+
+      const visibleSections = presentation.sections.filter((section) => section && (section.text || (Array.isArray(section.items) && section.items.length)));
+      visibleSections.forEach((section) => {
+        const sectionNode = document.createElement("section");
+        sectionNode.className = "workspace-object__cognitive-section";
+        sectionNode.dataset.role = section.role || "section";
+        sectionNode.dataset.priority = section.priority || "medium";
+
+        const heading = document.createElement("h4");
+        heading.textContent = section.title || "";
+        sectionNode.appendChild(heading);
+
+        if (section.text) {
+          const paragraph = document.createElement("p");
+          paragraph.className = "workspace-object__cognitive-text";
+          paragraph.textContent = section.text;
+          sectionNode.appendChild(paragraph);
+        }
+
+        if (Array.isArray(section.items) && section.items.length) {
+          const list = document.createElement("ul");
+          section.items.forEach((item) => {
+            const itemNode = document.createElement("li");
+            const label = document.createElement("span");
+            label.textContent = item && item.label ? item.label : "";
+            itemNode.appendChild(label);
+            const details = item && Array.isArray(item.details) ? item.details.filter(Boolean) : [];
+            if (details.length) {
+              const detailsNode = document.createElement("small");
+              detailsNode.textContent = details.join(" · ");
+              itemNode.appendChild(detailsNode);
+            }
+            list.appendChild(itemNode);
+          });
+          sectionNode.appendChild(list);
+        }
+        root.appendChild(sectionNode);
+      });
+
+      if (!root.children.length) {
+        const fallback = document.createElement("p");
+        fallback.className = "workspace-object__text";
+        fallback.textContent = truncatePreview(obj.content, obj.workspaceRole === "primary" ? 2000 : 140);
+        root.appendChild(fallback);
+      }
+      return root;
     }
 
     function escapeHtml(text) {
@@ -2242,7 +2312,7 @@
       else delete node.dataset.working;
       node.querySelector(".workspace-object__title").textContent = obj.title;
       node.querySelector(".workspace-object__subtitle").textContent = obj.subtitle || "";
-      node.querySelector(".workspace-object__body").innerHTML = buildBody(obj);
+      fillBody(node.querySelector(".workspace-object__body"), obj);
       fillActions(node.querySelector(".workspace-object__actions"), actionIds);
       fillActions(node.querySelector(".workspace-object__actions-secondary"), secondaryActionIds);
     }

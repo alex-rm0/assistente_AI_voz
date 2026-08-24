@@ -3882,6 +3882,124 @@ def test_phase451_echo_and_minimized_rail_follow_resized_task_surface() -> None:
     assert result["railCount"] == 1
 
 
+def test_phase51_task_surface_renders_cognitive_projection_sections() -> None:
+    result = _run_workspace_harness_with_dom(
+        """
+        controller.upsertTaskArtifact({
+          id: "artifact-task-1",
+          taskId: "task-1",
+          title: "Comparação: telemóveis",
+          subtitle: "narrow",
+          content: "Notas brutas que não devem dominar",
+          presentation: {
+            version: 1,
+            stage: "narrow",
+            sections: [
+              {role: "options", title: "Opções", priority: "high", items: [
+                {label: "Samsung", details: ["799 €", "+ autonomia"]},
+                {label: "Apple", details: ["899 €", "+ câmara"]},
+              ]},
+              {role: "constraints", title: "Limites", priority: "high", items: [
+                {label: "orçamento máximo de 850 euros", details: []},
+              ]},
+              {role: "recommendation", title: "Neste momento", priority: "high", items: [
+                {label: "Samsung parece a melhor opção", details: ["fica dentro do orçamento"]},
+              ]},
+            ],
+          },
+        });
+        controller.render();
+        const slot = containerEl.children.find((child) => child.dataset && child.dataset.taskSurfaceSlot === "true");
+        const body = slot.querySelector(".workspace-object__body");
+        const projection = body.children.find((child) => child.className === "workspace-object__cognitive");
+        const sections = projection.children.map((section) => ({
+          role: section.dataset.role,
+          priority: section.dataset.priority,
+          title: section.children[0].textContent,
+          itemLabels: section.children.find((child) => String(child.tagName).toLowerCase() === "ul").children.map((item) => item.children[0].textContent),
+        }));
+        console.log(JSON.stringify({
+          hasProjection: Boolean(projection),
+          bodyInnerHtml: body.innerHTML || "",
+          sectionRoles: sections.map((section) => section.role),
+          sections,
+        }));
+        """,
+        _HOST_RECT,
+    )
+    assert result["hasProjection"] is True
+    assert result["bodyInnerHtml"] == ""
+    assert result["sectionRoles"] == ["options", "constraints", "recommendation"]
+    assert result["sections"][0]["itemLabels"] == ["Samsung", "Apple"]
+
+
+def test_phase51_cognitive_projection_density_and_idempotence_for_four_tasks() -> None:
+    result = _run_workspace_harness_with_dom(
+        """
+        const presentation = {
+          version: 1,
+          stage: "narrow",
+          sections: [
+            {role: "options", title: "Opções", priority: "high", items: [
+              {label: "Samsung", details: ["799 €"]},
+              {label: "Apple", details: ["899 €"]},
+            ]},
+            {role: "key_information", title: "O que já sabemos", priority: "medium", items: [
+              {label: "detalhe menos importante", details: []},
+            ]},
+            {role: "next_step", title: "Próximo passo", priority: "high", text: "confirmar câmara"},
+          ],
+        };
+        ["Telefones", "Férias", "Estocolmo", "Propostas"].forEach((title, index) => {
+          controller.upsertTaskArtifact({
+            id: `artifact-task-${index + 1}`,
+            taskId: `task-${index + 1}`,
+            title,
+            subtitle: "ready",
+            content: title,
+            presentation,
+          });
+        });
+        controller.render();
+        function snapshot() {
+          return containerEl.children
+            .filter((child) => child.dataset && child.dataset.taskSurfaceSlot === "true")
+            .map((node) => {
+              const projection = node.querySelector(".workspace-object__cognitive");
+              return {
+                id: node.dataset.id,
+                taskCount: node.dataset.taskCount,
+                left: node.style.left,
+                top: node.style.top,
+                width: node.style.width,
+                roles: projection.children.map((section) => section.dataset.role),
+              };
+            })
+            .sort((a, b) => a.id.localeCompare(b.id));
+        }
+        const first = JSON.stringify(snapshot());
+        controller.render();
+        controller.render();
+        const second = JSON.stringify(snapshot());
+        console.log(JSON.stringify({stable: first === second, slots: JSON.parse(second)}));
+        """,
+        _HOST_RECT,
+    )
+    assert result["stable"] is True
+    assert len(result["slots"]) == 4
+    assert {slot["taskCount"] for slot in result["slots"]} == {"4"}
+    for slot in result["slots"]:
+        assert "options" in slot["roles"]
+        assert "next_step" in slot["roles"]
+
+
+def test_phase51_cognitive_projection_css_uses_slot_density_not_geometry() -> None:
+    css = (WEB / "styles.css").read_text(encoding="utf-8")
+    assert ".workspace-object__cognitive" in css
+    assert '.workspace-object[data-task-count="4"] .workspace-object__cognitive-section[data-role="key_information"]' in css
+    assert "--task-surface-width" not in css[css.index(".workspace-object__cognitive"): css.index("@keyframes workspace-object-pulse")]
+
+
 def test_phase45_minimized_task_uses_rail_not_open_slot() -> None:
     result = _run_workspace_harness_with_dom(
         """
