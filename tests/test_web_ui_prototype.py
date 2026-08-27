@@ -233,6 +233,86 @@ def test_web_ui_response_layout_modes_position_routing_and_composer() -> None:
     assert "bottom: calc(var(--safe-gap) + 18px);" in css
 
 
+def test_web_ui_echo_workspace_point_is_clamped_against_persistent_surfaces() -> None:
+    ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
+
+    for name in (
+        "function occupiedWorkspaceRects(stage)",
+        "function safeEchoWorkspaceRect(stage, radius)",
+        "function clampEchoPointToSafeWorkspace(stage, point)",
+    ):
+        assert name in ui
+
+    occupied_block = ui[ui.index("function occupiedWorkspaceRects"):ui.index("function safeEchoWorkspaceRect")]
+    point_block = ui[ui.index("function setWorkspaceObjectEntityPoint"):ui.index("function setWorkspaceObjectFocusActive")]
+
+    assert '#workspaceObjects [data-task-surface-slot="true"]' in occupied_block
+    assert '#workspaceObjects [data-minimized-rail="true"]' in occupied_block
+    assert '#workspaceObjects [data-role="primary"]' in occupied_block
+    assert 'byId("researchWorkspace")' in occupied_block
+    assert 'researchWorkspace.classList.contains("visible")' in occupied_block
+    assert 'byId("telemetryPanel")' in occupied_block
+    assert "telemetryPanelOpen" in occupied_block
+    assert "clampEchoPointToSafeWorkspace(stage, point)" in point_block
+    assert "window.echoEntity.setCenter(safePoint.x, safePoint.y, false);" in point_block
+
+
+def test_web_ui_workspace_objects_receive_real_echo_entity_point() -> None:
+    ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
+    creation_block = ui[ui.index("window.echoWorkspaceObjects = window.EchoWorkspaceObjects.create"):ui.index("window.echoFreeWorkspace =")]
+    point_block = ui[ui.index("function getWorkspaceObjectEntityPoint"):ui.index("function moveEchoEntityToRegion")]
+
+    assert "getEntityPoint: getWorkspaceObjectEntityPoint" in creation_block
+    assert "window.echoEntity.getCenter()" in point_block
+    assert 'window.echoFreeWorkspace.getItem("echo")' in point_block
+    assert "getItem(itemId)" in ui
+
+
+def test_web_ui_echo_safe_rect_is_frontend_only_and_uses_minimal_correction() -> None:
+    ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
+    objects_js = (WEB / "echo_workspace_objects.js").read_text(encoding="utf-8")
+
+    safe_block = ui[ui.index("function safeEchoWorkspaceRect"):ui.index("function clampEchoPointToSafeWorkspace")]
+    clamp_block = ui[ui.index("function clampEchoPointToSafeWorkspace"):ui.index("const ANCHOR_SAME_SIDE_ALTERNATES")]
+
+    assert "occupiedWorkspaceRects(stage)" in safe_block
+    assert "rect.right + safeGap" in safe_block
+    assert "rect.left - safeGap" in safe_block
+    assert "const candidates = [base];" in clamp_block
+    assert "bestDistance" in clamp_block
+    assert "boxesIntersect(echoRect, rect)" in clamp_block
+    assert "safeEchoWorkspaceRect" not in objects_js
+    assert "clampEchoPointToSafeWorkspace" not in objects_js
+
+
+def test_web_ui_echo_safe_rect_covers_task_surface_research_panel_and_repeated_recompute() -> None:
+    ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
+
+    occupied_block = ui[ui.index("function occupiedWorkspaceRects"):ui.index("function safeEchoWorkspaceRect")]
+    safe_block = ui[ui.index("function safeEchoWorkspaceRect"):ui.index("function clampEchoPointToSafeWorkspace")]
+    point_block = ui[ui.index("function setWorkspaceObjectEntityPoint"):ui.index("function setWorkspaceObjectFocusActive")]
+
+    # Task Surface only and resized Task Surface: every call reads the real
+    # current DOM boxes, including task-surface slots and minimized rail.
+    assert "document.querySelectorAll(selector).forEach" in occupied_block
+    assert 'data-task-surface-slot="true"' in occupied_block
+    assert 'data-minimized-rail="true"' in occupied_block
+    assert "localRectFromElement(stage, node)" in occupied_block
+
+    # Task Surface + Research Inspector: the inspector is treated as another
+    # occupied region only while it is visibly open.
+    assert 'researchWorkspace.classList.contains("visible")' in occupied_block
+    assert "rects.push(rect)" in occupied_block
+
+    # Viewport resize / open-close stability: no previous safe rect is cached;
+    # the safe area starts from current stageSize and current occupied rects.
+    assert "const size = stageSize(stage);" in safe_block
+    assert "for (const rect of occupiedWorkspaceRects(stage))" in safe_block
+    assert "state.items" not in safe_block
+    assert "localStorage" not in safe_block
+    assert "clampEchoPointToSafeWorkspace(stage, point)" in point_block
+
+
 def test_web_ui_focus_layout_reserves_horizontal_space_for_echo() -> None:
     css = (WEB / "styles.css").read_text(encoding="utf-8")
     ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
@@ -378,6 +458,20 @@ def test_research_workspace_is_available() -> None:
     assert "conversation_cleared" in ui
 
 
+def test_research_cards_are_progressive_and_safe() -> None:
+    ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
+    css = (WEB / "styles.css").read_text(encoding="utf-8")
+
+    render_block = ui[ui.index("function renderCards(items)") : ui.index("return {", ui.index("function renderCards(items)"))]
+    assert "document.createElement(\"article\")" in render_block
+    assert "textContent" in render_block
+    assert "innerHTML" not in render_block
+    assert "research-card-detail" in render_block
+    assert "item.relevance_role || item.source_quality" in render_block
+    assert "card.dataset.expanded" in render_block
+    assert ".research-card-detail" in css
+
+
 def test_cognitive_telemetry_panel_is_available_with_real_runtime_controls() -> None:
     html = (WEB / "index.html").read_text(encoding="utf-8")
     css = (WEB / "styles.css").read_text(encoding="utf-8")
@@ -412,6 +506,15 @@ def test_cognitive_telemetry_panel_is_available_with_real_runtime_controls() -> 
     assert "execution_path" in ui
     assert "execution_provider" in ui
     assert "execution_model" in ui
+    assert 'id="telemetrySemanticExtraction"' in html
+    assert "semantic_extraction_status" in ui
+    assert "semantic_candidates_before_validation" in ui
+    assert "semantic_candidates_after_validation" in ui
+    assert "semantic_extraction_failure_reason" in ui
+    assert "semantic_extraction_batches" in ui
+    assert "semantic_extraction_latency_ms" in ui
+    assert "semantic_extraction_input_chars" in ui
+    assert "semantic_extraction_sources_used" in ui
     assert "data.configured_model_mode || data.mode" in ui
     assert "data.execution_provider || data.provider" in ui
     assert "data.execution_model || data.model" in ui
@@ -482,6 +585,7 @@ def test_cognitive_telemetry_panel_sections_keep_concerns_separate() -> None:
 
     assert "telemetryMode" in status_block
     assert "telemetrySource" in status_block
+    assert "telemetrySemanticExtraction" in status_block
     assert "telemetryFallback" in status_block
     assert "data-telemetry-mode" not in status_block
     assert "dailyBudgetUsd" not in status_block
@@ -491,6 +595,11 @@ def test_cognitive_telemetry_panel_sections_keep_concerns_separate() -> None:
     assert "data-auto-claude" in models_block
     assert "automaticClaudeStatus" in models_block
     assert "anthropicApiKey" in models_block
+    assert "WEB RESEARCH · TAVILY" in models_block
+    assert "tavilyApiKey" in models_block
+    assert "saveTavilyKey" in models_block
+    assert "removeTavilyKey" in models_block
+    assert "testTavilyKey" in models_block
     assert "resetWorkspace" not in models_block
 
     assert "recenterEcho" in workspace_block
@@ -500,6 +609,7 @@ def test_cognitive_telemetry_panel_sections_keep_concerns_separate() -> None:
 
     assert "systemVersion" in system_block
     assert "systemClaude" in system_block
+    assert "systemTavily" in system_block
     assert "systemCliOverride" in system_block
     assert "systemModelModeSource" in system_block
     assert "systemAutomaticClaudeSource" in system_block
@@ -508,10 +618,37 @@ def test_cognitive_telemetry_panel_sections_keep_concerns_separate() -> None:
     assert "openPanelSection" in ui
     assert "ArrowLeft" in ui and "ArrowRight" in ui
     assert "anthropicKeyPanel" in ui
+    assert "tavilyKeyPanel" in ui
+    assert "save_tavily_key" in ui
+    assert "remove_tavily_key" in ui
+    assert "test_tavily_connection" in ui
+    assert "tavily_key_configured" in ui
+    assert "tavily_key_source" in ui
     assert "CONFIGURED BY ENVIRONMENT" in ui
     assert "CONFIGURED SECURELY" in ui
+    assert "CONNECTION OK" in ui
     assert "window.confirm" not in ui
     assert "alert(" not in ui
+
+
+def test_tavily_settings_ui_never_renders_a_secret_value() -> None:
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
+
+    tavily_block = html[html.index('id="tavilyKeyPanel"'):html.index('data-panel-page="workspace"')]
+    update_block = ui[ui.index("function updateModelConfigState"):ui.index("function renderConfigurationError")]
+    listener_block = ui[ui.index("if (saveTavilyKey)"):ui.index("if (removeTavilyKey)")]
+
+    assert 'type="password"' in tavily_block
+    assert "tvly-" in tavily_block
+    assert "value=" not in tavily_block
+    assert "elements.tavilyKeyInput.value = \"\";" in update_block
+    assert "elements.tavilyKeyInput.hidden = !storageAvailable || tavilyConfigured;" in update_block
+    assert "elements.tavilyKeyStatus.textContent" in update_block
+    assert "keyInput.value = \"\";" in listener_block
+    assert "localStorage" not in listener_block
+    assert "tvly-test-secret" not in html
+    assert "tvly-test-secret" not in ui
 
 
 def test_cognitive_telemetry_compact_line_sits_above_input_zone() -> None:
@@ -828,6 +965,20 @@ class _FakeEngine:
         self.capacity_reports.append(payload)
 
 
+class _FailingTelemetryRuntime:
+    def request_started_payload(self) -> dict:
+        return {"state": "request_started"}
+
+    def telemetry_payload(self, telemetry: dict, *, state: str) -> dict:
+        raise RuntimeError("telemetry serialization failed")
+
+    def error_payload(self, message: str, *, provider_error_type: str) -> dict:
+        raise RuntimeError("telemetry error serialization failed")
+
+    def current_payload(self, *, state: str) -> dict:
+        return {"state": state}
+
+
 def _qt_app():
     from PySide6.QtCore import QCoreApplication
 
@@ -928,6 +1079,42 @@ def test_submit_message_reaches_idle_cleans_worker_and_delivers_progress_event()
 
     assert finished["count"] == 1
     assert "idle" in states
+    assert controller.has_active_request() is False
+
+
+def test_submit_message_reaches_idle_even_if_response_telemetry_fails() -> None:
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Resposta pronta.")
+    controller = EchoUIController(
+        engine.respond,
+        get_telemetry=lambda: {"selected_path": "RESEARCH_REQUEST", "llm_calls": 0},
+        model_runtime=_FailingTelemetryRuntime(),
+        thinking_min_ms=0,
+        speaking_duration_ms=0,
+    )
+
+    states: list[str] = []
+    responses: list[str] = []
+    finished = {"count": 0}
+    controller.stateChanged.connect(states.append)
+    controller.responseReady.connect(responses.append)
+    controller.requestFinished.connect(lambda: finished.__setitem__("count", finished["count"] + 1))
+
+    loop = QEventLoop()
+    controller.stateChanged.connect(lambda state: loop.quit() if state == "idle" else None)
+    controller.submitMessage("olá")
+    QTimer.singleShot(5000, loop.quit)
+    loop.exec()
+
+    assert responses == ["Resposta pronta."]
+    assert finished["count"] == 1
+    assert "idle" in states
+    assert controller._thread is None
+    assert controller._worker is None
     assert controller.has_active_request() is False
 
 
@@ -1499,7 +1686,8 @@ def test_workspace_echo_positioned_from_measured_primary_surface_rect() -> None:
     assert "point.x + entityRadius > hostRect.width" in place_block
 
     assert "function setWorkspaceObjectEntityPoint(point)" in ui
-    assert "window.echoEntity.setCenter(point.x, point.y, false);" in ui
+    assert "const safePoint = stage ? clampEchoPointToSafeWorkspace(stage, point) : point;" in ui
+    assert "window.echoEntity.setCenter(safePoint.x, safePoint.y, false);" in ui
 
 
 def test_workspace_tethers_hidden_during_compare_restored_after() -> None:
@@ -3644,6 +3832,55 @@ def test_phase4_workspace_open_actions_are_layout_idempotent() -> None:
         for node in result[snapshot_name]:
             assert "translate" not in node["transform"]
             assert node["id"] in result["semanticIds"]
+
+
+def test_workspace_entity_tether_anchors_to_edges_in_common_coordinates() -> None:
+    result = _run_workspace_harness_with_dom(
+        """
+        global.__mind = makeElement("div");
+        global.__mind._rect = {left: 700, top: 220, right: 860, bottom: 380, width: 160, height: 160};
+        document.getElementById = (id) => id === "mind" ? global.__mind : null;
+
+        const edgeController = EchoWorkspaceObjects.create({
+          container: containerEl,
+          tetherLayer: tetherLayerEl,
+          getEntityPoint: () => ({x: 780, y: 300}),
+          setEntityLayoutRole: () => {},
+          setEntityAnchor: () => {},
+          setEntityPoint: () => {},
+          onFocusChange: () => {},
+          submit: () => {},
+        });
+        const surface = edgeController.createObject({id: "artifact-task", type: "task_artifact", title: "Task ativa", primary: true});
+        edgeController.render();
+        const node = containerEl.children.find((child) => child.dataset && child.dataset.id === surface.id);
+        node._rect = {left: 120, top: 210, right: 420, bottom: 390, width: 300, height: 180};
+        edgeController.renderTethers();
+
+        const path = tetherLayerEl.children[0];
+        const d = path ? path.d : "";
+        const nums = d.match(/-?\\d+(?:\\.\\d+)?/g).map(Number);
+        console.log(JSON.stringify({
+          d,
+          className: path ? path.class : "",
+          finite: nums.every(Number.isFinite),
+          startX: nums[0],
+          startY: nums[1],
+          endX: nums[6],
+          endY: nums[7],
+          command: d.includes(" C "),
+        }));
+        """,
+        _HOST_RECT,
+    )
+    assert result["finite"] is True
+    assert result["command"] is True
+    assert "workspace-tether--entity" in result["className"]
+    assert 700 <= result["startX"] < 780  # Echo boundary, not center.
+    assert result["endX"] == 420  # right edge of the active surface.
+    assert 210 < result["endY"] < 390
+    assert "NaN" not in result["d"]
+    assert "Infinity" not in result["d"]
 
 
 def test_phase45_task_surface_renders_task_slots_without_child_slots() -> None:

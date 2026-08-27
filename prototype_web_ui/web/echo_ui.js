@@ -315,6 +315,7 @@
       cost: byId("telemetryCost"),
       daily: byId("telemetryDaily"),
       source: byId("telemetrySource"),
+      semanticExtraction: byId("telemetrySemanticExtraction"),
       fallback: byId("telemetryFallback"),
       fallbackRow: document.querySelector(".telemetry-fallback-row"),
       note: byId("telemetryNote"),
@@ -326,12 +327,19 @@
       saveAnthropicKey: byId("saveAnthropicKey"),
       removeAnthropicKey: byId("removeAnthropicKey"),
       testAnthropicKey: byId("testAnthropicKey"),
+      tavilyKeyPanel: byId("tavilyKeyPanel"),
+      tavilyKeyInput: byId("tavilyApiKey"),
+      tavilyKeyStatus: byId("tavilyKeyStatus"),
+      saveTavilyKey: byId("saveTavilyKey"),
+      removeTavilyKey: byId("removeTavilyKey"),
+      testTavilyKey: byId("testTavilyKey"),
       autoClaudeButtons: Array.from(document.querySelectorAll("[data-auto-claude]")),
       automaticClaudeStatus: byId("automaticClaudeStatus"),
       dailyBudgetUsd: byId("dailyBudgetUsd"),
       singleCallBudgetUsd: byId("singleCallBudgetUsd"),
       systemOllama: byId("systemOllama"),
       systemClaude: byId("systemClaude"),
+      systemTavily: byId("systemTavily"),
       systemObserver: byId("systemObserver"),
       systemCliOverride: byId("systemCliOverride"),
       systemSettingsSource: byId("systemSettingsSource"),
@@ -493,6 +501,20 @@
     if (elements.cost) elements.cost.textContent = money(data.estimated_cost_usd);
     if (elements.daily) elements.daily.textContent = `${money(data.daily_used_usd, 3)} / ${money(data.daily_budget_usd || 0, 2)}`;
     if (elements.source) elements.source.textContent = String(data.source || data.response_source || "NONE").toUpperCase();
+    if (elements.semanticExtraction) {
+      const status = String(data.semantic_extraction_status || "");
+      const calls = Number(data.semantic_extraction_calls || 0);
+      const batches = Number(data.semantic_extraction_batches || 0);
+      const latency = Number(data.semantic_extraction_latency_ms || 0);
+      const inputChars = Number(data.semantic_extraction_input_chars || 0);
+      const sourcesUsed = Number(data.semantic_extraction_sources_used || 0);
+      const before = Number(data.semantic_candidates_before_validation || 0);
+      const after = Number(data.semantic_candidates_after_validation || 0);
+      const failure = String(data.semantic_extraction_failure_reason || "");
+      elements.semanticExtraction.textContent = status
+        ? `${status.toUpperCase()} · ${calls} CALLS${batches ? ` · ${batches} BATCHES` : ""}${sourcesUsed ? ` · ${sourcesUsed} SRC` : ""}${inputChars ? ` · ${inputChars} CH` : ""}${latency ? ` · ${latency}ms` : ""} · ${before}→${after}${failure ? ` · ${failure}` : ""}`
+        : "—";
+    }
     if (elements.fallback && elements.fallbackRow) {
       const fallback = String(data.fallback_reason || "");
       elements.fallback.textContent = fallback ? humanReasonLabel(fallback).toUpperCase() : "—";
@@ -527,6 +549,8 @@
     const autoEnabled = Boolean(data.automatic_claude_enabled);
     const keyConfigured = Boolean(data.api_key_configured);
     const keySource = String(data.api_key_source || "none");
+    const tavilyConfigured = Boolean(data.tavily_key_configured);
+    const tavilySource = String(data.tavily_key_source || "none");
     const storageAvailable = Boolean(data.secret_storage_available);
     const paidCallsEnabled = Boolean(data.paid_calls_enabled);
 
@@ -568,6 +592,32 @@
       else if (keyConfigured) elements.keyStatus.textContent = "CONFIGURED SECURELY";
       else elements.keyStatus.textContent = "API key not configured.";
     }
+
+    if (elements.tavilyKeyPanel) elements.tavilyKeyPanel.hidden = false;
+    if (elements.tavilyKeyInput) {
+      elements.tavilyKeyInput.value = "";
+      elements.tavilyKeyInput.hidden = !storageAvailable || tavilyConfigured;
+      elements.tavilyKeyInput.disabled = !storageAvailable || tavilySource === "environment";
+    }
+    if (elements.saveTavilyKey) {
+      elements.saveTavilyKey.hidden = !storageAvailable || tavilyConfigured || tavilySource === "environment";
+      elements.saveTavilyKey.disabled = !storageAvailable || tavilyConfigured || tavilySource === "environment";
+    }
+    if (elements.removeTavilyKey) {
+      elements.removeTavilyKey.hidden = !storageAvailable || !tavilyConfigured || tavilySource === "environment";
+      elements.removeTavilyKey.disabled = !storageAvailable || !tavilyConfigured || tavilySource === "environment";
+    }
+    if (elements.testTavilyKey) {
+      elements.testTavilyKey.disabled = !tavilyConfigured;
+    }
+    if (elements.tavilyKeyStatus) {
+      if (data.tavily_test_status === "success") elements.tavilyKeyStatus.textContent = "CONNECTION OK";
+      else if (data.tavily_test_status) elements.tavilyKeyStatus.textContent = "CONNECTION TEST FAILED";
+      else if (tavilySource === "environment") elements.tavilyKeyStatus.textContent = "CONFIGURED BY ENVIRONMENT";
+      else if (!storageAvailable) elements.tavilyKeyStatus.textContent = "SECURE STORAGE UNAVAILABLE";
+      else if (tavilyConfigured) elements.tavilyKeyStatus.textContent = "CONFIGURED SECURELY";
+      else elements.tavilyKeyStatus.textContent = "Tavily key not configured.";
+    }
   }
 
   function renderConfigurationError(data) {
@@ -585,6 +635,7 @@
     const elements = telemetryElements();
     if (elements.systemOllama) elements.systemOllama.textContent = "AVAILABLE";
     if (elements.systemClaude) elements.systemClaude.textContent = data.api_key_configured ? "CONFIGURED" : "NOT CONFIGURED";
+    if (elements.systemTavily) elements.systemTavily.textContent = data.tavily_key_configured ? "CONFIGURED" : "NOT CONFIGURED";
     if (elements.systemObserver) elements.systemObserver.textContent = String(data.context_observer_state || "UNKNOWN").toUpperCase();
     if (elements.systemCliOverride) elements.systemCliOverride.textContent = data.mode_locked ? "YES" : "NO";
     if (elements.systemSettingsSource) elements.systemSettingsSource.textContent = String(data.settings_source || "settings.json");
@@ -932,6 +983,108 @@
     return node ? localRectFromElement(stage, node) : null;
   }
 
+  function isElementVisiblyActive(element) {
+    if (!element) return false;
+    if (element.hidden) return false;
+    if (element.classList && element.classList.contains("visible")) return true;
+    const rect = element.getBoundingClientRect ? element.getBoundingClientRect() : null;
+    return Boolean(rect && rect.width > 0 && rect.height > 0);
+  }
+
+  function occupiedWorkspaceRects(stage) {
+    if (!stage) return [];
+    const selectors = [
+      '#workspaceObjects [data-task-surface-slot="true"]',
+      '#workspaceObjects [data-minimized-rail="true"]',
+      '#workspaceObjects [data-role="primary"]',
+    ];
+    const rects = [];
+    for (const selector of selectors) {
+      document.querySelectorAll(selector).forEach((node) => {
+        const rect = localRectFromElement(stage, node);
+        if (rect && rect.width > 0 && rect.height > 0) rects.push(rect);
+      });
+    }
+    const researchWorkspace = byId("researchWorkspace");
+    if (researchWorkspace && researchWorkspace.classList.contains("visible")) {
+      const rect = localRectFromElement(stage, researchWorkspace);
+      if (rect && rect.width > 0 && rect.height > 0) rects.push(rect);
+    }
+    const telemetryPanel = byId("telemetryPanel");
+    if (telemetryPanelOpen && isElementVisiblyActive(telemetryPanel)) {
+      const rect = localRectFromElement(stage, telemetryPanel);
+      if (rect && rect.width > 0 && rect.height > 0) rects.push(rect);
+    }
+    return rects;
+  }
+
+  function safeEchoWorkspaceRect(stage, radius) {
+    const size = stageSize(stage);
+    const safeGap = cssPixelNumber(stage, "--safe-gap", 24);
+    const headerHeight = cssPixelNumber(stage, "--header-height", HEADER_SAFE_HEIGHT);
+    const inputHeight = cssPixelNumber(stage, "--input-height", 72);
+    const safe = {
+      left: safeGap,
+      top: headerHeight + safeGap,
+      right: size.width - safeGap,
+      bottom: size.height - inputHeight - safeGap,
+    };
+    for (const rect of occupiedWorkspaceRects(stage)) {
+      const overlapsVertically = rect.bottom > safe.top && rect.top < safe.bottom;
+      if (!overlapsVertically) continue;
+      if (rect.left <= safe.left + radius && rect.right > safe.left) {
+        safe.left = Math.max(safe.left, rect.right + safeGap);
+      } else if (rect.right >= safe.right - radius && rect.left < safe.right) {
+        safe.right = Math.min(safe.right, rect.left - safeGap);
+      }
+    }
+    if (safe.right - safe.left < radius * 2) {
+      return {
+        left: safeGap,
+        top: safe.top,
+        right: size.width - safeGap,
+        bottom: safe.bottom,
+      };
+    }
+    return safe;
+  }
+
+  function clampEchoPointToSafeWorkspace(stage, point) {
+    const entityDiameter = cssPixelNumber(stage, "--entity-size-actual", ECHO_ITEM_SIZE.width);
+    const radius = Math.max(70, Math.min(220, entityDiameter / 2));
+    const safe = safeEchoWorkspaceRect(stage, radius);
+    const safeGap = cssPixelNumber(stage, "--safe-gap", 24);
+    const clampX = (value) => Math.min(Math.max(value, safe.left + radius), safe.right - radius);
+    const clampY = (value) => Math.min(Math.max(value, safe.top + radius), safe.bottom - radius);
+    const base = {x: clampX(Number(point.x) || 0), y: clampY(Number(point.y) || 0)};
+    const occupied = occupiedWorkspaceRects(stage);
+    if (!occupied.some((rect) => boxesIntersect(echoRectForPoint(base, radius), rect))) return base;
+
+    const candidates = [base];
+    for (const rect of occupied) {
+      candidates.push(
+        {x: clampX(rect.right + radius + safeGap), y: base.y},
+        {x: clampX(rect.left - radius - safeGap), y: base.y},
+        {x: base.x, y: clampY(rect.bottom + radius + safeGap)},
+        {x: base.x, y: clampY(rect.top - radius - safeGap)}
+      );
+    }
+    let best = base;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (const candidate of candidates) {
+      const echoRect = echoRectForPoint(candidate, radius);
+      if (occupied.some((rect) => boxesIntersect(echoRect, rect))) continue;
+      const dx = candidate.x - point.x;
+      const dy = candidate.y - point.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      if (distance < bestDistance) {
+        best = candidate;
+        bestDistance = distance;
+      }
+    }
+    return best;
+  }
+
   // Section 13: voice intent ("desloca-te para a esquerda") is a
   // PREFERENCE, geometry safety against the primary WorkspaceObject
   // surface is a hard RESTRICTION -- when the exact requested zone is
@@ -958,10 +1111,11 @@
 
     const candidates = ANCHOR_SAME_SIDE_ALTERNATES[requestedAnchor] || [requestedAnchor, "center"];
     for (const candidate of candidates) {
-      const point = zones.echo[candidate] || zones.echo.center;
+      const point = clampEchoPointToSafeWorkspace(stage, zones.echo[candidate] || zones.echo.center);
       const echoRect = echoRectForPoint(point, entityRadius);
       if (panelRect && boxesIntersect(echoRect, panelRect)) continue;
       if (surfaceRect && boxesIntersect(echoRect, surfaceRect)) continue;
+      if (occupiedWorkspaceRects(stage).some((rect) => boxesIntersect(echoRect, rect))) continue;
       return {anchor: candidate, point};
     }
     // Nothing in the same side is free -- fall back to center, the same
@@ -1453,6 +1607,10 @@
       getInitialTelemetryPanelOpen() {
         return Boolean(state.telemetryPanelOpen);
       },
+      getItem(itemId) {
+        const item = state.items[itemId];
+        return item ? cloneItem(item) : null;
+      },
       items: state.items
     };
   }
@@ -1841,7 +1999,20 @@
     if (!point || !window.echoEntity || typeof window.echoEntity.setCenter !== "function") return;
     const stage = document.querySelector(".stage");
     if (stage) stage.dataset.entityAnchor = "workspace-proximity";
-    window.echoEntity.setCenter(point.x, point.y, false);
+    const safePoint = stage ? clampEchoPointToSafeWorkspace(stage, point) : point;
+    window.echoEntity.setCenter(safePoint.x, safePoint.y, false);
+  }
+
+  function getWorkspaceObjectEntityPoint() {
+    if (window.echoEntity && typeof window.echoEntity.getCenter === "function") {
+      const point = window.echoEntity.getCenter();
+      if (point && Number.isFinite(point.x) && Number.isFinite(point.y)) return point;
+    }
+    if (window.echoFreeWorkspace && typeof window.echoFreeWorkspace.getItem === "function") {
+      const item = window.echoFreeWorkspace.getItem("echo");
+      if (item && Number.isFinite(item.x) && Number.isFinite(item.y)) return {x: item.x, y: item.y};
+    }
+    return null;
   }
 
   // Passo 3.3: moves Echo to a named semantic region ("right"/"left"/
@@ -1908,13 +2079,33 @@
       for (const item of safeItems) {
         const card = document.createElement("article");
         card.className = "research-card";
+        if (item.status) card.dataset.researchStatus = String(item.status);
+        if (item.id) card.dataset.sourceId = String(item.id);
         const title = document.createElement("strong");
         title.textContent = String(item.title || "Resultado");
         const snippet = document.createElement("p");
-        snippet.textContent = String(item.snippet || item.body || "");
+        const relevance = item.relevance_role || item.source_quality || item.kind || "fonte";
+        const domain = item.domain || item.source || "";
+        snippet.textContent = String(domain ? `${relevance} · ${domain}` : relevance);
         const source = document.createElement("span");
-        source.textContent = String(item.source || item.url || item.kind || "fonte");
+        source.textContent = String(item.url || item.source || item.kind || "fonte");
         card.append(title, snippet, source);
+        const detail = String(item.snippet || item.body || "").trim();
+        if (detail) {
+          const detailsButton = document.createElement("button");
+          detailsButton.type = "button";
+          detailsButton.className = "research-card-detail";
+          detailsButton.textContent = "Detalhes";
+          detailsButton.addEventListener("click", () => {
+            const expanded = card.dataset.expanded === "true";
+            card.dataset.expanded = expanded ? "false" : "true";
+            snippet.textContent = expanded
+              ? String(domain ? `${relevance} · ${domain}` : relevance)
+              : detail;
+            detailsButton.textContent = expanded ? "Detalhes" : "Ocultar";
+          });
+          card.append(detailsButton);
+        }
         results.append(card);
       }
     }
@@ -2167,6 +2358,9 @@
     const saveAnthropicKey = byId("saveAnthropicKey");
     const removeAnthropicKey = byId("removeAnthropicKey");
     const testAnthropicKey = byId("testAnthropicKey");
+    const saveTavilyKey = byId("saveTavilyKey");
+    const removeTavilyKey = byId("removeTavilyKey");
+    const testTavilyKey = byId("testTavilyKey");
 
     if (form) {
       form.addEventListener("submit", (event) => {
@@ -2310,6 +2504,24 @@
       testAnthropicKey.addEventListener("click", () => executeSystemCommand("test_anthropic_connection"));
     }
 
+    if (saveTavilyKey) {
+      saveTavilyKey.addEventListener("click", () => {
+        const keyInput = byId("tavilyApiKey");
+        executeSystemCommand("save_tavily_key", {api_key: keyInput ? keyInput.value : ""}, (payload) => {
+          if (keyInput) keyInput.value = "";
+          applyRealTelemetry(payload);
+        });
+      });
+    }
+
+    if (removeTavilyKey) {
+      removeTavilyKey.addEventListener("click", () => executeSystemCommand("remove_tavily_key"));
+    }
+
+    if (testTavilyKey) {
+      testTavilyKey.addEventListener("click", () => executeSystemCommand("test_tavily_connection"));
+    }
+
     document.addEventListener("click", (event) => {
       const target = event.target;
       if (!telemetryPanelOpen) return;
@@ -2340,9 +2552,14 @@
       }
       if (event.key === "Escape" && telemetryPanelOpen) {
         event.preventDefault();
-        const keyPanel = byId("anthropicKeyPanel");
-        if (keyPanel && !keyPanel.hidden) {
-          keyPanel.hidden = true;
+        const anthropicKeyPanel = byId("anthropicKeyPanel");
+        const tavilyKeyPanel = byId("tavilyKeyPanel");
+        if (anthropicKeyPanel && !anthropicKeyPanel.hidden) {
+          anthropicKeyPanel.hidden = true;
+          return;
+        }
+        if (tavilyKeyPanel && !tavilyKeyPanel.hidden) {
+          tavilyKeyPanel.hidden = true;
           return;
         }
         setTelemetryPanel(false);
@@ -2358,6 +2575,7 @@
     window.echoEntity = new window.EchoEntity(byId("mind"));
     window.echoWorkspace = createWorkspaceController();
     window.echoWorkspaceObjects = window.EchoWorkspaceObjects.create({
+      getEntityPoint: getWorkspaceObjectEntityPoint,
       setEntityAnchor: setWorkspaceObjectEntityAnchor,
       setEntityPoint: setWorkspaceObjectEntityPoint,
       onFocusChange: setWorkspaceObjectFocusActive,

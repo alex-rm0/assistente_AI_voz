@@ -13,10 +13,13 @@ from assistant.secret_storage import (
     ANTHROPIC_SECRET_NAME,
     NullSecretStorage,
     SecretStorage,
+    TAVILY_SECRET_NAME,
     resolve_anthropic_api_key,
+    resolve_tavily_api_key,
     sanitize_secret_error,
 )
 from assistant.system_commands import SystemCommand, parse_system_command
+from assistant.tavily_research import TavilyResearchConfig, TavilyResearchProvider
 
 
 SAFE_USER_SETTING_KEYS = {
@@ -253,6 +256,15 @@ class ModelRuntimeBridge:
                 "state": state,
                 "selected_path": str(telemetry.get("selected_path") or ""),
                 "response_source": str(telemetry.get("response_source") or ""),
+                "semantic_extraction_calls": int(telemetry.get("semantic_extraction_calls") or 0),
+                "semantic_extraction_status": str(telemetry.get("semantic_extraction_status") or ""),
+                "semantic_candidates_before_validation": int(telemetry.get("semantic_candidates_before_validation") or 0),
+                "semantic_candidates_after_validation": int(telemetry.get("semantic_candidates_after_validation") or 0),
+                "semantic_extraction_failure_reason": str(telemetry.get("semantic_extraction_failure_reason") or ""),
+                "semantic_extraction_batches": int(telemetry.get("semantic_extraction_batches") or 0),
+                "semantic_extraction_latency_ms": int(telemetry.get("semantic_extraction_latency_ms") or 0),
+                "semantic_extraction_input_chars": int(telemetry.get("semantic_extraction_input_chars") or 0),
+                "semantic_extraction_sources_used": int(telemetry.get("semantic_extraction_sources_used") or 0),
                 "provider_error_type": str(telemetry.get("provider_error_type") or ""),
                 "configuration_error": str(telemetry.get("configuration_error") or ""),
                 "settings_source": self.settings_source,
@@ -288,6 +300,12 @@ class ModelRuntimeBridge:
             return self.remove_anthropic_key()
         if intent == "test_anthropic_connection":
             return self.test_anthropic_connection()
+        if intent == "save_tavily_key":
+            return self.save_tavily_key(str(params.get("api_key") or ""))
+        if intent == "remove_tavily_key":
+            return self.remove_tavily_key()
+        if intent == "test_tavily_connection":
+            return self.test_tavily_connection()
         return self.error_payload("Comando de sistema desconhecido.", provider_error_type="unknown_system_command")
 
     def system_status_answer(self, user_message: str) -> str | None:
@@ -352,6 +370,49 @@ class ModelRuntimeBridge:
             note="Configuração pronta. O teste real de ligação não foi executado nesta validação.",
         )
 
+    def save_tavily_key(self, value: str) -> dict[str, Any]:
+        clean = str(value or "").strip()
+        if not clean:
+            return self.error_payload("TAVILY API KEY NOT CONFIGURED", provider_error_type="missing_tavily_api_key")
+        if not self._secret_storage_available():
+            return self.error_payload("SECURE STORAGE UNAVAILABLE", provider_error_type="secret_storage_unavailable")
+        try:
+            self.secret_storage.set_secret(TAVILY_SECRET_NAME, clean)
+        except Exception as exc:
+            return self.error_payload(sanitize_secret_error(exc), provider_error_type="secret_storage_unavailable")
+        return self.current_payload(state="configuration_changed", note="Tavily configurada.")
+
+    def remove_tavily_key(self) -> dict[str, Any]:
+        if self._tavily_key_source() == "environment":
+            return self.error_payload("A chave Tavily vem do ambiente e não pode ser removida pela interface.", provider_error_type="environment_key")
+        if not self._secret_storage_available():
+            return self.error_payload("SECURE STORAGE UNAVAILABLE", provider_error_type="secret_storage_unavailable")
+        self.secret_storage.delete_secret(TAVILY_SECRET_NAME)
+        return self.current_payload(state="configuration_changed", note="Chave Tavily removida.")
+
+    def test_tavily_connection(self) -> dict[str, Any]:
+        value, source = resolve_tavily_api_key(self.env, self.secret_storage)
+        if not value:
+            return self.error_payload("TAVILY API KEY NOT CONFIGURED", provider_error_type="missing_tavily_api_key")
+        provider = TavilyResearchProvider(
+            api_key_getter=lambda: (value, source),
+            config=TavilyResearchConfig(max_results=1, timeout_seconds=8.0),
+        )
+        try:
+            results, status, reason = provider.search_with_status("OpenAI official website")
+        except Exception as exc:
+            payload = self.error_payload(sanitize_secret_error(exc), provider_error_type="tavily_connection_failed")
+            payload["tavily_test_status"] = "failed"
+            return payload
+        if status == "completed" and results:
+            payload = self.current_payload(state="configuration_status", note="Tavily configurada e ligação testada.")
+            payload["tavily_test_status"] = "success"
+            return payload
+        payload = self.error_payload("Não consegui testar a ligação Tavily.", provider_error_type=_tavily_provider_error_type(reason or status))
+        payload["tavily_test_status"] = status
+        payload["tavily_fallback_reason"] = sanitize_secret_error(reason or status)
+        return payload
+
     def set_mode(self, mode: str) -> dict[str, Any]:
         clean = _safe_mode(mode)
         if not clean:
@@ -406,6 +467,10 @@ class ModelRuntimeBridge:
         value, _source = resolve_anthropic_api_key(self.env, self.secret_storage)
         return value or None
 
+    def get_tavily_api_key(self) -> str | None:
+        value, _source = resolve_tavily_api_key(self.env, self.secret_storage)
+        return value or None
+
     def _mode(self) -> str:
         if self.router is None:
             return "local"
@@ -452,6 +517,8 @@ class ModelRuntimeBridge:
         payload["automatic_claude_enabled_source"] = self.automatic_claude_enabled_source
         payload["api_key_configured"] = self._anthropic_key_configured()
         payload["api_key_source"] = self._anthropic_key_source()
+        payload["tavily_key_configured"] = self._tavily_key_configured()
+        payload["tavily_key_source"] = self._tavily_key_source()
         payload["secret_storage_available"] = self._secret_storage_available()
         payload["paid_calls_enabled"] = self._paid_calls_enabled()
         payload.setdefault("configuration_error", "")
@@ -470,6 +537,13 @@ class ModelRuntimeBridge:
 
     def _anthropic_key_source(self) -> str:
         _value, source = resolve_anthropic_api_key(self.env, self.secret_storage)
+        return source
+
+    def _tavily_key_configured(self) -> bool:
+        return self._tavily_key_source() != "none"
+
+    def _tavily_key_source(self) -> str:
+        _value, source = resolve_tavily_api_key(self.env, self.secret_storage)
         return source
 
     def _secret_storage_available(self) -> bool:
@@ -613,6 +687,17 @@ def _provider_for_local_path(selected_path: str, provider: str) -> str:
     if "TOOL" in path or "FAST" in path or "DOCUMENT" in path:
         return "local_tool"
     return provider or "local"
+
+
+def _tavily_provider_error_type(reason: str) -> str:
+    clean = str(reason or "").strip().lower()
+    if clean in {"auth_error", "not_configured"}:
+        return "tavily_auth_error"
+    if clean == "timeout":
+        return "tavily_timeout"
+    if clean in {"network_error", "rate_limited"}:
+        return f"tavily_{clean}"
+    return "tavily_connection_failed"
 
 
 def _normalize(text: str) -> str:

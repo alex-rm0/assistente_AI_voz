@@ -61,6 +61,43 @@ def test_mixed_sentence_extracts_multiple_entity_facts_and_preferences(tmp_path:
     assert ollama.calls == []
 
 
+def test_priority_statement_becomes_semantic_preference_without_generic_request(tmp_path: Path) -> None:
+    engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
+
+    engine.respond("vamos comparar Samsung Galaxy S24 e iPhone 15")
+    response = engine.respond("a câmara é a parte mais importante para mim")
+    task = engine._work_session.active_task
+    assert task is not None
+    entries = task_knowledge(engine._work_session, task.id)
+    view = cognitive_task_view_model(engine._work_session, task)
+    view_text = str(view)
+
+    assert any(entry.kind == "preference" and entry.predicate == "camera_priority" and entry.value == "high" for entry in entries)
+    assert task.requested_outputs == []
+    assert "a câmara é a parte mais importante para mim" not in view_text
+    assert "a câmara pesa mais na decisão" in view_text
+    assert "câmara" in response
+    assert ollama.calls == []
+
+
+def test_generic_relative_priority_extraction_for_multiple_domains(tmp_path: Path) -> None:
+    engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
+
+    engine.respond("quero escolher entre Alpha, Beta e Gamma")
+    engine.respond("preço importa, mas menos do que autonomia")
+    engine.respond("suporte é o mais importante")
+    engine.respond("para mim a localização pesa mais")
+    task = engine._work_session.active_task
+    assert task is not None
+    entries = task_knowledge(engine._work_session, task.id)
+
+    assert any(entry.predicate == "price_priority" and entry.value == "low" for entry in entries)
+    assert any(entry.predicate == "battery_priority" and entry.value == "high" for entry in entries)
+    assert any(entry.predicate == "support_priority" and entry.value == "high" for entry in entries)
+    assert any(entry.predicate == "location_priority" and entry.value == "high" for entry in entries)
+    assert ollama.calls == []
+
+
 def test_real_phone_wording_resolves_iphone_and_updates_budget(tmp_path: Path) -> None:
     engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
 
@@ -193,6 +230,29 @@ def test_travel_updates_duration_and_known_query_does_not_pollute_notes(tmp_path
     assert "1200" in response
     assert "o que já sabes" not in "; ".join(task.collected_facts)
     assert ollama.calls == []
+
+
+def test_travel_origin_and_destination_roles_stay_separate(tmp_path: Path) -> None:
+    engine, _llm, ollama, _anthropic = make_engine(tmp_path, mode="local")
+
+    engine.respond("quero férias de 7 dias a partir do Porto")
+    origin_task = engine._work_session.active_task
+    assert origin_task is not None
+    origin_entries = task_knowledge(engine._work_session, origin_task.id)
+
+    assert any(entry.subject == "trip" and entry.predicate == "origin" and entry.value == "Porto" for entry in origin_entries)
+    assert not any(entry.subject == "trip" and entry.predicate == "destination" and entry.value == "Porto" for entry in origin_entries)
+
+    engine2, _llm2, ollama2, _anthropic2 = make_engine(tmp_path / "destination", mode="local")
+    engine2.respond("vou para o Porto de 10 a 15 de outubro")
+    destination_task = engine2._work_session.active_task
+    assert destination_task is not None
+    destination_entries = task_knowledge(engine2._work_session, destination_task.id)
+
+    assert any(entry.subject == "trip" and entry.predicate == "destination" and entry.value == "Porto" for entry in destination_entries)
+    assert not any(entry.subject == "trip" and entry.predicate == "origin" and entry.value == "Porto" for entry in destination_entries)
+    assert ollama.calls == []
+    assert ollama2.calls == []
 
 
 def test_travel_dialogue_reflects_updated_state_and_does_not_repeat_answered_questions(tmp_path: Path) -> None:

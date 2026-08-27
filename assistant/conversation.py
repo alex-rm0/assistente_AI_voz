@@ -15,6 +15,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from assistant.agent import Agent, AgentContext, system_state_tool_intent
+from assistant.addressable_content import (
+    build_addressable_content,
+    detect_content_operation,
+    present_content,
+    resolve_content_target,
+    source_url_for_target,
+)
 from assistant.briefing import get_last_active_project, summarize_yesterday
 from assistant.cognition.context_builder import ContextBuilder
 from assistant.cognition.executive_function import CognitiveStrategy, ExecutiveFunction
@@ -83,8 +90,11 @@ from assistant.task_research import (
     build_research_request,
     exclude_research_source,
     is_task_research_intent,
+    OllamaSemanticExtractor,
     research_sources_response,
+    resolve_research_source,
     run_task_research,
+    SemanticExtractor,
 )
 from assistant.memory_recall import (
     build_memory_retrieval,
@@ -336,6 +346,22 @@ class WorkSession:
     preferences: dict[str, object] = field(default_factory=dict)
     capacity: SpacePressureState | None = None
     recent_references: list[object] = field(default_factory=list)
+    content_focus: dict[str, object] = field(default_factory=dict)
+
+
+def _local_ollama_semantic_extractor(llm) -> SemanticExtractor | None:
+    if not callable(getattr(llm, "chat", None)):
+        return None
+    if bool(getattr(llm, "supports_local_semantic_extraction", False)):
+        return OllamaSemanticExtractor(llm)
+    provider_name = str(getattr(llm, "provider_name", "") or getattr(llm, "provider", "") or "").lower()
+    if provider_name == "ollama":
+        return OllamaSemanticExtractor(llm)
+    if llm.__class__.__name__ != "OllamaClient":
+        return None
+    if llm.__class__.__module__ != "assistant.llm":
+        return None
+    return OllamaSemanticExtractor(llm)
 
 
 class AssistantEngine:
@@ -377,6 +403,7 @@ class AssistantEngine:
         voice_critic_llm: OllamaClient | None = None,
         model_runtime=None,
         now_provider=None,
+        semantic_extractor: SemanticExtractor | None = None,
     ) -> None:
         self.llm = llm
         self.memory = memory
@@ -385,6 +412,19 @@ class AssistantEngine:
         self.response_composer = ResponseComposer(
             llm,
             voice_critic=VoiceCritic(voice_critic_llm) if voice_critic_llm is not None else None,
+        )
+        self.semantic_extractor = semantic_extractor or _local_ollama_semantic_extractor(llm)
+        extractor_llm = getattr(self.semantic_extractor, "llm", None)
+        print(
+            "[SEMEX] SEMEX_CONFIGURED",
+            f"configured={self.semantic_extractor is not None}",
+            f"response_llm={type(llm).__name__}",
+            f"response_provider_name={getattr(llm, 'provider_name', '')}",
+            f"response_supports_local_semantic_extraction={bool(getattr(llm, 'supports_local_semantic_extraction', False))}",
+            f"extractor={type(self.semantic_extractor).__name__ if self.semantic_extractor is not None else 'None'}",
+            f"extractor_llm={type(extractor_llm).__name__ if extractor_llm is not None else 'None'}",
+            f"extractor_provider_name={getattr(extractor_llm, 'provider_name', '') if extractor_llm is not None else ''}",
+            f"extractor_uses_routed_llm={type(extractor_llm).__name__ == 'RoutedLLM'}",
         )
         self._last_response_blocked = False
         self._last_selected_path = ""
@@ -793,6 +833,37 @@ class AssistantEngine:
             )
             self._perf_log("resposta total", request_started_at, time.perf_counter())
             return pending_intent_response
+
+        if self._active_task_context is not None:
+            content_response = self._try_content_operation(user_message)
+            if content_response is not None:
+                content_response = self._complete_turn(
+                    user_message=user_message,
+                    response=content_response,
+                    source="CONTENT_OPERATION",
+                    remember=True,
+                    technical=True,
+                    selected_path="CONTENT_OPERATION",
+                    tools_used=self._last_fast_tools_used,
+                    tool_confirmation=self.agent.has_pending_confirmation(),
+                )
+                self._perf_log("resposta total", request_started_at, time.perf_counter())
+                return content_response
+
+            source_open_response = self._try_open_research_source(user_message, self._active_task_context)
+            if source_open_response is not None:
+                source_open_response = self._complete_turn(
+                    user_message=user_message,
+                    response=source_open_response,
+                    source="RESEARCH_REQUEST",
+                    remember=True,
+                    technical=True,
+                    selected_path="RESEARCH_REQUEST",
+                    tools_used=self._last_fast_tools_used,
+                    tool_confirmation=self.agent.has_pending_confirmation(),
+                )
+                self._perf_log("resposta total", request_started_at, time.perf_counter())
+                return source_open_response
 
         compound_workspace_response = self._try_compound_workspace_command(user_message)
         if compound_workspace_response is not None:
@@ -2039,8 +2110,24 @@ class AssistantEngine:
                 )
                 return request.plan_text + " Ainda não tenho uma ferramenta de pesquisa ligada."
 
-            run = run_task_research(self._work_session, task, request, task_research_tool)
+            run = run_task_research(
+                self._work_session,
+                task,
+                request,
+                task_research_tool,
+                semantic_extractor=self.semantic_extractor,
+            )
             self._last_fast_tools_used = (task_research_tool.name,)
+            if self._turn_trace is not None:
+                self._turn_trace["semantic_extraction_calls"] = run.semantic_extraction_calls
+                self._turn_trace["semantic_extraction_status"] = run.semantic_extraction_status
+                self._turn_trace["semantic_candidates_before_validation"] = run.semantic_candidates_before_validation
+                self._turn_trace["semantic_candidates_after_validation"] = run.semantic_candidates_after_validation
+                self._turn_trace["semantic_extraction_failure_reason"] = run.semantic_extraction_failure_reason
+                self._turn_trace["semantic_extraction_batches"] = run.semantic_extraction_batches
+                self._turn_trace["semantic_extraction_latency_ms"] = run.semantic_extraction_latency_ms
+                self._turn_trace["semantic_extraction_input_chars"] = run.semantic_extraction_input_chars
+                self._turn_trace["semantic_extraction_sources_used"] = run.semantic_extraction_sources_used
             self._update_task_artifact_ui(task)
             _debug_print("ECHO_DEBUG_UI", "research_tool_available=True")
             _debug_print("ECHO_DEBUG_UI", "research_tool_called=True")
@@ -2078,10 +2165,15 @@ class AssistantEngine:
             self._active_operation_id = ""
             self._active_operation_ttl = 0
             if self._turn_trace is not None:
+                providers = _research_providers_from_results(run.raw_results)
+                fallback_reasons = _research_fallback_reasons_from_results(run.raw_results)
                 self._turn_trace["research_task_id"] = task.id
                 self._turn_trace["research_request_id"] = request.id
                 self._turn_trace["research_plan"] = request.plan_text
                 self._turn_trace["research_query_plan"] = list(request.query_plan)
+                self._turn_trace["research_provider"] = providers[0] if providers else ""
+                self._turn_trace["research_providers"] = providers
+                self._turn_trace["research_fallback_reason"] = fallback_reasons[0] if fallback_reasons else ""
                 self._turn_trace["research_tool_available"] = True
                 self._turn_trace["research_tool_called"] = True
                 self._turn_trace["research_result_count"] = len(run.ingested_entries)
@@ -2151,6 +2243,156 @@ class AssistantEngine:
         self._active_operation_id = ""
         self._active_operation_ttl = 0
         return result
+
+    def _try_content_operation(self, user_message: str) -> str | None:
+        task = self._active_task_context
+        if task is None or task.status in ("completed", "cancelled"):
+            return None
+        content_focus = self._work_session.content_focus
+        previous_target_id = str(content_focus.get("target_id") or "")
+        operation = detect_content_operation(user_message, has_previous_target=bool(previous_target_id))
+        if operation is None:
+            return None
+
+        targets = build_addressable_content(self._work_session, task)
+        resolved = resolve_content_target(
+            targets,
+            operation,
+            user_message,
+            previous_target_id=previous_target_id,
+        )
+        if resolved.ambiguous:
+            labels = [candidate.title for candidate in resolved.candidates if candidate.title]
+            if self._turn_trace is not None:
+                self._turn_trace["content_operation_detected"] = True
+                self._turn_trace["content_operation"] = operation.kind
+                self._turn_trace["content_target_resolution"] = "ambiguous"
+                self._turn_trace["content_candidate_count"] = len(labels)
+                self._turn_trace["response_grounded"] = True
+                self._turn_trace["grounding_sources"] = ["WORK_SESSION"]
+            if labels:
+                return "Tenho mais do que uma hipótese. Estás a falar de " + " ou ".join(labels[:3]) + "?"
+            return "Tenho mais do que uma hipótese. Diz-me qual queres que use."
+        if resolved.target is None:
+            if self._turn_trace is not None:
+                self._turn_trace["content_operation_detected"] = True
+                self._turn_trace["content_operation"] = operation.kind
+                self._turn_trace["content_target_resolution"] = resolved.reason
+                self._turn_trace["content_target_type"] = operation.target_type
+                self._turn_trace["response_grounded"] = True
+                self._turn_trace["grounding_sources"] = ["WORK_SESSION"]
+            if operation.target_type == "source" and operation.target_hint:
+                display_hint = _display_source_hint(user_message, operation.target_hint)
+                return f"Não tenho uma fonte da {display_hint} nesta pesquisa."
+            return None
+
+        target = resolved.target
+        if operation.kind == "open":
+            url = source_url_for_target(target)
+            if not url:
+                return "Consigo identificar o conteúdo, mas não tenho um URL seguro para abrir."
+            if self.tools.get("open_url") is None:
+                return "Tenho a fonte, mas a ferramenta de abrir URL não está disponível."
+            result = self.agent.ask_tool_confirmation(
+                tool_name="open_url",
+                arguments={"url": url},
+                reason="abrir fonte de pesquisa confirmada",
+                context=self._fast_agent_context(),
+            )
+            self._remember_tools_used(result.tools_used)
+            self._last_fast_tools_used = result.tools_used
+            self._record_agent_debug_trace(result.debug_trace)
+            content_focus.update(
+                {
+                    "target_id": target.id,
+                    "target_type": target.type,
+                    "task_id": target.task_id,
+                    "operation": operation.kind,
+                }
+            )
+            if self._turn_trace is not None:
+                self._turn_trace["content_operation_detected"] = True
+                self._turn_trace["content_operation"] = operation.kind
+                self._turn_trace["content_target_id"] = target.id
+                self._turn_trace["content_target_type"] = target.type
+                self._turn_trace["content_target_resolution"] = resolved.reason
+                self._turn_trace["research_source_open_requested"] = True
+                self._turn_trace["research_source_id"] = target.id
+                self._turn_trace["research_source_url"] = url
+                self._turn_trace["research_task_id"] = task.id
+                self._turn_trace["response_grounded"] = True
+                self._turn_trace["grounding_sources"] = ["TASK_KNOWLEDGE", "WEB_SOURCE"]
+            return result.response
+
+        presented = present_content(self._work_session, task, target, operation)
+        if presented.ui_event:
+            event = presented.ui_event
+            self._queue_ui_event(str(event.get("type") or "content_presented"), dict(event.get("payload") or {}))
+        content_focus.update(
+            {
+                "target_id": presented.continuation_token or target.id,
+                "target_type": target.type,
+                "task_id": target.task_id,
+                "operation": operation.kind,
+            }
+        )
+        if self._turn_trace is not None:
+            self._turn_trace["content_operation_detected"] = True
+            self._turn_trace["content_operation"] = operation.kind
+            self._turn_trace["content_target_id"] = target.id
+            self._turn_trace["content_target_type"] = target.type
+            self._turn_trace["content_target_resolution"] = resolved.reason
+            self._turn_trace["content_presentation_mode"] = presented.presentation_mode
+            self._turn_trace["response_grounded"] = True
+            self._turn_trace["grounding_sources"] = list(presented.provenance or ("TASK_KNOWLEDGE",))
+            if target.type in {"source", "source_list", "research_synthesis"}:
+                self._turn_trace["research_sources_requested"] = target.type == "source_list"
+                self._turn_trace["research_task_id"] = task.id
+        return presented.text
+
+    def _try_open_research_source(self, user_message: str, task) -> str | None:
+        normalized = _normalize_text(user_message)
+        if not contains_any_phrase(
+            normalized,
+            (
+                "abre essa fonte",
+                "abrir essa fonte",
+                "abre esta fonte",
+                "abrir esta fonte",
+                "abre a fonte",
+                "abrir a fonte",
+                "abre esse artigo",
+                "abrir esse artigo",
+                "abre o artigo",
+                "abrir o artigo",
+                "abre o link",
+                "abrir o link",
+            ),
+        ):
+            return None
+        source = resolve_research_source(self._work_session, task, user_message)
+        url = str((source or {}).get("url") or "")
+        if not url:
+            return "Tenho a referência da pesquisa, mas não encontro um URL seguro para abrir."
+        if self.tools.get("open_url") is None:
+            return "Tenho a fonte, mas a ferramenta de abrir URL não está disponível."
+        result = self.agent.ask_tool_confirmation(
+            tool_name="open_url",
+            arguments={"url": url},
+            reason="abrir fonte de pesquisa confirmada",
+            context=self._fast_agent_context(),
+        )
+        self._remember_tools_used(result.tools_used)
+        self._last_fast_tools_used = result.tools_used
+        self._record_agent_debug_trace(result.debug_trace)
+        if self._turn_trace is not None:
+            self._turn_trace["research_source_open_requested"] = True
+            self._turn_trace["research_source_id"] = str(source.get("id") or "")
+            self._turn_trace["research_source_url"] = url
+            self._turn_trace["research_task_id"] = task.id
+            self._turn_trace["response_grounded"] = True
+            self._turn_trace["grounding_sources"] = ["TASK_KNOWLEDGE", "WEB_SOURCE"]
+        return result.response
 
     def _try_system_state_tool_query(self, user_message: str) -> str | None:
         """Falha 1 of the ferro/erro follow-up: tool_intent_supported_by_current_message
@@ -6374,6 +6616,7 @@ class AssistantEngine:
     ) -> None:
         if self._turn_trace is None:
             return
+        print("[LIFECYCLE]", "ROUTING_DONE", f"selected_path={selected_path}", f"response_source={response_source}")
         llm_start = int(self._turn_trace.get("llm_start") or 0)
         llm_calls = max(0, self._llm_chat_count() - llm_start)
         sources_start = int(self._turn_trace.get("llm_sources_start") or 0)
@@ -6529,13 +6772,35 @@ class AssistantEngine:
             "research_request_id": self._turn_trace.get("research_request_id") or "",
             "research_plan": self._turn_trace.get("research_plan") or "",
             "research_query_plan": self._turn_trace.get("research_query_plan") or [],
+            "research_provider": self._turn_trace.get("research_provider") or "",
+            "research_providers": self._turn_trace.get("research_providers") or [],
+            "research_fallback_reason": self._turn_trace.get("research_fallback_reason") or "",
             "research_status": self._turn_trace.get("research_status") or "",
             "research_result_count": int(self._turn_trace.get("research_result_count") or 0),
+            "semantic_extraction_calls": int(self._turn_trace.get("semantic_extraction_calls") or 0),
+            "semantic_extraction_status": self._turn_trace.get("semantic_extraction_status") or "",
+            "semantic_candidates_before_validation": int(self._turn_trace.get("semantic_candidates_before_validation") or 0),
+            "semantic_candidates_after_validation": int(self._turn_trace.get("semantic_candidates_after_validation") or 0),
+            "semantic_extraction_failure_reason": self._turn_trace.get("semantic_extraction_failure_reason") or "",
+            "semantic_extraction_batches": int(self._turn_trace.get("semantic_extraction_batches") or 0),
+            "semantic_extraction_latency_ms": int(self._turn_trace.get("semantic_extraction_latency_ms") or 0),
+            "semantic_extraction_input_chars": int(self._turn_trace.get("semantic_extraction_input_chars") or 0),
+            "semantic_extraction_sources_used": int(self._turn_trace.get("semantic_extraction_sources_used") or 0),
             "research_tool_available": self._turn_trace.get("research_tool_available"),
             "research_tool_called": self._turn_trace.get("research_tool_called"),
             "research_needs_clarification": bool(self._turn_trace.get("research_needs_clarification")),
             "research_sources_requested": bool(self._turn_trace.get("research_sources_requested")),
             "research_source_excluded": bool(self._turn_trace.get("research_source_excluded")),
+            "research_source_open_requested": bool(self._turn_trace.get("research_source_open_requested")),
+            "research_source_id": self._turn_trace.get("research_source_id") or "",
+            "research_source_url": self._turn_trace.get("research_source_url") or "",
+            "content_operation_detected": bool(self._turn_trace.get("content_operation_detected")),
+            "content_operation": self._turn_trace.get("content_operation") or "",
+            "content_target_id": self._turn_trace.get("content_target_id") or "",
+            "content_target_type": self._turn_trace.get("content_target_type") or "",
+            "content_target_resolution": self._turn_trace.get("content_target_resolution") or "",
+            "content_candidate_count": int(self._turn_trace.get("content_candidate_count") or 0),
+            "content_presentation_mode": self._turn_trace.get("content_presentation_mode") or "",
             # Passo 3.2 (section 18): scene_before/after and target
             # resolution/confidence are deliberately NOT tracked here -- the
             # WorkspaceScene lives entirely client-side (echo_workspace_
@@ -11763,6 +12028,43 @@ def _extract_research_query(message: str) -> str:
     return ""
 
 
+def _research_providers_from_results(results: list[dict[str, Any]]) -> list[str]:
+    providers: list[str] = []
+    seen: set[str] = set()
+    for result in results:
+        provider = str(result.get("provider") or "").strip()
+        if provider and provider not in seen:
+            providers.append(provider)
+            seen.add(provider)
+    return providers
+
+
+def _research_fallback_reasons_from_results(results: list[dict[str, Any]]) -> list[str]:
+    reasons: list[str] = []
+    seen: set[str] = set()
+    for result in results:
+        reason = str(result.get("fallback_reason") or "").strip()
+        if reason and reason not in seen:
+            reasons.append(reason)
+            seen.add(reason)
+    return reasons
+
+
+def _display_source_hint(message: str, fallback: str) -> str:
+    patterns = (
+        r"\bfonte\s+d[ao]\s+(.+)$",
+        r"\bartigo\s+d[ao]\s+(.+)$",
+        r"\blink\s+d[ao]\s+(.+)$",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, message.strip(), flags=re.IGNORECASE)
+        if match:
+            value = match.group(1).strip(" .!?")
+            if value:
+                return value
+    return fallback
+
+
 def _debug_print(env_name: str, message: str) -> None:
     if os.environ.get(env_name, "").strip().lower() in {"1", "true", "yes", "on"}:
         print(message)
@@ -12783,6 +13085,24 @@ def _extract_generic_activity_fields(
             ctx.requested_outputs.append(cleaned)
         updated.append("requested_output")
     if ctx.task_type == "plan_trip":
+        if contains_any_phrase(normalized_text, ("a partir de", "a partir do", "a partir da", "partir de", "desde ")) and not ctx.parameters.get("origin"):
+            origin_match = re.search(r"\b(?:a partir d[eo]s?|partir d[eo]s?|desde)\s+([A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ' -]{1,40})", raw_text, flags=re.IGNORECASE)
+            if origin_match:
+                ctx.parameters["origin"] = _normalize_extracted_name(origin_match.group(1).strip(" .,!?;:"))
+                updated.append("origin")
+        if re.search(r"\b\d+\s*(?:euros|eur|€)\b", normalized_text) and not ctx.parameters.get("budget_max"):
+            budget_match = re.search(r"\b(\d+)\s*(?:euros|eur|€)\b", raw_text, flags=re.IGNORECASE)
+            if budget_match:
+                ctx.parameters["budget_max"] = f"{budget_match.group(1)} euros"
+                updated.append("budget_max")
+        if re.search(r"\b\d+\s+dias\b", normalized_text) and not ctx.parameters.get("duration"):
+            duration_match = re.search(r"\b(\d+\s+dias)\b", raw_text, flags=re.IGNORECASE)
+            if duration_match:
+                ctx.parameters["duration"] = duration_match.group(1)
+                updated.append("duration")
+        if contains_any_phrase(normalized_text, ("voos curtos", "voo curto", "sem voos muito longos")) and not ctx.parameters.get("flight_constraint"):
+            ctx.parameters["flight_constraint"] = "voos curtos"
+            updated.append("flight_constraint")
         if "norte de portugal" in normalized_text and not ctx.parameters.get("destination"):
             ctx.parameters["destination"] = "Norte de Portugal"
             updated.append("destination")
@@ -12821,10 +13141,12 @@ def _extract_generic_activity_fields(
             if options:
                 ctx.parameters["options"] = " e ".join(options)
                 updated.append("options")
+        if _looks_like_comparison_priority_statement(normalized_text):
+            updated.append("preference")
         if contains_any_phrase(normalized_text, ("compara", "comparar", "criterios", "critérios", "bateria", "camara", "câmara", "autonomia", "custa", "esta a", "está a", "preco", "preço", "suporte")):
-            if cleaned not in ctx.requested_outputs:
+            if "preference" not in updated and cleaned not in ctx.requested_outputs:
                 ctx.requested_outputs.append(cleaned)
-            updated.append("requested_output")
+                updated.append("requested_output")
     elif ctx.task_type == "generic_activity":
         if not ctx.parameters.get("topic"):
             ctx.parameters["topic"] = cleaned
@@ -12836,7 +13158,7 @@ def _extract_generic_activity_fields(
     if allow_unclassified_note and not updated and cleaned not in ctx.collected_facts and len(cleaned.split()) <= 40:
         ctx.collected_facts.append(cleaned)
         updated.append("note")
-    elif updated and cleaned not in ctx.collected_facts:
+    elif _should_preserve_raw_activity_note(updated) and cleaned not in ctx.collected_facts:
         ctx.collected_facts.append(cleaned)
     return updated
 
@@ -12847,6 +13169,55 @@ def _infer_generic_comparison_category(normalized_text: str) -> str:
     if contains_any_phrase(normalized_text, ("proposta", "propostas", "fornecedor", "fornecedores")):
         return "propostas"
     return ""
+
+
+def _should_preserve_raw_activity_note(updated_fields: list[str]) -> bool:
+    if not updated_fields or "preference" in updated_fields:
+        return False
+    semantic_fields = {
+        "origin",
+        "destination",
+        "date_range",
+        "duration",
+        "budget",
+        "budget_max",
+        "travel_style",
+        "flight_constraint",
+        "options",
+        "category",
+        "subject",
+        "topic",
+    }
+    return bool(set(updated_fields).isdisjoint(semantic_fields))
+
+
+def _looks_like_comparison_priority_statement(normalized_text: str) -> bool:
+    if not contains_any_phrase(
+        normalized_text,
+        ("mais importante", "valorizo mais", "pesa mais", "importa menos", "menos do que", "dou mais importancia", "dou mais importância"),
+    ):
+        return False
+    return contains_any_phrase(
+        normalized_text,
+        (
+            "camara",
+            "camera",
+            "câmara",
+            "fotografia",
+            "video",
+            "vídeo",
+            "bateria",
+            "autonomia",
+            "suporte",
+            "apoio",
+            "preco",
+            "preço",
+            "custo",
+            "localizacao",
+            "localização",
+            "zona",
+        ),
+    )
 
 
 def _missing_generic_activity_fields(ctx: "ActiveTaskContext") -> list[str]:

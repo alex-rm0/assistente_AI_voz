@@ -120,6 +120,30 @@ def classify_task_query(message: str) -> str:
     if contains_any_phrase(
         normalized,
         (
+            "com estas fontes",
+            "com as fontes",
+            "com o que encontraste",
+            "o que encontraste",
+            "o que concluis",
+            "estas fontes chegam",
+            "as fontes chegam",
+            "ja chega",
+            "já chega",
+            "ha evidencia suficiente",
+            "há evidência suficiente",
+            "o que e que estas fontes nos dizem",
+            "o que é que estas fontes nos dizem",
+            "com isto ja conseguimos comparar",
+            "com isto já conseguimos comparar",
+            "ja consegues dizer",
+            "já consegues dizer",
+            "isto prova",
+        ),
+    ):
+        return "evidence"
+    if contains_any_phrase(
+        normalized,
+        (
             "resume me so o importante",
             "resume-me só o importante",
             "resume so o importante",
@@ -201,6 +225,8 @@ def answer_task_query(work_session, task, message: str) -> str:
         return _format_why(reasoning)
     if query == "source":
         return _format_sources(knowledge, message)
+    if query == "evidence":
+        return _format_evidence_answer(task, knowledge, message)
     if query == "conflicts":
         return _format_conflicts(knowledge)
     if query == "next_step":
@@ -286,6 +312,10 @@ def cognitive_task_view_model(work_session, task, *, title: str = "") -> dict[st
         option_items = _option_view_items(knowledge)
         if option_items:
             sections.append(CognitiveTaskSection("options", "Opções", "high", option_items))
+    elif task.task_type == "plan_trip":
+        found_items = _travel_found_items(knowledge)
+        if found_items:
+            sections.append(CognitiveTaskSection("found", "Encontrado", "high", found_items[:5]))
 
     constraints = _entries_for_roles(knowledge, {"constraint"})
     if constraints:
@@ -387,7 +417,7 @@ def _overview_items(task, knowledge: list[KnowledgeEntry]) -> list[dict[str, Any
         items.append({"label": f"Categoria: {category}", "details": []})
     if getattr(task, "goal", ""):
         items.append({"label": task.goal, "details": []})
-    for predicate in ("destination", "date_range"):
+    for predicate in ("destination", "origin", "date_range"):
         value = _latest_value(knowledge, "trip", predicate)
         if value:
             items.append({"label": _entry_phrase(KnowledgeEntry("", "", "fact", "trip", predicate, value, KnowledgeSource())), "details": []})
@@ -442,13 +472,54 @@ def _option_view_items(knowledge: list[KnowledgeEntry]) -> list[dict[str, Any]]:
         price = _latest_value(knowledge, option, "price")
         if price:
             details.append(f"{price} €")
-        for entry in knowledge:
-            if normalize_for_matching(entry.subject) != normalize_for_matching(option):
-                continue
-            if entry.predicate in {"battery", "camera_quality", "support_quality"}:
-                details.append(_short_detail(entry))
+        details.extend(_quality_view_details(knowledge, option))
         items.append({"label": option, "details": _dedupe(details)[:3]})
     return items
+
+
+def _travel_found_items(knowledge: list[KnowledgeEntry]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for entry in knowledge:
+        if entry.status != "active":
+            continue
+        if entry.predicate == "destination_candidate" and entry.subject:
+            details = []
+            if entry.value and not _looks_like_raw_research_text(entry.value):
+                details.append(entry.value)
+            items.append({"label": entry.subject, "details": details[:1]})
+        elif entry.predicate == "activities":
+            label = entry.value if entry.value and not _looks_like_raw_research_text(entry.value) else entry.subject
+            if label and not _looks_like_raw_research_text(label):
+                items.append({"label": label, "details": []})
+    return _dedupe_view_items(items)
+
+
+def _looks_like_raw_research_text(value: str) -> bool:
+    text = str(value or "")
+    normalized = normalize_for_matching(text)
+    if len(text) > 120:
+        return True
+    if text.strip().startswith("#") or "\n" in text or ">" in text:
+        return True
+    if normalized.startswith("trip:") or normalized == "trip":
+        return True
+    return contains_any_phrase(
+        normalized,
+        (
+            "http",
+            "best places",
+            "things to do",
+            "travel guide",
+            "day itinerary",
+            "article",
+            "snippet",
+            "what is included",
+            "in addition to",
+            "search result",
+            "while porto",
+            "opening hours -",
+        ),
+    )
 
 
 def _entries_for_roles(knowledge: list[KnowledgeEntry], roles: set[str]) -> list[KnowledgeEntry]:
@@ -460,9 +531,18 @@ def _entry_view_items(entries: list[KnowledgeEntry]) -> list[dict[str, Any]]:
 
 
 def _non_duplicated_fact_items(task, knowledge: list[KnowledgeEntry]) -> list[dict[str, Any]]:
-    skipped_predicates = {"is_option", "price", "budget_max", "camera_priority", "battery_priority", "support_priority"}
+    skipped_predicates = {
+        "is_option",
+        "price",
+        "budget_max",
+        "camera_priority",
+        "battery_priority",
+        "support_priority",
+        "price_priority",
+        "location_priority",
+    }
     if task.task_type == "plan_trip":
-        skipped_predicates |= {"destination", "date_range"}
+        skipped_predicates |= {"destination", "date_range", "destination_candidate", "activities"}
     if task.task_type == "generic_comparison":
         skipped_predicates |= {"battery", "camera_quality", "support_quality"}
     facts = [
@@ -476,10 +556,12 @@ def _non_duplicated_fact_items(task, knowledge: list[KnowledgeEntry]) -> list[di
 def _conflict_items(knowledge: list[KnowledgeEntry]) -> list[dict[str, Any]]:
     grouped: dict[tuple[str, str], set[str]] = {}
     for entry in knowledge:
+        if not _entry_can_conflict(entry):
+            continue
         grouped.setdefault((entry.subject, entry.predicate), set()).add(entry.value)
     items = []
     for (subject, predicate), values in grouped.items():
-        if len(values) > 1:
+        if _values_are_semantically_conflicting(values, predicate):
             items.append({"label": f"{subject}: {_join_pt(sorted(values))}", "details": [predicate]})
     return items
 
@@ -487,7 +569,18 @@ def _conflict_items(knowledge: list[KnowledgeEntry]) -> list[dict[str, Any]]:
 def _prioritized_unknowns(task, knowledge: list[KnowledgeEntry], reasoning: TaskReasoningState) -> list[str]:
     unknowns = infer_unknowns(task, knowledge) or reasoning.uncertainties
     if task.task_type == "generic_comparison":
-        priority = ("critérios de decisão", "preço", "câmara", "autonomia", "suporte")
+        predicates = {entry.predicate: entry.value for entry in knowledge if entry.kind == "preference"}
+        ordered = ["critérios de decisão"]
+        if predicates.get("camera_priority") == "high":
+            ordered.append("câmara")
+        if predicates.get("battery_priority") == "high":
+            ordered.append("autonomia")
+        if predicates.get("support_priority") == "high":
+            ordered.append("suporte")
+        if predicates.get("price_priority") == "high":
+            ordered.append("preço")
+        ordered.extend(["preço", "câmara", "autonomia", "suporte"])
+        priority = tuple(_dedupe(ordered))
     elif task.task_type == "plan_trip":
         priority = ("tipo de destino", "datas", "duração", "orçamento", "ritmo", "alojamento", "transportes")
     else:
@@ -830,12 +923,80 @@ def _latest_delta_value(delta: list[KnowledgeEntry], predicate: str) -> str:
 
 def _short_detail(entry: KnowledgeEntry) -> str:
     if entry.predicate == "battery":
-        return "+ autonomia" if entry.value == "better" else f"bateria: {entry.value}"
+        return "Vantagem de autonomia" if entry.value == "better" else f"Autonomia: {entry.value}"
     if entry.predicate == "camera_quality":
-        return "+ câmara" if entry.value == "better" else f"câmara: {entry.value}"
+        if entry.value == "better":
+            return "Parece ter vantagem na câmara"
+        if entry.value == "good":
+            return "Boa prestação de câmara"
+        if entry.value == "mixed":
+            return "Evidência mista sobre a câmara"
+        return "Ainda há pouca evidência sobre a câmara"
     if entry.predicate == "support_quality":
-        return "+ suporte" if entry.value == "better" else "suporte limitado"
+        return "Melhor suporte" if entry.value == "better" else "Suporte limitado"
     return _entry_phrase(entry)
+
+
+def _quality_view_details(knowledge: list[KnowledgeEntry], option: str) -> list[str]:
+    details: list[str] = []
+    for predicate, label in (
+        ("camera_quality", "Câmara"),
+        ("battery", "Autonomia"),
+        ("support_quality", "Suporte"),
+    ):
+        entries = [
+            entry
+            for entry in knowledge
+            if normalize_for_matching(entry.subject) == normalize_for_matching(option)
+            and entry.predicate == predicate
+            and entry.status == "active"
+        ]
+        summary = _quality_summary_label(entries, label)
+        if summary:
+            details.append(summary)
+    return details
+
+
+def _quality_summary_label(entries: list[KnowledgeEntry], label: str) -> str:
+    if not entries:
+        return ""
+    values = {normalize_for_matching(entry.value) for entry in entries}
+    strengths = {str((entry.metadata or {}).get("source_strength_for_claim") or "") for entry in entries}
+    if "weak" in strengths and not {"strong", "useful"}.intersection(strengths):
+        return f"{label}: sinais positivos, ainda com evidência limitada."
+    if "better" in values:
+        return f"{label}: parece haver vantagem."
+    if "good" in values and "mixed" in values:
+        return f"{label}: resultados positivos, mas com alguma incerteza entre fontes."
+    if "good" in values:
+        return f"{label}: boa prestação."
+    if "mixed" in values:
+        return f"{label}: evidência mista."
+    return ""
+
+
+def _quality_score_and_reason(knowledge: list[KnowledgeEntry], option: str, predicate: str, label: str) -> tuple[float, str]:
+    entries = [
+        entry
+        for entry in knowledge
+        if entry.status == "active"
+        and normalize_for_matching(entry.subject) == normalize_for_matching(option)
+        and entry.predicate == predicate
+    ]
+    if not entries:
+        return 0.0, ""
+    values = {normalize_for_matching(entry.value) for entry in entries}
+    if "better" not in values:
+        return 0.0, ""
+    best_confidence = max(float(entry.confidence or 0.0) for entry in entries)
+    strengths = {str((entry.metadata or {}).get("source_strength_for_claim") or "") for entry in entries}
+    if "strong" in strengths:
+        return 1.0, f"tem vantagem de {label} em fonte técnica forte"
+    if "useful" in strengths:
+        return 0.7, f"tem sinais úteis de vantagem em {label}"
+    if "weak" in strengths or best_confidence < 0.55:
+        return 0.25, f"tem sinais fracos de vantagem em {label}"
+    return 0.5, f"tem sinais de vantagem em {label}"
 
 
 def _dedupe_view_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -953,9 +1114,8 @@ def _extract_comparison_entries(work_session, task, message: str, turn_id: str) 
     if budget:
         entries.append(_upsert_entry(work_session, task.id, "constraint", "current_task", "budget_max", budget, message, turn_id, replace_active=correction or True))
 
-    if contains_any_phrase(normalized, ("camara e mais importante", "câmara é mais importante", "dou mais importancia a camara", "dou mais importância à câmara")):
-        entries.append(_upsert_entry(work_session, task.id, "preference", "user", "camera_priority", "high", message, turn_id, replace_active=True))
-        entries.append(_upsert_entry(work_session, task.id, "preference", "user", "battery_priority", "medium", message, turn_id, replace_active=True))
+    for predicate, value in _extract_criterion_priorities(normalized):
+        entries.append(_upsert_entry(work_session, task.id, "preference", "user", predicate, value, message, turn_id, replace_active=True))
     if contains_any_phrase(normalized, ("valorizo bastante a bateria", "tambem valorizo bastante a bateria", "também valorizo bastante a bateria")):
         entries.append(_upsert_entry(work_session, task.id, "preference", "user", "battery_priority", "medium", message, turn_id, replace_active=True))
     if contains_any_phrase(normalized, ("bateria ja nao e tao importante", "bateria já não é tão importante", "nao me importo tanto com bateria", "não me importo tanto com bateria", "nao dou tanta importancia a bateria", "não dou tanta importância à bateria", "nao dou tanta importancia à bateria")):
@@ -980,6 +1140,66 @@ def _extract_comparison_entries(work_session, task, message: str, turn_id: str) 
         if contains_any_phrase(subject_norm, ("horario laboral", "horário laboral", "so em horario", "só em horário")):
             entries.append(_upsert_entry(work_session, task.id, "claim", option, "support_quality", "limited", message, turn_id, replace_active=True, confidence=0.78))
     return [entry for entry in entries if entry is not None]
+
+
+def _extract_criterion_priorities(normalized: str) -> list[tuple[str, str]]:
+    priorities: list[tuple[str, str]] = []
+    criteria = _criterion_mentions(normalized)
+    if not criteria:
+        return priorities
+
+    if contains_any_phrase(
+        normalized,
+        (
+            "mais importante",
+            "parte mais importante",
+            "valorizo mais",
+            "pesa mais",
+            "pesam mais",
+            "dou mais importancia",
+            "dou mais importância",
+        ),
+    ):
+        for predicate in criteria[:1]:
+            priorities.append((predicate, "high"))
+    less_than_match = re.search(r"\b(.+?)\s+importa(?:m)?(?:,)?\s+mas\s+menos\s+do\s+que\s+(.+)$", normalized)
+    if not less_than_match:
+        less_than_match = re.search(r"\b(.+?)\s+importa(?:m)?\s+menos\s+do\s+que\s+(.+)$", normalized)
+    if less_than_match:
+        lower = _criterion_mentions(less_than_match.group(1))
+        higher = _criterion_mentions(less_than_match.group(2))
+        priorities.extend((predicate, "low") for predicate in lower[:1])
+        priorities.extend((predicate, "high") for predicate in higher[:1])
+    if contains_any_phrase(normalized, ("mais importante que", "mais importante do que")) and len(criteria) >= 2:
+        priorities.append((criteria[0], "high"))
+        priorities.append((criteria[1], "medium"))
+    return _dedupe_priority_pairs(priorities)
+
+
+def _criterion_mentions(text: str) -> list[str]:
+    mapping = (
+        ("camera_priority", ("camara", "camera", "câmara", "fotografia", "video", "vídeo")),
+        ("battery_priority", ("bateria", "autonomia")),
+        ("support_priority", ("suporte", "apoio")),
+        ("price_priority", ("preco", "preço", "custo")),
+        ("location_priority", ("localizacao", "localização", "localizaçao", "zona", "localizacao")),
+    )
+    found: list[str] = []
+    for predicate, phrases in mapping:
+        if contains_any_phrase(text, phrases):
+            found.append(predicate)
+    return found
+
+
+def _dedupe_priority_pairs(items: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    seen: set[tuple[str, str]] = set()
+    result: list[tuple[str, str]] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
 
 
 def _extract_travel_entries(work_session, task, message: str, turn_id: str) -> list[KnowledgeEntry]:
@@ -1106,6 +1326,7 @@ def _reason_comparison(state: TaskReasoningState, knowledge: list[KnowledgeEntry
         "camera_quality": _latest_value(knowledge, "user", "camera_priority"),
         "battery": _latest_value(knowledge, "user", "battery_priority"),
         "support_quality": _latest_value(knowledge, "user", "support_priority"),
+        "price": _latest_value(knowledge, "user", "price_priority"),
     }
     scores = {option: 0.0 for option in options}
     reasons = {option: [] for option in options}
@@ -1123,19 +1344,22 @@ def _reason_comparison(state: TaskReasoningState, knowledge: list[KnowledgeEntry
                     reasons[option].append(f"passa o orçamento ({int(price_num)} > {int(budget_num)})")
             except ValueError:
                 pass
-        if _latest_value(knowledge, option, "camera_quality") == "better":
+        camera_score, camera_reason = _quality_score_and_reason(knowledge, option, "camera_quality", "câmara")
+        if camera_score > 0:
             weight = 2.0 if priorities.get("camera_quality") == "high" else 1.0
-            scores[option] += weight
-            reasons[option].append("tem vantagem de câmara nos dados atuais")
-        if _latest_value(knowledge, option, "battery") == "better":
+            scores[option] += camera_score * weight
+            reasons[option].append(camera_reason)
+        battery_score, battery_reason = _quality_score_and_reason(knowledge, option, "battery", "bateria")
+        if battery_score > 0:
             weight = 2.0 if priorities.get("battery") == "high" else (0.4 if priorities.get("battery") == "low" else 1.0)
-            scores[option] += weight
-            reasons[option].append("tem vantagem de bateria nos dados atuais")
+            scores[option] += battery_score * weight
+            reasons[option].append(battery_reason)
         support_quality = _latest_value(knowledge, option, "support_quality")
-        if support_quality == "better":
+        support_score, support_reason = _quality_score_and_reason(knowledge, option, "support_quality", "suporte")
+        if support_score > 0:
             weight = 2.0 if priorities.get("support_quality") == "high" else 1.0
-            scores[option] += weight
-            reasons[option].append("tem melhor suporte nos dados atuais")
+            scores[option] += support_score * weight
+            reasons[option].append(support_reason)
         elif support_quality == "limited":
             scores[option] -= 0.8
             reasons[option].append("tem suporte mais limitado")
@@ -1145,7 +1369,8 @@ def _reason_comparison(state: TaskReasoningState, knowledge: list[KnowledgeEntry
         state.uncertainties = ["opções a comparar"]
         return
     ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
-    if len(ranked) < 2 or ranked[0][1] <= 0 or abs(ranked[0][1] - ranked[1][1]) < 0.5:
+    blocking_unknown = _blocking_comparison_unknown(options, knowledge, priorities)
+    if len(ranked) < 2 or ranked[0][1] <= 0 or abs(ranked[0][1] - ranked[1][1]) < 0.5 or blocking_unknown:
         state.current_recommendation = ""
         state.recommendation_confidence = 0.35
         state.reasons = []
@@ -1154,6 +1379,28 @@ def _reason_comparison(state: TaskReasoningState, knowledge: list[KnowledgeEntry
         state.recommendation_confidence = min(0.85, 0.45 + (ranked[0][1] - ranked[1][1]) / 6)
         state.reasons = reasons[ranked[0][0]][:3]
     state.uncertainties = infer_unknowns(type("Task", (), {"task_type": "generic_comparison"})(), knowledge)
+
+
+def _blocking_comparison_unknown(options: list[str], knowledge: list[KnowledgeEntry], priorities: dict[str, str]) -> str:
+    for predicate in ("camera_quality", "battery", "support_quality"):
+        if priorities.get(predicate) != "high":
+            continue
+        subjects_with_evidence = {
+            entry.subject
+            for entry in knowledge
+            if entry.status == "active" and entry.predicate == predicate and entry.source.source_type in {"web", "user"}
+        }
+        web_subjects_with_evidence = {
+            entry.subject
+            for entry in knowledge
+            if entry.status == "active" and entry.predicate == predicate and entry.source.source_type == "web"
+        }
+        if not web_subjects_with_evidence:
+            continue
+        missing = [option for option in options if option not in subjects_with_evidence]
+        if missing:
+            return predicate
+    return ""
 
 
 def _format_known(task, knowledge: list[KnowledgeEntry]) -> str:
@@ -1275,17 +1522,184 @@ def _format_sources(knowledge: list[KnowledgeEntry], message: str) -> str:
     return f"Veio do que me disseste: “{entry.source.original_text}”."
 
 
+def _format_evidence_answer(task, knowledge: list[KnowledgeEntry], message: str) -> str:
+    web_entries = [
+        entry for entry in knowledge
+        if entry.source.source_type == "web" and entry.status == "active"
+    ]
+    if not web_entries:
+        return "Ainda não tenho fontes suficientes para responder a isso com segurança."
+
+    predicate = _predicate_from_evidence_question(message)
+    options = _subjects_with_kind(knowledge, "option")
+    subjects = _subjects_mentioned_in_message(options or [entry.subject for entry in web_entries], message)
+    scoped_entries = web_entries
+    if subjects:
+        scoped_entries = [entry for entry in web_entries if _entry_subject_matches_any(entry, subjects)]
+    if predicate:
+        scoped_entries = [entry for entry in scoped_entries if entry.predicate == predicate]
+
+    if _asks_comparative_proof(message) and len(options) >= 2:
+        subjects_with_evidence = {
+            option for option in options
+            if any(_entry_subject_matches_any(entry, [option]) and (not predicate or entry.predicate == predicate) for entry in web_entries)
+        }
+        missing = [option for option in options if option not in subjects_with_evidence]
+        if missing:
+            known = _join_pt(sorted(subjects_with_evidence)) if subjects_with_evidence else "uma das opções"
+            return (
+                f"Não. Estas fontes ajudam a avaliar {known}, mas ainda não provam que seja melhor "
+                f"do que {_join_pt(missing[:2])}."
+            )
+    if not scoped_entries:
+        target = _join_pt(subjects) if subjects else "esse ponto"
+        return f"Ainda não tenho evidência direta suficiente sobre {target}."
+
+    strong = [entry for entry in scoped_entries if _entry_evidence_strength(entry) == "strong"]
+    useful = [entry for entry in scoped_entries if _entry_evidence_strength(entry) == "useful"]
+    weak = [entry for entry in scoped_entries if _entry_evidence_strength(entry) == "weak"]
+    positive = [entry for entry in scoped_entries if normalize_for_matching(entry.value) in {"good", "better", "boa", "bom", "superior", "melhor"}]
+    mixed = [entry for entry in scoped_entries if normalize_for_matching(entry.value) == "mixed"]
+    target = _join_pt(subjects) if subjects else _join_pt(_dedupe([entry.subject for entry in scoped_entries])[:2])
+    criterion = _predicate_natural_label(predicate or scoped_entries[-1].predicate)
+
+    if _asks_sufficiency(message):
+        if len(options) >= 2:
+            subjects_with_evidence = {
+                option for option in options
+                if any(_entry_subject_matches_any(entry, [option]) and (not predicate or entry.predicate == predicate) for entry in web_entries)
+            }
+            missing = [option for option in options if option not in subjects_with_evidence]
+            if missing:
+                return (
+                    f"Chega para ter uma primeira leitura sobre {target}, mas ainda não para fechar a comparação. "
+                    f"Falta evidência equivalente sobre {_join_pt(missing[:2])}."
+                )
+        if strong or useful:
+            return "Sim, já chega para uma conclusão provisória. Eu ainda a trataria como provisória, porque podemos reforçar com mais uma fonte independente."
+        return "Ainda não. As fontes que temos são demasiado fracas para decidir com segurança."
+
+    if strong or useful:
+        if positive and not mixed:
+            return f"Sim. Com estas fontes, já há boa evidência de que {target} tem {criterion}."
+        if mixed:
+            return f"As fontes sugerem que {target} tem pontos fortes em {criterion}, mas a conclusão ainda é mista."
+        return f"Estas fontes já dão uma base útil sobre {target}, mas eu manteria a conclusão como provisória."
+    if weak:
+        return f"Há sinais sobre {target}, mas a evidência ainda é fraca. Eu não fecharia uma decisão só com isto."
+    return "Ainda não tenho evidência suficiente para concluir isso com segurança."
+
+
+def _predicate_from_evidence_question(message: str) -> str:
+    normalized = normalize_for_matching(message)
+    if contains_any_phrase(normalized, ("camara", "camera", "fotografia", "video", "vídeo")):
+        return "camera_quality"
+    if contains_any_phrase(normalized, ("bateria", "autonomia")):
+        return "battery"
+    if contains_any_phrase(normalized, ("preco", "preço", "custa", "valor")):
+        return "price"
+    if contains_any_phrase(normalized, ("suporte", "apoio")):
+        return "support_quality"
+    return ""
+
+
+def _subjects_mentioned_in_message(subjects: list[str], message: str) -> list[str]:
+    normalized = normalize_for_matching(message)
+    found: list[str] = []
+    for subject in _dedupe(subjects):
+        subject_norm = normalize_for_matching(subject)
+        if not subject_norm:
+            continue
+        subject_tokens = [token for token in subject_norm.split() if len(token) >= 3]
+        direct = subject_norm in normalized or normalized in subject_norm
+        token_match = any(re.search(rf"\b{re.escape(token)}\b", normalized) for token in subject_tokens)
+        if direct or token_match:
+            found.append(subject)
+    return found
+
+
+def _entry_subject_matches_any(entry: KnowledgeEntry, subjects: list[str]) -> bool:
+    entry_subject = normalize_for_matching(entry.subject)
+    for subject in subjects:
+        subject_norm = normalize_for_matching(subject)
+        if subject_norm and (subject_norm in entry_subject or entry_subject in subject_norm):
+            return True
+    return False
+
+
+def _entry_evidence_strength(entry: KnowledgeEntry) -> str:
+    strength = str((entry.metadata or {}).get("source_strength_for_claim") or "").strip().lower()
+    return strength if strength in {"strong", "useful", "weak"} else "unknown"
+
+
+def _asks_comparative_proof(message: str) -> bool:
+    normalized = normalize_for_matching(message)
+    return contains_any_phrase(normalized, ("prova", "melhor que", "superior a", "comparar"))
+
+
+def _asks_sufficiency(message: str) -> bool:
+    normalized = normalize_for_matching(message)
+    return contains_any_phrase(normalized, ("ja chega", "já chega", "chegam", "suficiente", "decidir", "comparar"))
+
+
+def _predicate_natural_label(predicate: str) -> str:
+    labels = {
+        "camera_quality": "boa câmara",
+        "battery": "boa autonomia",
+        "price": "um preço definido",
+        "support_quality": "bom suporte",
+    }
+    return labels.get(predicate, predicate.replace("_", " "))
+
+
 def _format_conflicts(knowledge: list[KnowledgeEntry]) -> str:
     conflicts = []
     grouped: dict[tuple[str, str], set[str]] = {}
     for entry in knowledge:
+        if not _entry_can_conflict(entry):
+            continue
         grouped.setdefault((entry.subject, entry.predicate), set()).add(entry.value)
     for (subject, predicate), values in grouped.items():
-        if len(values) > 1:
+        if _values_are_semantically_conflicting(values, predicate):
             conflicts.append(f"{subject} / {predicate}: {_join_pt(sorted(values))}")
     if not conflicts:
         return "Não vejo informação contraditória ativa neste momento."
     return "Há valores diferentes nestes pontos: " + "; ".join(conflicts[:3]) + "."
+
+
+def _entry_can_conflict(entry: KnowledgeEntry) -> bool:
+    metadata = getattr(entry, "metadata", {}) or {}
+    if str(metadata.get("relevance") or "") == "irrelevant":
+        return False
+    if str(metadata.get("applicability") or "") in {"family_related", "adjacent"}:
+        return False
+    if entry.predicate in {"price", "cost"} and str(metadata.get("semantic_role") or "") == "destination":
+        return False
+    return entry.predicate in {"price", "opening_hours", "availability", "transport", "battery"}
+
+
+def _values_are_semantically_conflicting(values: set[str], predicate: str) -> bool:
+    normalized = {normalize_for_matching(value) for value in values if value}
+    if len(normalized) < 2:
+        return False
+    if predicate == "price":
+        numeric_prices = {
+            match.group(1).replace(",", ".")
+            for value in normalized
+            for match in re.finditer(r"\b(\d{2,5}(?:[,.]\d+)?)\b", value)
+        }
+        return len(numeric_prices) > 1
+    joined = " ".join(normalized)
+    if contains_any_phrase(joined, ("open", "aberto")) and contains_any_phrase(joined, ("closed", "fechado")):
+        return True
+    prices = {
+        match.group(1).replace(",", ".")
+        for value in normalized
+        for match in re.finditer(r"\b(\d{2,5}(?:[,.]\d+)?)\s*(?:eur|euros|€)\b", value)
+    }
+    if len(prices) > 1:
+        return True
+    return False
 
 
 def _format_next_step(task, knowledge: list[KnowledgeEntry]) -> str:
@@ -1343,8 +1757,12 @@ def _extract_price_for_subject(message: str, subject: str, subjects: list[str] |
         return ""
     before = fragment[: match.start(1)]
     after = fragment[match.end(1): match.end(1) + 2].lower()
-    has_price_marker = bool(re.search(r"(?:custa|esta a|está a|por|pelos?)\s*$", before))
+    has_price_marker = bool(re.search(r"(?:custa|esta a|está a|por|pelos?|a)\s*$", before))
     has_currency = bool(re.match(r"\s*(?:euros|eur|€)", fragment[match.end(1):]))
+    previous_context = normalized_message[max(0, index - 60):index]
+    has_contextual_price_marker = bool(re.search(r"\b(?:custa|esta a|está a|preco|preço)\b", previous_context))
+    if not (has_price_marker or has_currency or has_contextual_price_marker):
+        return ""
     if after.startswith("h") and not (has_price_marker or has_currency):
         return ""
     return match.group(1)
@@ -1410,7 +1828,7 @@ def _subject_aliases(subject: str) -> list[str]:
 
 
 def _extract_destination(message: str) -> str:
-    match = re.search(r"\b(?:vou a|vou para|destino e|destino é)\s+([A-ZÀ-Ý][\wÀ-ÿ]+(?:\s+[A-ZÀ-Ý][\wÀ-ÿ]+){0,3})", message)
+    match = re.search(r"\b(?:vou\s+a|vou\s+para|destino\s+e|destino\s+é)\s+(?:o|a|os|as)?\s*([A-ZÀ-Ý][\wÀ-ÿ]+(?:\s+[A-ZÀ-Ý][\wÀ-ÿ]+){0,3})", message)
     if match:
         return match.group(1).strip(" .,!?:;")
     normalized = normalize_for_matching(message)
@@ -1466,6 +1884,12 @@ def _entry_phrase(entry: KnowledgeEntry) -> str:
         return f"{entry.subject} parece melhor em bateria"
     if pred == "support_priority":
         return "o suporte pesa bastante na decisão"
+    if pred == "price_priority":
+        if entry.value == "low":
+            return "o preço pesa menos na decisão"
+        return "o preço pesa bastante na decisão"
+    if pred == "location_priority":
+        return "a localização pesa bastante na decisão"
     if pred == "support_quality":
         if entry.value == "better":
             return f"{entry.subject} tem melhor suporte"
@@ -1474,6 +1898,8 @@ def _entry_phrase(entry: KnowledgeEntry) -> str:
         return f"{entry.subject}: suporte {entry.value}"
     if pred == "destination":
         return f"destino: {entry.value}"
+    if pred == "origin":
+        return f"partida: {entry.value}"
     if pred == "date_range":
         return f"datas: {entry.value}"
     if pred == "duration":
@@ -1482,6 +1908,10 @@ def _entry_phrase(entry: KnowledgeEntry) -> str:
         return f"preferência: {entry.value}"
     if pred == "flight_constraint":
         return entry.value
+    if pred == "destination_candidate":
+        return f"{entry.subject}: {entry.value}"
+    if pred == "activities":
+        return f"{entry.value} em {entry.subject}"
     return f"{entry.subject}: {entry.value}"
 
 

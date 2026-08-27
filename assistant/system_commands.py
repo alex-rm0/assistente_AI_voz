@@ -26,6 +26,9 @@ SYSTEM_COMMAND_INTENTS = {
     "save_anthropic_key",
     "remove_anthropic_key",
     "test_anthropic_connection",
+    "save_tavily_key",
+    "remove_tavily_key",
+    "test_tavily_connection",
 }
 
 

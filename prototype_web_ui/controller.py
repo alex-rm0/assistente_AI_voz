@@ -90,6 +90,7 @@ class EchoUIController(QObject):
     @Slot(str)
     def submitMessage(self, text: str) -> None:
         message = (text or "").strip()
+        _lifecycle_trace("REQUEST_BEGIN")
         _debug_ui(f"[Echo UI] message_submitted={message}")
         self._thread_debug("submitMessage")
         if not message:
@@ -245,43 +246,54 @@ class EchoUIController(QObject):
     def _handle_response(self, response: str) -> None:
         self._thread_debug("_handle_response")
         _debug_ui("[Echo UI] response_received=true")
-        response_text = str(response or "")
-        self._emit_response_ready(response_text)
-        self._emit_pending_ui_events()
-        self._emit_runtime_telemetry("response_ready")
-        last_progress_event = self._last_progress_event
-        self._last_progress_event = ""
-        if last_progress_event == "rewrite_cancelled":
-            # The request already resolved to "Pedido cancelado." -- go
-            # straight to idle instead of playing the normal thinking->
-            # speaking animation over a response nobody asked to see spoken.
-            self._emit_state("idle")
-        elif last_progress_event == "rewrite_timeout":
+        try:
+            response_text = str(response or "")
+            self._emit_response_ready(response_text)
+            self._emit_pending_ui_events()
+            self._emit_runtime_telemetry("response_ready")
+            last_progress_event = self._last_progress_event
+            self._last_progress_event = ""
+            if last_progress_event == "rewrite_cancelled":
+                # The request already resolved to "Pedido cancelado." -- go
+                # straight to idle instead of playing the normal thinking->
+                # speaking animation over a response nobody asked to see spoken.
+                self._emit_state("idle")
+            elif last_progress_event == "rewrite_timeout":
+                self._emit_state("error")
+                QTimer.singleShot(900, lambda: self._emit_state("idle"))
+            else:
+                elapsed_ms = int((time.perf_counter() - self._started_at) * 1000) if self._started_at else 0
+                delay_ms = max(0, self.thinking_min_ms - elapsed_ms)
+                token = self._visual_token
+                QTimer.singleShot(delay_ms, lambda: self._enter_speaking(token))
+        except Exception as exc:
+            _debug_ui(f"[Echo UI DEBUG] response_finalization_error={exc}")
             self._emit_state("error")
             QTimer.singleShot(900, lambda: self._emit_state("idle"))
-        else:
-            elapsed_ms = int((time.perf_counter() - self._started_at) * 1000) if self._started_at else 0
-            delay_ms = max(0, self.thinking_min_ms - elapsed_ms)
-            token = self._visual_token
-            QTimer.singleShot(delay_ms, lambda: self._enter_speaking(token))
-        self._cleanup_worker()
+        finally:
+            self._cleanup_worker()
 
     @Slot(str)
     def _handle_error(self, error: str) -> None:
         self._thread_debug("_handle_error")
         _debug_ui(f"[Echo UI] error={error}")
         error_text = "Não consegui responder a este pedido."
-        _debug_ui(
-            "[Echo UI DEBUG] emitting errorOccurred",
-            repr(error_text),
-            type(error_text),
-            f"controller_id={id(self)}",
-        )
-        self.errorOccurred.emit(error_text)
-        self._emit_state("error")
-        self._emit_runtime_telemetry("error", error_text)
-        QTimer.singleShot(1200, lambda: self._emit_state("idle"))
-        self._cleanup_worker()
+        try:
+            _debug_ui(
+                "[Echo UI DEBUG] emitting errorOccurred",
+                repr(error_text),
+                type(error_text),
+                f"controller_id={id(self)}",
+            )
+            self.errorOccurred.emit(error_text)
+            self._emit_state("error")
+            self._emit_runtime_telemetry("error", error_text)
+            QTimer.singleShot(1200, lambda: self._emit_state("idle"))
+        except Exception as exc:
+            _debug_ui(f"[Echo UI DEBUG] error_finalization_error={exc}")
+            QTimer.singleShot(0, lambda: self._emit_state("idle"))
+        finally:
+            self._cleanup_worker()
 
     @Slot(str)
     def _handle_progress(self, event: str) -> None:
@@ -295,6 +307,7 @@ class EchoUIController(QObject):
         self._thread_debug("_enter_speaking")
         if token != self._visual_token:
             return
+        _lifecycle_trace("STATE_SPEAKING")
         self._emit_state("speaking")
         QTimer.singleShot(self.speaking_duration_ms, lambda: self._finish_speaking(token))
 
@@ -303,6 +316,7 @@ class EchoUIController(QObject):
         self._thread_debug("_finish_speaking")
         if token != self._visual_token:
             return
+        _lifecycle_trace("STATE_IDLE")
         self._emit_state("idle")
 
     @Slot()
@@ -319,6 +333,7 @@ class EchoUIController(QObject):
         self._active = False
         duration_ms = int((time.perf_counter() - self._started_at) * 1000) if self._started_at else 0
         _debug_ui(f"[Echo UI] request_duration_ms={duration_ms}")
+        _lifecycle_trace("REQUEST_FINISHED_EMITTED")
         self.requestFinished.emit()
 
     def _emit_response_ready(self, response_text: str) -> None:
@@ -328,6 +343,7 @@ class EchoUIController(QObject):
             type(response_text),
             f"controller_id={id(self)}",
         )
+        _lifecycle_trace("RESPONSE_READY_EMITTED")
         self.responseReady.emit(response_text)
 
     def _emit_pending_ui_events(self) -> None:
@@ -374,13 +390,16 @@ class EchoUIController(QObject):
     def _emit_runtime_telemetry(self, state: str, error_message: str = "") -> None:
         if self.model_runtime is None:
             return
-        if state == "error":
-            payload = self.model_runtime.error_payload(error_message or "Erro.", provider_error_type="ui_error")
-            encoded = _json_payload(payload)
-        else:
-            encoded = self._runtime_payload_json(state)
-        _debug_ui(f"[Echo UI DEBUG] emitting telemetryUpdated {encoded}")
-        self.telemetryUpdated.emit(encoded)
+        try:
+            if state == "error":
+                payload = self.model_runtime.error_payload(error_message or "Erro.", provider_error_type="ui_error")
+                encoded = _json_payload(payload)
+            else:
+                encoded = self._runtime_payload_json(state)
+            _debug_ui(f"[Echo UI DEBUG] emitting telemetryUpdated {encoded}")
+            self.telemetryUpdated.emit(encoded)
+        except Exception as exc:
+            _debug_ui(f"[Echo UI DEBUG] telemetry_error={exc}")
 
     def _thread_debug(self, label: str) -> None:
         current_thread = QThread.currentThread()
@@ -403,6 +422,10 @@ def _debug_ui(*parts: object) -> None:
 def _debug_threads(*parts: object) -> None:
     if os.environ.get("ECHO_DEBUG_THREADS", "").strip().lower() in {"1", "true", "yes", "on"}:
         print(*parts)
+
+
+def _lifecycle_trace(event: str) -> None:
+    print("[LIFECYCLE]", event)
 
 
 def _json_payload(payload: dict[str, Any]) -> str:

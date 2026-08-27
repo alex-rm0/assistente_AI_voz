@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unicodedata
+import os
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,8 @@ from assistant.desktop_actions import (
     validate_url,
 )
 from assistant.live_web_research import LiveWebResearchProvider
+from assistant.secret_storage import WindowsCredentialManagerSecretStorage, resolve_tavily_api_key
+from assistant.tavily_research import LiveResearchProviderChain, TavilyResearchProvider
 from assistant.tool_registry import tool_registry
 from assistant.workspace import WorkspaceFileContent, WorkspaceGuard
 
@@ -34,7 +37,13 @@ DOCUMENT_EXTENSIONS = {".docx", ".pdf"}
 ALL_READABLE_EXTENSIONS = READABLE_EXTENSIONS | DOCUMENT_EXTENSIONS
 WRITABLE_EXTENSIONS = {".txt"}
 DESKTOP_ACTION_RUNNER = WindowsDesktopActionRunner()
-LIVE_WEB_RESEARCH_PROVIDER = LiveWebResearchProvider()
+SECRET_STORAGE = WindowsCredentialManagerSecretStorage()
+LIVE_WEB_RESEARCH_PROVIDER = LiveResearchProviderChain(
+    tavily_provider=TavilyResearchProvider(
+        api_key_getter=lambda: resolve_tavily_api_key(os.environ, SECRET_STORAGE),
+    ),
+    fallback_provider=LiveWebResearchProvider(),
+)
 
 
 def _normalize_name(text: str) -> str:

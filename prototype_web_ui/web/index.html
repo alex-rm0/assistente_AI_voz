@@ -137,6 +137,10 @@
               <span>SOURCE</span>
               <strong id="telemetrySource">NONE</strong>
             </div>
+            <div class="telemetry-row">
+              <span>SEMANTIC EXTRACTION</span>
+              <strong id="telemetrySemanticExtraction">—</strong>
+            </div>
             <div class="telemetry-row telemetry-fallback-row" hidden>
               <span>FALLBACK</span>
               <strong id="telemetryFallback">—</strong>
@@ -187,6 +191,17 @@
             </div>
             <p id="anthropicKeyStatus">API key not configured.</p>
           </section>
+
+          <section id="tavilyKeyPanel" class="telemetry-section telemetry-secret-controls" aria-label="Tavily API Key" hidden>
+            <span class="hint-label">WEB RESEARCH · TAVILY</span>
+            <input id="tavilyApiKey" type="password" autocomplete="off" spellcheck="false" placeholder="tvly-...">
+            <div class="telemetry-secret-actions">
+              <button id="testTavilyKey" type="button">TEST CONNECTION</button>
+              <button id="saveTavilyKey" type="button">SAVE SECURELY</button>
+              <button id="removeTavilyKey" type="button">REMOVE KEY</button>
+            </div>
+            <p id="tavilyKeyStatus">Tavily key not configured.</p>
+          </section>
           </section>
 
           <section class="telemetry-panel-section" data-panel-page="workspace" aria-label="Workspace">
@@ -220,6 +235,10 @@
             <div class="telemetry-row">
               <span>CLAUDE</span>
               <strong id="systemClaude">NOT CONFIGURED</strong>
+            </div>
+            <div class="telemetry-row">
+              <span>TAVILY</span>
+              <strong id="systemTavily">NOT CONFIGURED</strong>
             </div>
             <div class="telemetry-row">
               <span>CONTEXT OBSERVER</span>

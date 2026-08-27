@@ -282,6 +282,15 @@ class ProviderBackedLLM:
     def mark_next_call_source(self, source: str) -> None:
         self._next_call_source = str(source or "").strip()
 
+    @property
+    def provider_name(self) -> str:
+        name = getattr(self.provider, "name", "")
+        return str(name() if callable(name) else name or "")
+
+    @property
+    def supports_local_semantic_extraction(self) -> bool:
+        return self.provider_name == "ollama"
+
     def chat(
         self,
         user_message: str,

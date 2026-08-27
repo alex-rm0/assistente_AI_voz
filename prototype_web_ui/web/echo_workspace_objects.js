@@ -2580,17 +2580,95 @@
       return { x: rect.left - hostRect.left + rect.width / 2, y: rect.top - hostRect.top + rect.height / 2 };
     }
 
+    function localRectFromElement(node) {
+      if (!node || !container) return null;
+      const rect = node.getBoundingClientRect();
+      const hostRect = container.getBoundingClientRect();
+      if (!rect || rect.width <= 0 || rect.height <= 0) return null;
+      return {
+        left: rect.left - hostRect.left,
+        top: rect.top - hostRect.top,
+        right: rect.right - hostRect.left,
+        bottom: rect.bottom - hostRect.top,
+        width: rect.width,
+        height: rect.height,
+      };
+    }
+
+    function isFinitePoint(point) {
+      return Boolean(point) && Number.isFinite(point.x) && Number.isFinite(point.y);
+    }
+
+    function clampNumber(value, min, max) {
+      if (!Number.isFinite(value)) return min;
+      return Math.min(max, Math.max(min, value));
+    }
+
+    function entityBoundsLocal() {
+      if (typeof document === "undefined" || !container) return null;
+      const mind = document.getElementById("mind");
+      return localRectFromElement(mind);
+    }
+
+    function surfaceAnchorTowardEcho(id, echoPoint) {
+      const node = nodes.get(id);
+      if (!node || !isNodeVisible(node) || !isFinitePoint(echoPoint)) return null;
+      const rect = localRectFromElement(node);
+      if (!rect) return null;
+      const centerX = rect.left + rect.width / 2;
+      const rightSide = echoPoint.x >= centerX;
+      const yPadding = Math.min(36, Math.max(12, rect.height * 0.18));
+      return {
+        x: rightSide ? rect.right : rect.left,
+        y: clampNumber(echoPoint.y, rect.top + yPadding, rect.bottom - yPadding),
+      };
+    }
+
+    function echoBoundaryAnchor(targetPoint) {
+      const center = getEntityPoint();
+      if (!isFinitePoint(center) || !isFinitePoint(targetPoint)) return center;
+      const bounds = entityBoundsLocal();
+      const rx = bounds ? Math.max(12, bounds.width * 0.42) : 72;
+      const ry = bounds ? Math.max(12, bounds.height * 0.42) : rx;
+      const dx = targetPoint.x - center.x;
+      const dy = targetPoint.y - center.y;
+      const distance = Math.hypot(dx, dy);
+      if (distance < 1) return center;
+      const scale = 1 / Math.sqrt((dx * dx) / (rx * rx) + (dy * dy) / (ry * ry));
+      return {
+        x: center.x + dx * scale,
+        y: center.y + dy * scale,
+      };
+    }
+
+    function smoothTetherPoint(key, next) {
+      if (!isFinitePoint(next)) return next;
+      if (!smoothTetherPoint.cache) smoothTetherPoint.cache = {};
+      const previous = smoothTetherPoint.cache[key];
+      if (!isFinitePoint(previous)) {
+        smoothTetherPoint.cache[key] = next;
+        return next;
+      }
+      const alpha = 0.55;
+      const smoothed = {
+        x: previous.x + (next.x - previous.x) * alpha,
+        y: previous.y + (next.y - previous.y) * alpha,
+      };
+      smoothTetherPoint.cache[key] = smoothed;
+      return smoothed;
+    }
+
     function tetherPath(a, b) {
-      if (!a || !b) return "";
-      const midX = (a.x + b.x) / 2;
-      const midY = (a.y + b.y) / 2;
+      if (!isFinitePoint(a) || !isFinitePoint(b)) return "";
       const dx = b.x - a.x;
       const dy = b.y - a.y;
       const len = Math.max(1, Math.hypot(dx, dy));
-      const bow = Math.min(40, len * 0.18);
-      const controlX = midX - (dy / len) * bow;
-      const controlY = midY + (dx / len) * bow;
-      return `M ${a.x} ${a.y} Q ${controlX} ${controlY} ${b.x} ${b.y}`;
+      const horizontal = Math.min(160, Math.max(28, Math.abs(dx) * 0.38));
+      const vertical = Math.min(70, Math.abs(dy) * 0.22);
+      const direction = dx >= 0 ? 1 : -1;
+      const c1 = { x: a.x + horizontal * direction, y: a.y + vertical * Math.sign(dy || 0) };
+      const c2 = { x: b.x - horizontal * direction, y: b.y - vertical * Math.sign(dy || 0) };
+      return `M ${a.x} ${a.y} C ${c1.x} ${c1.y} ${c2.x} ${c2.y} ${b.x} ${b.y}`;
     }
 
     function renderTethers() {
@@ -2617,10 +2695,15 @@
         }
       });
       if (surfaceId) {
-        const entityPoint = getEntityPoint();
-        const surfacePoint = centerOf(surfaceId);
+        const entityCenter = getEntityPoint();
+        const surfacePoint = surfaceAnchorTowardEcho(surfaceId, entityCenter);
+        const entityPoint = echoBoundaryAnchor(surfacePoint);
         if (entityPoint && surfacePoint) {
-          appendTether(entityPoint, surfacePoint, "workspace-tether--entity");
+          appendTether(
+            smoothTetherPoint("entity", entityPoint),
+            smoothTetherPoint("surface", surfacePoint),
+            "workspace-tether--entity"
+          );
         }
       }
       relations.forEach(([fromId, toId]) => {
@@ -2689,6 +2772,12 @@
       applyAttention,
       getAttention,
       computeSpacePressure,
+      _testTetherGeometry: {
+        isFinitePoint,
+        tetherPath,
+        surfaceAnchorTowardEcho,
+        echoBoundaryAnchor,
+      },
     };
   }
 

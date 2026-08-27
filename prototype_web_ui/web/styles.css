@@ -986,6 +986,21 @@ body.workspace-dragging {
   text-transform: uppercase;
 }
 
+.research-card-detail {
+  margin-top: 10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: rgba(118,214,255,.78);
+  font: 500 11px var(--sans);
+  cursor: pointer;
+}
+
+.research-card-detail:hover,
+.research-card-detail:focus-visible {
+  color: rgba(193,238,255,.95);
+}
+
 /* Workspace objects (Passo 3: workspace adaptativo, revisto para "one
    primary work surface"). At any moment there is at most one big surface
    -- [data-role="primary"] -- and zero or more small [data-role="reference"]

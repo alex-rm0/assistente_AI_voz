@@ -26,6 +26,7 @@ from assistant.presence_manager import PresenceManager
 from assistant.prompts import get_base_system_prompt
 from assistant.session_manager import SessionManager
 from assistant.secret_storage import WindowsCredentialManagerSecretStorage, resolve_anthropic_api_key
+from assistant.task_research import OllamaSemanticExtractor
 from assistant.tool_registry import tool_registry
 from assistant.voice_input import MicrophoneCheckError, check_microphone, check_voice_runtime
 
@@ -40,6 +41,16 @@ SETTINGS_PATH = BASE_DIR / "config" / "settings.json"
 def load_settings() -> dict[str, Any]:
     with SETTINGS_PATH.open("r", encoding="utf-8") as file:
         return json.load(file)
+
+
+def build_local_semantic_extractor(ollama_provider, system_prompt: str):
+    return OllamaSemanticExtractor(
+        ProviderBackedLLM(
+            provider=ollama_provider,
+            system_prompt=system_prompt,
+            model_source="local_semantic_extractor",
+        )
+    )
 
 
 def resolve_ollama_model(
@@ -250,6 +261,7 @@ def main() -> int:
             system_prompt=default_system_prompt,
             model_source=resolved_model.model_source,
         )
+    semantic_extractor = build_local_semantic_extractor(ollama_provider, default_system_prompt)
     model_runtime = ModelRuntimeBridge(
         router=router,
         budget=budget,
@@ -314,6 +326,7 @@ def main() -> int:
         voice_model=voice_config.get("model", "base"),
         voice_language=voice_config.get("language", "pt"),
         model_runtime=model_runtime,
+        semantic_extractor=semantic_extractor,
     )
 
     def change_presence(name: str) -> None:

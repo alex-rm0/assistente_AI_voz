@@ -181,10 +181,10 @@ def test_task_research_uses_task_web_search_but_not_generic_research(tmp_path: P
                         "snippet": "Samsung tem boa autonomia.",
                         "claims": [
                             {
-                                "subject": "Samsung",
+                                "subject": "Samsung S24",
                                 "predicate": "battery",
                                 "value": "boa autonomia",
-                                "evidence": "Samsung tem boa autonomia.",
+                                "evidence": "Samsung S24 tem boa autonomia.",
                             }
                         ],
                     }
@@ -204,9 +204,9 @@ def test_task_research_uses_task_web_search_but_not_generic_research(tmp_path: P
     entries = task_knowledge(engine._work_session, task.id)
     telemetry = engine.get_last_turn_telemetry()
 
-    assert "Depois da pesquisa" in response
+    assert "Pesquisa concluída" in response
     assert queries
-    assert any(entry.subject == "Samsung" and entry.source.source_type == "web" for entry in entries)
+    assert any(entry.subject == "Samsung S24" and entry.source.source_type == "web" for entry in entries)
     assert telemetry["research_tool_called"] is True
     assert telemetry["llm_calls"] == 0
 

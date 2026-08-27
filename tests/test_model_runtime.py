@@ -7,7 +7,7 @@ from assistant.anthropic_provider import PAID_CALL_CONFIRMATION_ENV
 from assistant.model_provider import ModelResponse
 from assistant.model_router import AutomaticRoutingConfig, ModelRouter, ModelRoutingConfig, ModelUsageBudget
 from assistant.model_runtime import ModelRuntimeBridge, UserSettingsStore, human_reason_label
-from assistant.secret_storage import ANTHROPIC_SECRET_NAME, InMemorySecretStorage
+from assistant.secret_storage import ANTHROPIC_SECRET_NAME, TAVILY_SECRET_NAME, InMemorySecretStorage
 
 
 def make_bridge(
@@ -205,6 +205,36 @@ def test_fast_path_and_memory_show_zero_tokens_and_cost(tmp_path: Path) -> None:
     assert payload["reason_label"] == "Memory recall"
 
 
+def test_telemetry_payload_preserves_semantic_extraction_fields(tmp_path: Path) -> None:
+    bridge, _router, _store, _budget = make_bridge(tmp_path)
+
+    payload = bridge.telemetry_payload(
+        {
+            "selected_path": "RESEARCH_REQUEST",
+            "llm_calls": 0,
+            "semantic_extraction_calls": 1,
+            "semantic_extraction_status": "all_rejected",
+            "semantic_candidates_before_validation": 3,
+            "semantic_candidates_after_validation": 0,
+            "semantic_extraction_failure_reason": "invalid_destination_candidate",
+            "semantic_extraction_batches": 1,
+            "semantic_extraction_latency_ms": 1234,
+            "semantic_extraction_input_chars": 2048,
+            "semantic_extraction_sources_used": 4,
+        }
+    )
+
+    assert payload["semantic_extraction_calls"] == 1
+    assert payload["semantic_extraction_status"] == "all_rejected"
+    assert payload["semantic_candidates_before_validation"] == 3
+    assert payload["semantic_candidates_after_validation"] == 0
+    assert payload["semantic_extraction_failure_reason"] == "invalid_destination_candidate"
+    assert payload["semantic_extraction_batches"] == 1
+    assert payload["semantic_extraction_latency_ms"] == 1234
+    assert payload["semantic_extraction_input_chars"] == 2048
+    assert payload["semantic_extraction_sources_used"] == 4
+
+
 def test_social_fast_path_payload_does_not_inherit_previous_paid_call(tmp_path: Path) -> None:
     bridge, _router, _store, budget = make_bridge(tmp_path)
     budget.register(
@@ -352,3 +382,128 @@ def test_test_connection_is_configuration_only_and_does_not_expose_key(tmp_path:
     assert payload["api_key_source"] == "environment"
     assert payload["paid_calls_enabled"] is True
     assert "sk-ant-test-value" not in json.dumps(payload)
+
+
+def test_tavily_secret_key_is_saved_securely_and_never_returned(tmp_path: Path) -> None:
+    storage = InMemorySecretStorage()
+    bridge, _router, store, _budget = make_bridge(tmp_path, secret_storage=storage)
+
+    payload = bridge.execute_command({"intent": "save_tavily_key", "parameters": {"api_key": "tvly-test-secret"}, "source": "ui"})
+
+    serialized = json.dumps(payload)
+    assert storage.get_secret(TAVILY_SECRET_NAME) == "tvly-test-secret"
+    assert payload["tavily_key_configured"] is True
+    assert payload["tavily_key_source"] == "secure_storage"
+    assert "tvly-test-secret" not in serialized
+    assert "tvly-test-secret" not in store.path.read_text(encoding="utf-8") if store.path.exists() else True
+
+
+def test_tavily_status_reports_only_configured_without_secret(tmp_path: Path) -> None:
+    storage = InMemorySecretStorage()
+    storage.set_secret(TAVILY_SECRET_NAME, "tvly-stored-secret")
+    bridge, _router, _store, _budget = make_bridge(tmp_path, secret_storage=storage)
+
+    payload = bridge.current_payload(state="system_status")
+
+    assert payload["tavily_key_configured"] is True
+    assert payload["tavily_key_source"] == "secure_storage"
+    assert "tvly-stored-secret" not in json.dumps(payload)
+
+
+def test_tavily_remove_restores_not_configured_state(tmp_path: Path) -> None:
+    storage = InMemorySecretStorage()
+    storage.set_secret(TAVILY_SECRET_NAME, "tvly-stored-secret")
+    bridge, _router, _store, _budget = make_bridge(tmp_path, secret_storage=storage)
+
+    payload = bridge.remove_tavily_key()
+
+    assert storage.has_secret(TAVILY_SECRET_NAME) is False
+    assert payload["tavily_key_configured"] is False
+    assert payload["tavily_key_source"] == "none"
+    assert "tvly-stored-secret" not in json.dumps(payload)
+
+
+def test_tavily_environment_key_wins_and_cannot_be_removed(tmp_path: Path) -> None:
+    storage = InMemorySecretStorage()
+    storage.set_secret(TAVILY_SECRET_NAME, "tvly-stored-secret")
+    bridge, _router, _store, _budget = make_bridge(tmp_path, env={TAVILY_SECRET_NAME: "tvly-env-secret"}, secret_storage=storage)
+
+    payload = bridge.current_payload()
+    removed = bridge.remove_tavily_key()
+
+    assert payload["tavily_key_configured"] is True
+    assert payload["tavily_key_source"] == "environment"
+    assert bridge.get_tavily_api_key() == "tvly-env-secret"
+    assert removed["state"] == "error"
+    assert removed["provider_error_type"] == "environment_key"
+    assert "tvly-env-secret" not in json.dumps(payload)
+    assert "tvly-stored-secret" not in json.dumps(payload)
+
+
+def test_tavily_test_connection_without_key_is_clear_and_does_not_call_network(tmp_path: Path, monkeypatch) -> None:
+    class FailingProvider:
+        def __init__(self, **_kwargs):
+            raise AssertionError("network provider should not be built")
+
+    monkeypatch.setattr("assistant.model_runtime.TavilyResearchProvider", FailingProvider)
+    bridge, _router, _store, _budget = make_bridge(tmp_path)
+
+    payload = bridge.test_tavily_connection()
+
+    assert payload["state"] == "error"
+    assert payload["provider_error_type"] == "missing_tavily_api_key"
+    assert payload["tavily_key_configured"] is False
+
+
+def test_tavily_test_connection_uses_bounded_provider_without_exposing_secret(tmp_path: Path, monkeypatch) -> None:
+    seen = {}
+
+    class FakeTavilyProvider:
+        def __init__(self, *, api_key_getter, config):
+            seen["key_getter"] = api_key_getter
+            seen["max_results"] = config.max_results
+            seen["timeout_seconds"] = config.timeout_seconds
+
+        def search_with_status(self, query: str):
+            seen["query"] = query
+            assert seen["key_getter"]() == ("tvly-test-secret", "secure_storage")
+            return [{"title": "OpenAI", "url": "https://openai.com", "snippet": "Official site"}], "completed", ""
+
+    monkeypatch.setattr("assistant.model_runtime.TavilyResearchProvider", FakeTavilyProvider)
+    storage = InMemorySecretStorage()
+    storage.set_secret(TAVILY_SECRET_NAME, "tvly-test-secret")
+    bridge, _router, _store, _budget = make_bridge(tmp_path, secret_storage=storage)
+
+    payload = bridge.test_tavily_connection()
+
+    assert payload["state"] == "configuration_status"
+    assert payload["tavily_test_status"] == "success"
+    assert payload["tavily_key_configured"] is True
+    assert seen == {
+        "key_getter": seen["key_getter"],
+        "max_results": 1,
+        "timeout_seconds": 8.0,
+        "query": "OpenAI official website",
+    }
+    assert "tvly-test-secret" not in json.dumps(payload)
+
+
+def test_tavily_test_connection_sanitizes_provider_failure(tmp_path: Path, monkeypatch) -> None:
+    class FakeTavilyProvider:
+        def __init__(self, **_kwargs):
+            pass
+
+        def search_with_status(self, query: str):
+            return [], "failed", "tvly-test-secret timeout"
+
+    monkeypatch.setattr("assistant.model_runtime.TavilyResearchProvider", FakeTavilyProvider)
+    storage = InMemorySecretStorage()
+    storage.set_secret(TAVILY_SECRET_NAME, "tvly-test-secret")
+    bridge, _router, _store, _budget = make_bridge(tmp_path, secret_storage=storage)
+
+    payload = bridge.test_tavily_connection()
+
+    assert payload["state"] == "error"
+    assert payload["provider_error_type"] == "tavily_connection_failed"
+    assert payload["tavily_test_status"] == "failed"
+    assert "tvly-test-secret" not in json.dumps(payload)

@@ -5,6 +5,7 @@ from typing import Protocol
 
 
 ANTHROPIC_SECRET_NAME = "ANTHROPIC_API_KEY"
+TAVILY_SECRET_NAME = "TAVILY_API_KEY"
 SECRET_SERVICE_NAME = "EchoOS"
 
 
@@ -163,11 +164,21 @@ def resolve_anthropic_api_key(env: dict[str, str], storage: SecretStorage) -> tu
     return "", "none"
 
 
+def resolve_tavily_api_key(env: dict[str, str], storage: SecretStorage) -> tuple[str, str]:
+    env_value = str(env.get(TAVILY_SECRET_NAME) or "").strip()
+    if env_value:
+        return env_value, "environment"
+    stored = storage.get_secret(TAVILY_SECRET_NAME) if storage.is_available() else None
+    if stored:
+        return stored, "secure_storage"
+    return "", "none"
+
+
 def sanitize_secret_error(message: object) -> str:
     text = str(message or "")
     if len(text) > 300:
         text = text[:300] + "..."
-    for marker in ("sk-ant-", "ANTHROPIC_API_KEY="):
+    for marker in ("sk-ant-", "tvly-", "ANTHROPIC_API_KEY=", "TAVILY_API_KEY="):
         index = text.find(marker)
         if index >= 0:
             return text[:index] + "<redacted>"

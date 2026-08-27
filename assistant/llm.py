@@ -28,6 +28,9 @@ class OllamaSettings:
 
 
 class OllamaClient:
+    provider_name = "ollama"
+    supports_local_semantic_extraction = True
+
     def __init__(self, settings: OllamaSettings, system_prompt: str) -> None:
         self.settings = settings
         self.system_prompt = system_prompt
@@ -65,6 +68,7 @@ class OllamaClient:
         system_prompt: str | None = None,
         response_format: str | None = None,
         source: str | None = None,
+        timeout_seconds: float | None = None,
     ) -> str:
         call_source = self._consume_call_source(source)
         system_content = system_prompt or self.system_prompt
@@ -81,7 +85,12 @@ class OllamaClient:
             response_format=response_format,
         )
 
-        return self._chat_messages(messages, response_format=response_format, source=call_source)
+        return self._chat_messages(
+            messages,
+            response_format=response_format,
+            source=call_source,
+            timeout_seconds=timeout_seconds,
+        )
 
     def choose_tool(
         self,
@@ -149,6 +158,7 @@ class OllamaClient:
         messages: list[dict[str, str]],
         response_format: str | None = None,
         source: str = "OTHER",
+        timeout_seconds: float | None = None,
     ) -> str:
         self._chat_call_count += 1
         started_at = time.perf_counter()
@@ -166,7 +176,7 @@ class OllamaClient:
                 url,
                 json=payload,
                 headers={"Content-Type": "application/json; charset=utf-8"},
-                timeout=self.settings.timeout_seconds,
+                timeout=timeout_seconds if timeout_seconds is not None else self.settings.timeout_seconds,
             )
             response.raise_for_status()
             data = response.json()

@@ -448,6 +448,10 @@ class RoutedLLM(ProviderBackedLLM):
     def mark_next_call_source(self, source: str) -> None:
         self._next_call_source = str(source or "").strip()
 
+    @property
+    def supports_local_semantic_extraction(self) -> bool:
+        return False
+
     def chat(
         self,
         user_message: str,

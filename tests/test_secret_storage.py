@@ -7,10 +7,12 @@ import pytest
 from assistant import secret_storage
 from assistant.secret_storage import (
     ANTHROPIC_SECRET_NAME,
+    TAVILY_SECRET_NAME,
     InMemorySecretStorage,
     NullSecretStorage,
     WindowsCredentialManagerSecretStorage,
     resolve_anthropic_api_key,
+    resolve_tavily_api_key,
     sanitize_secret_error,
 )
 
@@ -65,9 +67,24 @@ def test_resolve_anthropic_api_key_returns_none_source_without_secret() -> None:
     assert source == "none"
 
 
+def test_resolve_tavily_api_key_uses_environment_then_secure_storage() -> None:
+    storage = InMemorySecretStorage()
+    storage.set_secret(TAVILY_SECRET_NAME, "stored-tavily-secret")
+
+    assert resolve_tavily_api_key({TAVILY_SECRET_NAME: "env-tavily-secret"}, storage) == (
+        "env-tavily-secret",
+        "environment",
+    )
+    assert resolve_tavily_api_key({}, storage) == ("stored-tavily-secret", "secure_storage")
+    storage.delete_secret(TAVILY_SECRET_NAME)
+    assert resolve_tavily_api_key({}, storage) == ("", "none")
+
+
 def test_sanitize_secret_error_redacts_obvious_secret_markers() -> None:
     assert sanitize_secret_error("failed with sk-ant-secret-value") == "failed with <redacted>"
     assert sanitize_secret_error("ANTHROPIC_API_KEY=secret") == "<redacted>"
+    assert sanitize_secret_error("failed with tvly-test-super-secret-do-not-print") == "failed with <redacted>"
+    assert sanitize_secret_error("TAVILY_API_KEY=secret") == "<redacted>"
 
 
 def test_windows_storage_rejects_non_windows_backend(monkeypatch) -> None:

@@ -38,9 +38,10 @@ class LiveWebResearchProvider:
     """
     Minimal live-web adapter for the Task Research layer.
 
-    It uses DuckDuckGo's public Instant Answer endpoint as a no-key search
-    source, then returns the same JSON shape expected by assistant.task_research.
-    Page fetching is deliberately bounded and treated only as evidence text.
+    It uses Bing RSS as the primary no-key source and DuckDuckGo's public
+    Instant Answer endpoint as fallback, then returns the same JSON shape
+    expected by assistant.task_research. Page fetching is deliberately bounded
+    and treated only as evidence text.
     """
 
     def __init__(self, session: Any | None = None, config: LiveWebResearchConfig | None = None) -> None:
@@ -134,6 +135,7 @@ class LiveWebResearchProvider:
                 "source_quality": _source_quality(url, query),
                 "snippet": evidence,
                 "retrieved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "provider": "bing_rss",
                 "claims": [_claim_from_result(query, title, url, evidence)],
             }
             results.append(result)
@@ -260,12 +262,12 @@ def _predicate_from_query(query: str) -> str:
 
 def _source_quality(url: str, query: str) -> str:
     domain = _domain(url)
+    if any(site in domain for site in ("reddit", "forum", "quora", "discussions.apple.com", "community.samsung.com")):
+        return "community"
     if domain.endswith(".gov") or ".gov." in domain or "visit" in domain or "tourism" in domain:
         return "official"
     if any(site in domain for site in ("dxomark", "rtings", "notebookcheck", "gsmarena", "pcmag", "trustedreviews")):
         return "independent_review"
-    if any(site in domain for site in ("reddit", "forum", "quora")):
-        return "community"
     if "wikipedia.org" in domain:
         return "reference"
     if _subject_from_query(query).lower().replace(" ", "") in domain.replace("-", ""):
