@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from assistant.voice_input import VoiceTranscriber, check_microphone
+from assistant.voice_input import VoiceNoSpeechDetected, VoiceTranscriber, check_microphone
 
 
 class ChatWorker(QObject):
@@ -55,6 +55,9 @@ class VoiceWorker(QObject):
             text = self.transcriber.record_and_transcribe(self.stop_event, self.status_changed.emit)
             self.status_changed.emit("Concluido.")
             self.finished.emit(text)
+        except VoiceNoSpeechDetected:
+            self.status_changed.emit("Não detetei fala.")
+            self.finished.emit("")
         except Exception as exc:
             self.failed.emit(str(exc))
 

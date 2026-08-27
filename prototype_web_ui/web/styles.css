@@ -1901,6 +1901,39 @@ body.workspace-dragging {
   opacity: .55;
 }
 
+.mic-button {
+  border: 0;
+  border-radius: 999px;
+  padding: 7px 10px;
+  background: rgba(102,205,255,.09);
+  color: var(--text-low);
+  cursor: pointer;
+  font-size: 9px;
+  letter-spacing: .12em;
+  transition: opacity .25s ease, color .25s ease, background .25s ease, box-shadow .25s ease;
+}
+
+.mic-button:hover:not(:disabled) {
+  color: #d8f4ff;
+  background: rgba(102,205,255,.16);
+}
+
+.mic-button:disabled {
+  cursor: default;
+  opacity: .35;
+}
+
+.mic-button.recording {
+  color: #ecfbff;
+  background: rgba(102,205,255,.22);
+  box-shadow: 0 0 18px rgba(102,205,255,.28);
+}
+
+.mic-button.processing {
+  color: #d8f4ff;
+  background: rgba(255,255,255,.1);
+}
+
 .clear-button {
   opacity: 0;
   pointer-events: none;

@@ -979,6 +979,36 @@ class _FailingTelemetryRuntime:
         return {"state": state}
 
 
+class _FakeVoiceTranscriber:
+    def __init__(self, result: str = "vou a Estocolmo de 10 a 15 de outubro", error: Exception | None = None) -> None:
+        self.result = result
+        self.error = error
+        self.thread_checks: list[bool] = []
+
+    def record_and_transcribe(self, stop_event, status_callback=None) -> str:
+        from PySide6.QtCore import QCoreApplication, QThread
+
+        app = QCoreApplication.instance()
+        self.thread_checks.append(QThread.currentThread() != app.thread())
+        if status_callback is not None:
+            status_callback("A ouvir...")
+            status_callback("A processar...")
+        stop_event.set()
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+class _NoSpeechVoiceTranscriber(_FakeVoiceTranscriber):
+    def record_and_transcribe(self, stop_event, status_callback=None) -> str:
+        from assistant.voice_input import VoiceNoSpeechDetected
+
+        if status_callback is not None:
+            status_callback("A ouvir...")
+        stop_event.set()
+        raise VoiceNoSpeechDetected("Nao detetei fala.")
+
+
 def _qt_app():
     from PySide6.QtCore import QCoreApplication
 
@@ -1080,6 +1110,168 @@ def test_submit_message_reaches_idle_cleans_worker_and_delivers_progress_event()
     assert finished["count"] == 1
     assert "idle" in states
     assert controller.has_active_request() is False
+
+
+def test_echo_os_controller_exposes_voice_api_and_transcribes_off_ui_thread() -> None:
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine()
+    transcriber = _FakeVoiceTranscriber()
+    controller = EchoUIController(engine.respond, voice_available=True, voice_transcriber=transcriber)
+
+    states: list[str] = []
+    transcripts: list[str] = []
+    finished = {"count": 0}
+    controller.stateChanged.connect(states.append)
+    controller.voiceTranscriptionReady.connect(transcripts.append)
+    controller.voiceInputFinished.connect(lambda: finished.__setitem__("count", finished["count"] + 1))
+
+    loop = QEventLoop()
+    controller.voiceInputFinished.connect(loop.quit)
+    controller.startVoiceInput()
+    QTimer.singleShot(5000, loop.quit)
+    loop.exec()
+
+    assert transcripts == ["vou a Estocolmo de 10 a 15 de outubro"]
+    assert finished["count"] == 1
+    assert "listening" in states
+    assert states[-1] == "idle"
+    assert transcriber.thread_checks == [True]
+    assert controller._voice_thread is None
+    assert controller._voice_worker is None
+    assert engine._progress_listener is None
+
+
+def test_echo_os_voice_disabled_fails_safely_to_idle() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    controller = EchoUIController(_FakeEngine().respond, voice_available=False, voice_transcriber=None)
+    errors: list[str] = []
+    states: list[str] = []
+    controller.voiceInputError.connect(errors.append)
+    controller.stateChanged.connect(states.append)
+
+    controller.startVoiceInput()
+
+    assert errors == ["A voz não está disponível nesta sessão."]
+    assert states[-1] == "idle"
+    assert controller.isVoiceInputAvailable() is False
+
+
+def test_echo_os_voice_runtime_missing_fails_safely_to_idle() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    controller = EchoUIController(
+        _FakeEngine().respond,
+        voice_available=True,
+        voice_transcriber=_FakeVoiceTranscriber(),
+        voice_missing_dependencies=["ffmpeg"],
+    )
+    errors: list[str] = []
+    states: list[str] = []
+    controller.voiceInputError.connect(errors.append)
+    controller.stateChanged.connect(states.append)
+
+    controller.startVoiceInput()
+
+    assert errors == ["A voz não está pronta porque falta: ffmpeg"]
+    assert states[-1] == "idle"
+    assert controller.isVoiceInputAvailable() is False
+
+
+def test_echo_os_voice_failure_returns_error_then_idle() -> None:
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    controller = EchoUIController(
+        _FakeEngine().respond,
+        voice_available=True,
+        voice_transcriber=_FakeVoiceTranscriber(error=RuntimeError("microfone indisponível")),
+    )
+    errors: list[str] = []
+    states: list[str] = []
+    controller.voiceInputError.connect(errors.append)
+    controller.stateChanged.connect(states.append)
+
+    loop = QEventLoop()
+    controller.voiceInputFinished.connect(loop.quit)
+    controller.startVoiceInput()
+    QTimer.singleShot(5000, loop.quit)
+    loop.exec()
+
+    assert errors == ["Não consegui usar a voz: microfone indisponível"]
+    assert "error" in states
+    assert controller._voice_thread is None
+    assert controller._voice_worker is None
+
+
+def test_echo_os_voice_no_speech_returns_idle_without_error() -> None:
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    controller = EchoUIController(
+        _FakeEngine().respond,
+        voice_available=True,
+        voice_transcriber=_NoSpeechVoiceTranscriber(),
+    )
+    errors: list[str] = []
+    states: list[str] = []
+    transcripts: list[str] = []
+    controller.voiceInputError.connect(errors.append)
+    controller.stateChanged.connect(states.append)
+    controller.voiceTranscriptionReady.connect(transcripts.append)
+
+    loop = QEventLoop()
+    controller.voiceInputFinished.connect(loop.quit)
+    controller.startVoiceInput()
+    QTimer.singleShot(5000, loop.quit)
+    loop.exec()
+
+    assert errors == []
+    assert transcripts == [""]
+    assert "listening" in states
+    assert states[-1] == "idle"
+    assert controller._voice_thread is None
+    assert controller._voice_worker is None
+
+
+def test_echo_os_voice_frontend_inserts_text_without_auto_send() -> None:
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
+    controller = (PROTOTYPE / "controller.py").read_text(encoding="utf-8")
+
+    assert 'id="micButton"' in html
+    assert "startVoiceInput" in controller
+    assert "cancelVoiceInput" in controller
+    assert "voiceTranscriptionReady = Signal(str)" in controller
+    assert "voiceInputError = Signal(str)" in controller
+    assert "function insertVoiceTranscription(text)" in ui
+    insert_block = ui[ui.index("function insertVoiceTranscription"):ui.index("function startOrStopVoiceInput")]
+    assert "if (!transcription) return;" in insert_block
+    assert "input.value = current ? `${current} ${transcription}` : transcription;" in insert_block
+    assert "sendMessage" not in insert_block
+    assert "controller.submitMessage" not in insert_block
+    assert 'event.type === "voice_status"' in ui
+    assert "updateStatusLabel(document.body.dataset.echoState || \"idle\", currentProgressLabel)" in ui
+
+
+def test_echo_os_voice_frontend_never_uses_speaking_for_stt() -> None:
+    ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
+    voice_block = ui[ui.index("function startOrStopVoiceInput"):ui.index("function updateStatusLabel")]
+
+    assert 'applyEchoState("listening")' in voice_block
+    assert "controller.startVoiceInput()" in voice_block
+    assert "controller.cancelVoiceInput()" in voice_block
+    assert "speaking" not in voice_block
 
 
 def test_submit_message_reaches_idle_even_if_response_telemetry_fails() -> None:

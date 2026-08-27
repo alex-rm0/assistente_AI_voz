@@ -4,12 +4,14 @@ import time
 import os
 import traceback
 import json
+import threading
 from collections.abc import Callable
 from typing import Any
 
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 
 from assistant.secret_storage import sanitize_secret_error
+from assistant.voice_input import VoiceInputError, VoiceNoSpeechDetected, VoiceTranscriber, check_voice_runtime
 
 class EchoRequestWorker(QObject):
     finished = Signal(str)
@@ -41,6 +43,32 @@ class EchoRequestWorker(QObject):
                 set_listener(None)
 
 
+class EchoVoiceWorker(QObject):
+    transcriptionReady = Signal(str)
+    failed = Signal(str)
+    statusChanged = Signal(str)
+
+    def __init__(self, transcriber: VoiceTranscriber) -> None:
+        super().__init__()
+        self.transcriber = transcriber
+        self.stop_event = threading.Event()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            text = self.transcriber.record_and_transcribe(self.stop_event, self.statusChanged.emit)
+            self.statusChanged.emit("Concluído.")
+            self.transcriptionReady.emit(text)
+        except VoiceNoSpeechDetected:
+            self.statusChanged.emit("Não detetei fala.")
+            self.transcriptionReady.emit("")
+        except Exception as exc:
+            self.failed.emit(_bounded_voice_error(exc))
+
+
 class EchoUIController(QObject):
     """QWebChannel-facing controller for the Echo OS web UI.
 
@@ -56,6 +84,10 @@ class EchoUIController(QObject):
     modelModeChanged = Signal(str)
     requestStarted = Signal(str)
     requestFinished = Signal()
+    voiceTranscriptionReady = Signal(str)
+    voiceInputError = Signal(str)
+    voiceInputStarted = Signal()
+    voiceInputFinished = Signal()
 
     def __init__(
         self,
@@ -65,6 +97,9 @@ class EchoUIController(QObject):
         clear_conversation: Callable[[], None] | None = None,
         get_telemetry: Callable[[], dict | None] | None = None,
         model_runtime: Any | None = None,
+        voice_available: bool = False,
+        voice_transcriber: VoiceTranscriber | None = None,
+        voice_missing_dependencies: list[str] | tuple[str, ...] | None = None,
         thinking_min_ms: int = 300,
         speaking_duration_ms: int = 1000,
     ) -> None:
@@ -77,6 +112,12 @@ class EchoUIController(QObject):
         self.speaking_duration_ms = speaking_duration_ms
         self._thread: QThread | None = None
         self._worker: EchoRequestWorker | None = None
+        self._voice_thread: QThread | None = None
+        self._voice_worker: EchoVoiceWorker | None = None
+        self.voice_available = bool(voice_available)
+        self.voice_transcriber = voice_transcriber
+        self._voice_runtime_status_provided = voice_missing_dependencies is not None
+        self.voice_missing_dependencies = list(voice_missing_dependencies or [])
         self._active = False
         self._started_at = 0.0
         self._visual_token = 0
@@ -125,6 +166,51 @@ class EchoUIController(QObject):
         """Compatibility slot for the first prototype frontend."""
 
         self.submitMessage(text)
+
+    @Slot()
+    def startVoiceInput(self) -> None:
+        self._thread_debug("startVoiceInput")
+        if self._voice_worker is not None:
+            self.cancelVoiceInput()
+            return
+        if self._active:
+            self.voiceInputError.emit("Espera pela resposta atual terminar antes de gravares.")
+            return
+        if not self.voice_available or self.voice_transcriber is None:
+            self.voiceInputError.emit("A voz não está disponível nesta sessão.")
+            self._emit_state("idle")
+            return
+        missing = self.voice_missing_dependencies if self._voice_runtime_status_provided else check_voice_runtime()
+        if missing:
+            self.voiceInputError.emit("A voz não está pronta porque falta: " + ", ".join(missing))
+            self._emit_state("idle")
+            return
+
+        self._visual_token += 1
+        self._voice_thread = QThread(self)
+        self._voice_worker = EchoVoiceWorker(self.voice_transcriber)
+        self._voice_worker.moveToThread(self._voice_thread)
+        self._voice_thread.started.connect(self._voice_worker.run, Qt.ConnectionType.QueuedConnection)
+        self._voice_worker.statusChanged.connect(self._handle_voice_status, Qt.ConnectionType.QueuedConnection)
+        self._voice_worker.transcriptionReady.connect(self._handle_voice_transcription, Qt.ConnectionType.QueuedConnection)
+        self._voice_worker.failed.connect(self._handle_voice_error, Qt.ConnectionType.QueuedConnection)
+        self._voice_worker.transcriptionReady.connect(self._cleanup_voice_worker, Qt.ConnectionType.QueuedConnection)
+        self._voice_worker.failed.connect(self._cleanup_voice_worker, Qt.ConnectionType.QueuedConnection)
+        self.voiceInputStarted.emit()
+        self._emit_state("listening")
+        self._voice_thread.start()
+
+    @Slot()
+    def cancelVoiceInput(self) -> None:
+        self._thread_debug("cancelVoiceInput")
+        if self._voice_worker is None:
+            return
+        self._handle_voice_status("A processar...")
+        self._voice_worker.stop()
+
+    @Slot(result=bool)
+    def isVoiceInputAvailable(self) -> bool:
+        return bool(self.voice_available and self.voice_transcriber is not None and not self.voice_missing_dependencies)
 
     @Slot()
     def clearConversation(self) -> None:
@@ -235,6 +321,9 @@ class EchoUIController(QObject):
         return self._active
 
     def shutdown(self, wait_ms: int = 1500) -> None:
+        if self._voice_worker is not None:
+            self._voice_worker.stop()
+            self._cleanup_voice_worker()
         if self._thread is None:
             return
         self._thread.requestInterruption()
@@ -301,6 +390,43 @@ class EchoUIController(QObject):
         _debug_ui(f"[Echo UI] progress_event={event}")
         self._last_progress_event = str(event or "")
         self.uiEvent.emit(_json_payload({"type": str(event or "")}))
+
+    @Slot(str)
+    def _handle_voice_status(self, status: str) -> None:
+        clean_status = str(status or "").strip()
+        lowered = clean_status.lower()
+        if "ouvir" in lowered:
+            self._emit_state("listening")
+        elif "process" in lowered or "conclu" in lowered:
+            self._emit_state("thinking")
+        self.uiEvent.emit(_json_payload({"type": "voice_status", "status": clean_status}))
+
+    @Slot(str)
+    def _handle_voice_transcription(self, text: str) -> None:
+        self._thread_debug("_handle_voice_transcription")
+        self.voiceTranscriptionReady.emit(str(text or ""))
+        self._emit_state("idle")
+
+    @Slot(str)
+    def _handle_voice_error(self, error: str) -> None:
+        self._thread_debug("_handle_voice_error")
+        error_text = str(error or "Não consegui transcrever o áudio.")
+        self.voiceInputError.emit(error_text)
+        self._emit_state("error")
+        QTimer.singleShot(900, lambda: self._emit_state("idle"))
+
+    @Slot()
+    def _cleanup_voice_worker(self) -> None:
+        self._thread_debug("_cleanup_voice_worker")
+        if self._voice_thread is not None:
+            self._voice_thread.quit()
+            self._voice_thread.wait()
+            self._voice_thread.deleteLater()
+        if self._voice_worker is not None:
+            self._voice_worker.deleteLater()
+        self._voice_thread = None
+        self._voice_worker = None
+        self.voiceInputFinished.emit()
 
     @Slot(int)
     def _enter_speaking(self, token: int) -> None:
@@ -430,3 +556,10 @@ def _lifecycle_trace(event: str) -> None:
 
 def _json_payload(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False)
+
+
+def _bounded_voice_error(exc: Exception) -> str:
+    text = sanitize_secret_error(exc)
+    if isinstance(exc, VoiceInputError):
+        return text[:240]
+    return f"Não consegui usar a voz: {text}"[:240]

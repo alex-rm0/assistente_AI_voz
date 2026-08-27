@@ -10,6 +10,7 @@ from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from prototype_web_ui.controller import EchoUIController
+from assistant.voice_input import VoiceTranscriber
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -40,6 +41,19 @@ class EchoOSWindow(QWebEngineView):
         on_close: Callable[[], None] | None = None,
         get_telemetry: Callable[[], dict | None] | None = None,
         model_runtime: Any | None = None,
+        voice_available: bool = False,
+        voice_model: str = "base",
+        voice_language: str = "pt",
+        voice_sample_rate: int = 44100,
+        voice_input_device: str | int | None = "default",
+        voice_auto_select_input: bool = True,
+        voice_silent_rms_threshold: float = 0.001,
+        voice_channels: int = 1,
+        voice_probe_duration: float = 0.5,
+        voice_min_record_seconds: float = 2.0,
+        voice_preroll_ms: int = 500,
+        voice_ready_delay_ms: int = 200,
+        voice_missing_dependencies: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         super().__init__()
         self.on_close = on_close
@@ -47,12 +61,32 @@ class EchoOSWindow(QWebEngineView):
         self.resize(1328, 860)
 
         self.setPage(EchoWebPage(self))
+        voice_transcriber = (
+            VoiceTranscriber(
+                model_name=voice_model,
+                language=voice_language or "pt",
+                sample_rate=voice_sample_rate,
+                input_device=voice_input_device,
+                auto_select_input=voice_auto_select_input,
+                silent_rms_threshold=voice_silent_rms_threshold,
+                channels=voice_channels,
+                probe_duration=voice_probe_duration,
+                min_record_seconds=voice_min_record_seconds,
+                preroll_ms=voice_preroll_ms,
+                ready_delay_ms=voice_ready_delay_ms,
+            )
+            if voice_available
+            else None
+        )
         self.controller = EchoUIController(
             responder,
             self,
             clear_conversation=clear_conversation,
             get_telemetry=get_telemetry,
             model_runtime=model_runtime,
+            voice_available=voice_available,
+            voice_transcriber=voice_transcriber,
+            voice_missing_dependencies=voice_missing_dependencies,
         )
         print(
             "[Echo UI DEBUG] registered object name=echoController",

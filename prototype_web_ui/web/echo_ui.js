@@ -11,6 +11,9 @@
   let latestRealTelemetry = null;
   let activeRuntimeState = null;
   let configurationError = null;
+  let voiceInputAvailable = false;
+  let voiceInputActive = false;
+  let voiceInputProcessing = false;
 
   const APP_VERSION = "v0.4.0";
 
@@ -277,12 +280,67 @@
   function setInputEnabled(enabled) {
     const input = byId("voiceIn");
     const form = byId("echoForm");
+    const micButton = byId("micButton");
     if (!input || !form) {
       console.error("[Echo UI JS] input/form indisponivel");
       return;
     }
     input.disabled = !enabled;
     form.classList.toggle("busy", !enabled);
+    if (micButton) {
+      micButton.disabled = !voiceInputAvailable || (!enabled && !voiceInputActive) || voiceInputProcessing;
+    }
+  }
+
+  function setVoiceControlState(state, label) {
+    const micButton = byId("micButton");
+    if (!micButton) return;
+    const cleanState = String(state || "idle");
+    micButton.dataset.voiceState = cleanState;
+    micButton.classList.toggle("recording", cleanState === "listening");
+    micButton.classList.toggle("processing", cleanState === "processing");
+    micButton.textContent = label || (cleanState === "listening" ? "STOP" : cleanState === "processing" ? "..." : "MIC");
+    micButton.disabled = !voiceInputAvailable || requestActive || cleanState === "processing" || cleanState === "disabled";
+  }
+
+  function insertVoiceTranscription(text) {
+    const input = byId("voiceIn");
+    if (!input) return;
+    const transcription = String(text || "").trim();
+    if (!transcription) return;
+    const current = String(input.value || "").trim();
+    input.value = current ? `${current} ${transcription}` : transcription;
+    input.dispatchEvent(new Event("input", {bubbles: true}));
+    focusInput();
+  }
+
+  function startOrStopVoiceInput() {
+    if (!controllerReady || !controller) {
+      renderEchoError("A ligação ao Python ainda não está pronta.");
+      applyEchoState("error");
+      return;
+    }
+    if (!voiceInputAvailable || requestActive || voiceInputProcessing) {
+      focusInput();
+      return;
+    }
+    if (voiceInputActive) {
+      voiceInputProcessing = true;
+      setVoiceControlState("processing");
+      updateStatusLabel("thinking", "A processar áudio…");
+      controller.cancelVoiceInput();
+      return;
+    }
+    if (typeof controller.startVoiceInput !== "function") {
+      renderEchoError("A voz ainda não está ligada nesta interface.");
+      applyEchoState("error");
+      return;
+    }
+    voiceInputActive = true;
+    voiceInputProcessing = false;
+    setVoiceControlState("listening");
+    applyEchoState("listening");
+    controller.startVoiceInput();
   }
 
   function updateStatusLabel(state, progressLabel) {
@@ -2194,6 +2252,12 @@
       console.error("[Echo UI JS] uiEvent sem type valido", event);
       return;
     }
+    if (event.type === "voice_status") {
+      const label = String(event.status || "");
+      currentProgressLabel = label;
+      updateStatusLabel(document.body.dataset.echoState || "idle", currentProgressLabel);
+      return;
+    }
     if (applyProgressEvent(event)) return;
     if (window.echoWorkspace) window.echoWorkspace.handleEvent(event);
   }
@@ -2265,6 +2329,40 @@
       renderEchoError(String(message));
       applyEchoState("error");
     });
+
+    if (activeController.voiceInputStarted) {
+      activeController.voiceInputStarted.connect(() => {
+        console.log("[Echo UI JS] voiceInputStarted recebido");
+        voiceInputActive = true;
+        voiceInputProcessing = false;
+        setVoiceControlState("listening");
+      });
+    }
+
+    if (activeController.voiceTranscriptionReady) {
+      activeController.voiceTranscriptionReady.connect((text) => {
+        console.log("[Echo UI JS] voiceTranscriptionReady recebido:", text);
+        insertVoiceTranscription(text);
+      });
+    }
+
+    if (activeController.voiceInputError) {
+      activeController.voiceInputError.connect((message) => {
+        console.log("[Echo UI JS] voiceInputError recebido:", message);
+        renderEchoError(String(message));
+        applyEchoState("error");
+      });
+    }
+
+    if (activeController.voiceInputFinished) {
+      activeController.voiceInputFinished.connect(() => {
+        console.log("[Echo UI JS] voiceInputFinished recebido");
+        voiceInputActive = false;
+        voiceInputProcessing = false;
+        setVoiceControlState("idle");
+        focusInput();
+      });
+    }
 
     activeController.uiEvent.connect((payload) => {
       handleUiEventPayload(payload);
@@ -2340,6 +2438,12 @@
       if (typeof controller.getModelTelemetry === "function") {
         controller.getModelTelemetry((payload) => applyRealTelemetry(payload));
       }
+      if (typeof controller.isVoiceInputAvailable === "function") {
+        controller.isVoiceInputAvailable((available) => {
+          voiceInputAvailable = Boolean(available);
+          setVoiceControlState(available ? "idle" : "disabled");
+        });
+      }
       setInputEnabled(true);
       focusInput();
     });
@@ -2348,6 +2452,7 @@
   function bindDomEvents() {
     const form = byId("echoForm");
     const clearButton = byId("clearButton");
+    const micButton = byId("micButton");
     const closeResearch = byId("closeResearch");
     const telemetryCompact = byId("telemetryCompact");
     const closeTelemetry = byId("closeTelemetry");
@@ -2367,6 +2472,12 @@
         event.preventDefault();
         const input = byId("voiceIn");
         sendMessage(input ? input.value : "");
+      });
+    }
+
+    if (micButton) {
+      micButton.addEventListener("click", () => {
+        startOrStopVoiceInput();
       });
     }
 

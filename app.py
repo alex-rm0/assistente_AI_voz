@@ -347,6 +347,19 @@ def main() -> int:
             on_close=engine.close_session,
             get_telemetry=engine.get_last_turn_telemetry,
             model_runtime=model_runtime,
+            voice_available=voice_runtime_enabled,
+            voice_model=voice_config.get("model", "base"),
+            voice_language=voice_config.get("language", "pt"),
+            voice_sample_rate=voice_sample_rate,
+            voice_input_device=voice_input_device,
+            voice_auto_select_input=voice_auto_select_input,
+            voice_silent_rms_threshold=voice_silent_rms_threshold,
+            voice_channels=voice_channels,
+            voice_probe_duration=voice_probe_duration,
+            voice_min_record_seconds=voice_min_record_seconds,
+            voice_preroll_ms=voice_preroll_ms,
+            voice_ready_delay_ms=voice_ready_delay_ms,
+            voice_missing_dependencies=voice_missing,
         )
     else:
         from ui.main_window import MainWindow
