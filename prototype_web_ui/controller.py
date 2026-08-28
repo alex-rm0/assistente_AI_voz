@@ -11,6 +11,7 @@ from typing import Any
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 
 from assistant.secret_storage import sanitize_secret_error
+from assistant.tts import TTSError, play_audio_file
 from assistant.voice_input import VoiceInputError, VoiceNoSpeechDetected, VoiceTranscriber, check_voice_runtime
 
 class EchoRequestWorker(QObject):
@@ -69,6 +70,62 @@ class EchoVoiceWorker(QObject):
             self.failed.emit(_bounded_voice_error(exc))
 
 
+class EchoTTSWorker(QObject):
+    playbackStarted = Signal(str)
+    finished = Signal(str)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        tts_manager: Any,
+        text: str,
+        player: Callable[..., float] = play_audio_file,
+        response_language: str = "",
+    ) -> None:
+        super().__init__()
+        self.tts_manager = tts_manager
+        self.text = text
+        self.player = player
+        self.response_language = response_language
+        self.stop_event = threading.Event()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        stop = getattr(self.tts_manager, "stop", None)
+        if callable(stop):
+            stop()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            try:
+                result = self.tts_manager.speak_to_file(self.text, response_language=self.response_language)
+            except TypeError:
+                result = self.tts_manager.speak_to_file(self.text)
+            if self.stop_event.is_set():
+                self.finished.emit(_json_payload({"stopped": True}))
+                return
+            self.playbackStarted.emit(
+                _json_payload(
+                    {
+                        "provider": result.provider,
+                        "voice_id": result.voice_id,
+                        "language": self.response_language or result.language,
+                        "response_language": self.response_language,
+                        "voice_language": result.language,
+                        "synthesis_ms": int(result.synthesis_ms),
+                        "text_chars": result.text_chars,
+                        "fallback_used": result.fallback_used,
+                        "fallback_reason": result.fallback_reason,
+                    }
+                )
+            )
+            playback_ms = self.player(result.audio_path, self.stop_event.is_set)
+            self.finished.emit(_json_payload({"playback_ms": int(playback_ms), "voice_id": result.voice_id}))
+        except Exception as exc:
+            self.failed.emit(_bounded_tts_error(exc))
+
+
 class EchoUIController(QObject):
     """QWebChannel-facing controller for the Echo OS web UI.
 
@@ -88,6 +145,9 @@ class EchoUIController(QObject):
     voiceInputError = Signal(str)
     voiceInputStarted = Signal()
     voiceInputFinished = Signal()
+    ttsStarted = Signal(str)
+    ttsFinished = Signal(str)
+    ttsError = Signal(str)
 
     def __init__(
         self,
@@ -100,8 +160,10 @@ class EchoUIController(QObject):
         voice_available: bool = False,
         voice_transcriber: VoiceTranscriber | None = None,
         voice_missing_dependencies: list[str] | tuple[str, ...] | None = None,
+        tts_manager: Any | None = None,
+        tts_player: Callable[..., float] = play_audio_file,
+        get_response_language: Callable[[], str] | None = None,
         thinking_min_ms: int = 300,
-        speaking_duration_ms: int = 1000,
     ) -> None:
         super().__init__(parent)
         self.responder = responder
@@ -109,11 +171,15 @@ class EchoUIController(QObject):
         self.get_telemetry_callback = get_telemetry
         self.model_runtime = model_runtime
         self.thinking_min_ms = thinking_min_ms
-        self.speaking_duration_ms = speaking_duration_ms
         self._thread: QThread | None = None
         self._worker: EchoRequestWorker | None = None
         self._voice_thread: QThread | None = None
         self._voice_worker: EchoVoiceWorker | None = None
+        self._tts_thread: QThread | None = None
+        self._tts_worker: EchoTTSWorker | None = None
+        self.tts_manager = tts_manager
+        self.tts_player = tts_player
+        self.get_response_language_callback = get_response_language
         self.voice_available = bool(voice_available)
         self.voice_transcriber = voice_transcriber
         self._voice_runtime_status_provided = voice_missing_dependencies is not None
@@ -211,6 +277,70 @@ class EchoUIController(QObject):
     @Slot(result=bool)
     def isVoiceInputAvailable(self) -> bool:
         return bool(self.voice_available and self.voice_transcriber is not None and not self.voice_missing_dependencies)
+
+    @Slot(result=bool)
+    def isTtsAvailable(self) -> bool:
+        if self.tts_manager is None:
+            return False
+        manager_available = getattr(self.tts_manager, "is_available", None)
+        if callable(manager_available):
+            try:
+                return bool(manager_available(response_language=self._response_language()))
+            except TypeError:
+                return bool(manager_available())
+        provider = getattr(self.tts_manager, "provider", None)
+        available = getattr(provider, "is_available", None)
+        return bool(callable(available) and available())
+
+    @Slot(str)
+    def speakText(self, text: str) -> None:
+        self._thread_debug("speakText")
+        message = str(text or "").strip()
+        if not message:
+            self.ttsError.emit("Não há resposta para falar.")
+            return
+        if self.tts_manager is None:
+            self.ttsError.emit("A fala ainda não está ligada nesta sessão.")
+            return
+        manager_available = getattr(self.tts_manager, "is_available", None)
+        response_language = self._response_language()
+        if callable(manager_available):
+            try:
+                available = bool(manager_available(response_language=response_language))
+            except TypeError:
+                available = bool(manager_available())
+            if not available:
+                self.ttsError.emit(_tts_unavailable_message(response_language))
+                self._emit_state("idle")
+                return
+        if self._tts_worker is not None:
+            self.stopSpeaking()
+        self._visual_token += 1
+        self._tts_thread = QThread(self)
+        self._tts_worker = EchoTTSWorker(self.tts_manager, message, self.tts_player, response_language)
+        self._tts_worker.moveToThread(self._tts_thread)
+        self._tts_thread.started.connect(self._tts_worker.run, Qt.ConnectionType.QueuedConnection)
+        self._tts_worker.playbackStarted.connect(self._handle_tts_started, Qt.ConnectionType.QueuedConnection)
+        self._tts_worker.finished.connect(self._handle_tts_finished, Qt.ConnectionType.QueuedConnection)
+        self._tts_worker.failed.connect(self._handle_tts_error, Qt.ConnectionType.QueuedConnection)
+        _debug_tts("[TTS]", "event=request", f"text_chars={len(message)}", f"response_language={response_language}")
+        self._tts_thread.start()
+
+    @Slot()
+    def stopSpeaking(self) -> None:
+        self._thread_debug("stopSpeaking")
+        if self._tts_worker is None:
+            return
+        self._tts_worker.stop()
+        self._emit_state("idle")
+
+    def _response_language(self) -> str:
+        if callable(self.get_response_language_callback):
+            try:
+                return str(self.get_response_language_callback() or "")
+            except Exception:
+                return ""
+        return ""
 
     @Slot()
     def clearConversation(self) -> None:
@@ -324,6 +454,9 @@ class EchoUIController(QObject):
         if self._voice_worker is not None:
             self._voice_worker.stop()
             self._cleanup_voice_worker()
+        if self._tts_worker is not None:
+            self._tts_worker.stop()
+            self._cleanup_tts_worker()
         if self._thread is None:
             return
         self._thread.requestInterruption()
@@ -353,8 +486,7 @@ class EchoUIController(QObject):
             else:
                 elapsed_ms = int((time.perf_counter() - self._started_at) * 1000) if self._started_at else 0
                 delay_ms = max(0, self.thinking_min_ms - elapsed_ms)
-                token = self._visual_token
-                QTimer.singleShot(delay_ms, lambda: self._enter_speaking(token))
+                QTimer.singleShot(delay_ms, lambda: self._emit_state("idle"))
         except Exception as exc:
             _debug_ui(f"[Echo UI DEBUG] response_finalization_error={exc}")
             self._emit_state("error")
@@ -428,22 +560,45 @@ class EchoUIController(QObject):
         self._voice_worker = None
         self.voiceInputFinished.emit()
 
-    @Slot(int)
-    def _enter_speaking(self, token: int) -> None:
-        self._thread_debug("_enter_speaking")
-        if token != self._visual_token:
-            return
-        _lifecycle_trace("STATE_SPEAKING")
+    @Slot(str)
+    def _handle_tts_started(self, payload: str) -> None:
+        self._thread_debug("_handle_tts_started")
+        _debug_tts("[TTS]", "event=playback_started", _bounded_tts_payload(payload))
         self._emit_state("speaking")
-        QTimer.singleShot(self.speaking_duration_ms, lambda: self._finish_speaking(token))
+        self.ttsStarted.emit(str(payload or "{}"))
 
-    @Slot(int)
-    def _finish_speaking(self, token: int) -> None:
-        self._thread_debug("_finish_speaking")
-        if token != self._visual_token:
-            return
-        _lifecycle_trace("STATE_IDLE")
+    @Slot(str)
+    def _handle_tts_finished(self, payload: str) -> None:
+        self._thread_debug("_handle_tts_finished")
+        _debug_tts("[TTS]", "event=playback_finished", _bounded_tts_payload(payload), "success=true")
         self._emit_state("idle")
+        self._cleanup_tts_worker()
+        self.ttsFinished.emit(str(payload or "{}"))
+
+    @Slot(str)
+    def _handle_tts_error(self, error: str) -> None:
+        self._thread_debug("_handle_tts_error")
+        error_text = str(error or "Não consegui falar a resposta.")
+        _debug_tts("[TTS]", "event=error", "success=false", f"failure_reason={error_text[:160]}")
+        self._cleanup_tts_worker()
+        self.ttsError.emit(error_text)
+        if _is_tts_capability_unavailable(error_text):
+            self._emit_state("idle")
+            return
+        self._emit_state("error")
+        QTimer.singleShot(900, lambda: self._emit_state("idle"))
+
+    @Slot()
+    def _cleanup_tts_worker(self) -> None:
+        self._thread_debug("_cleanup_tts_worker")
+        if self._tts_thread is not None:
+            self._tts_thread.quit()
+            self._tts_thread.wait()
+            self._tts_thread.deleteLater()
+        if self._tts_worker is not None:
+            self._tts_worker.deleteLater()
+        self._tts_thread = None
+        self._tts_worker = None
 
     @Slot()
     def _cleanup_worker(self) -> None:
@@ -550,6 +705,10 @@ def _debug_threads(*parts: object) -> None:
         print(*parts)
 
 
+def _debug_tts(*parts: object) -> None:
+    print(*parts)
+
+
 def _lifecycle_trace(event: str) -> None:
     print("[LIFECYCLE]", event)
 
@@ -563,3 +722,53 @@ def _bounded_voice_error(exc: Exception) -> str:
     if isinstance(exc, VoiceInputError):
         return text[:240]
     return f"Não consegui usar a voz: {text}"[:240]
+
+
+def _bounded_tts_error(exc: Exception) -> str:
+    text = sanitize_secret_error(exc)
+    if isinstance(exc, TTSError):
+        return text[:240]
+    return f"Não consegui falar a resposta: {text}"[:240]
+
+
+def _bounded_tts_payload(payload: str) -> str:
+    try:
+        data = json.loads(str(payload or "{}"))
+    except json.JSONDecodeError:
+        return "payload=invalid"
+    fields = []
+    for key in (
+        "provider",
+        "voice_id",
+        "language",
+        "response_language",
+        "voice_language",
+        "text_chars",
+        "synthesis_ms",
+        "playback_ms",
+        "fallback_used",
+        "fallback_reason",
+    ):
+        if key in data:
+            fields.append(f"{key}={str(data.get(key))[:80]}")
+    return " ".join(fields)
+
+
+def _is_tts_capability_unavailable(message: str) -> bool:
+    text = str(message or "").strip().lower()
+    return any(
+        marker in text
+        for marker in (
+            "nenhuma voz tts local",
+            "voz tts selecionada não está disponível",
+            "fala ainda não está ligada",
+            "não encontrei uma voz tts local",
+            "voz portuguesa ainda não está disponível",
+        )
+    )
+
+
+def _tts_unavailable_message(response_language: str) -> str:
+    if str(response_language or "").strip() == "pt-PT":
+        return "A voz portuguesa ainda não está disponível."
+    return "Não encontrei uma voz TTS local compatível."

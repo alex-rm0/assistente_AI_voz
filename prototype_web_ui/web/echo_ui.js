@@ -14,6 +14,9 @@
   let voiceInputAvailable = false;
   let voiceInputActive = false;
   let voiceInputProcessing = false;
+  let ttsAvailable = false;
+  let ttsActive = false;
+  let currentResponseText = "";
 
   const APP_VERSION = "v0.4.0";
 
@@ -281,6 +284,8 @@
     const input = byId("voiceIn");
     const form = byId("echoForm");
     const micButton = byId("micButton");
+    const speakButton = byId("speakButton");
+    const stopSpeechButton = byId("stopSpeechButton");
     if (!input || !form) {
       console.error("[Echo UI JS] input/form indisponivel");
       return;
@@ -290,6 +295,7 @@
     if (micButton) {
       micButton.disabled = !voiceInputAvailable || (!enabled && !voiceInputActive) || voiceInputProcessing;
     }
+    updateTtsControls();
   }
 
   function setVoiceControlState(state, label) {
@@ -301,6 +307,50 @@
     micButton.classList.toggle("processing", cleanState === "processing");
     micButton.textContent = label || (cleanState === "listening" ? "STOP" : cleanState === "processing" ? "..." : "MIC");
     micButton.disabled = !voiceInputAvailable || requestActive || cleanState === "processing" || cleanState === "disabled";
+  }
+
+  function updateTtsControls() {
+    const speakButton = byId("speakButton");
+    const stopSpeechButton = byId("stopSpeechButton");
+    if (speakButton) {
+      speakButton.disabled = !ttsAvailable || ttsActive || requestActive || !currentResponseText;
+      speakButton.classList.toggle("active", ttsActive);
+    }
+    if (stopSpeechButton) {
+      stopSpeechButton.disabled = !ttsAvailable || !ttsActive;
+      stopSpeechButton.classList.toggle("active", ttsActive);
+    }
+  }
+
+  function speakCurrentResponse() {
+    if (!controllerReady || !controller) {
+      renderEchoError("A ligação ao Python ainda não está pronta.");
+      applyEchoState("error");
+      return;
+    }
+    if (!ttsAvailable || ttsActive || !currentResponseText) {
+      focusInput();
+      return;
+    }
+    if (typeof controller.speakText !== "function") {
+      renderEchoError("A fala ainda não está ligada nesta interface.");
+      applyEchoState("error");
+      return;
+    }
+    controller.speakText(currentResponseText);
+  }
+
+  function stopSpeaking() {
+    if (controller && typeof controller.stopSpeaking === "function") {
+      controller.stopSpeaking();
+    }
+  }
+
+  function isTtsCapabilityUnavailable(message) {
+    const text = String(message || "").toLowerCase();
+    return text.includes("voz portuguesa ainda não está disponível")
+      || text.includes("não encontrei uma voz tts local")
+      || text.includes("fala ainda não está ligada");
   }
 
   function insertVoiceTranscription(text) {
@@ -1696,6 +1746,10 @@
     updateStatusLabel(value, currentProgressLabel);
     document.body.dataset.echoState = value;
     document.body.dataset.echoMode = value;
+    if (value !== "speaking") {
+      ttsActive = false;
+      updateTtsControls();
+    }
 
     if (value === "idle") {
       const echoSays = byId("echoSays");
@@ -1765,6 +1819,7 @@
     }
 
     replyFadeToken += 1;
+    currentResponseText = value;
     renderSafeMarkdown(element, value);
     element.hidden = false;
     element.style.display = "block";
@@ -1783,6 +1838,7 @@
     if (bridgeReply) bridgeReply.textContent = value;
     if (workspaceHint) workspaceHint.classList.remove("visible");
     if (clearButton) clearButton.classList.add("visible");
+    updateTtsControls();
     if (telemetryDebugMode && (telemetryMode === "automatic" || telemetryState === "thinking_cloud")) {
       applyTelemetryMock("response_ready");
     } else if (telemetryDebugMode) {
@@ -2272,6 +2328,8 @@
     replyFadeToken = token;
     if (workspaceHint) workspaceHint.classList.remove("visible");
     if (clearButton) clearButton.classList.remove("visible");
+    currentResponseText = "";
+    updateTtsControls();
     echoResponse.classList.add("muted");
     echoResponse.classList.remove("visible");
     echoResponse.style.opacity = "";
@@ -2301,6 +2359,7 @@
     }
 
     if (input) input.value = "";
+    if (ttsActive) stopSpeaking();
     fadeCurrentReply();
     if (telemetryDebugMode) {
       if (telemetryMode === "automatic") runAutomaticRoutingMock();
@@ -2361,6 +2420,36 @@
         voiceInputProcessing = false;
         setVoiceControlState("idle");
         focusInput();
+      });
+    }
+
+    if (activeController.ttsStarted) {
+      activeController.ttsStarted.connect((payload) => {
+        console.log("[Echo UI JS] ttsStarted recebido:", payload);
+        ttsActive = true;
+        updateTtsControls();
+      });
+    }
+
+    if (activeController.ttsFinished) {
+      activeController.ttsFinished.connect((payload) => {
+        console.log("[Echo UI JS] ttsFinished recebido:", payload);
+        ttsActive = false;
+        updateTtsControls();
+        focusInput();
+      });
+    }
+
+    if (activeController.ttsError) {
+      activeController.ttsError.connect((message) => {
+        console.log("[Echo UI JS] ttsError recebido:", message);
+        ttsActive = false;
+        updateTtsControls();
+        if (isTtsCapabilityUnavailable(message)) {
+          applyEchoState("idle", {progressLabel: String(message || "")});
+        } else {
+          applyEchoState("error", {progressLabel: String(message || "Não consegui falar.")});
+        }
       });
     }
 
@@ -2444,6 +2533,12 @@
           setVoiceControlState(available ? "idle" : "disabled");
         });
       }
+      if (typeof controller.isTtsAvailable === "function") {
+        controller.isTtsAvailable((available) => {
+          ttsAvailable = Boolean(available);
+          updateTtsControls();
+        });
+      }
       setInputEnabled(true);
       focusInput();
     });
@@ -2453,6 +2548,8 @@
     const form = byId("echoForm");
     const clearButton = byId("clearButton");
     const micButton = byId("micButton");
+    const speakButton = byId("speakButton");
+    const stopSpeechButton = byId("stopSpeechButton");
     const closeResearch = byId("closeResearch");
     const telemetryCompact = byId("telemetryCompact");
     const closeTelemetry = byId("closeTelemetry");
@@ -2481,6 +2578,18 @@
       });
     }
 
+    if (speakButton) {
+      speakButton.addEventListener("click", () => {
+        speakCurrentResponse();
+      });
+    }
+
+    if (stopSpeechButton) {
+      stopSpeechButton.addEventListener("click", () => {
+        stopSpeaking();
+      });
+    }
+
     if (clearButton) {
       clearButton.addEventListener("click", () => {
         const bridgeReply = byId("bridgeReply");
@@ -2493,8 +2602,10 @@
         if (workspaceHint) workspaceHint.classList.remove("visible");
         if (window.echoWorkspace) window.echoWorkspace.clear();
         if (window.echoWorkspaceObjects) window.echoWorkspaceObjects.clear();
+        if (ttsActive) stopSpeaking();
         if (echoResponse) {
           echoResponse.textContent = "";
+          currentResponseText = "";
           echoResponse.dataset.responseMode = "short";
           echoResponse.dataset.responseLayout = "inline";
           echoResponse.dataset.contentType = "plain_text";
@@ -2505,6 +2616,7 @@
           echoResponse.style.opacity = "";
           echoResponse.classList.remove("visible", "muted");
         }
+        updateTtsControls();
         const stage = document.querySelector(".stage");
         activeResponseLayout = "inline";
         entityPlacementOverride = null;

@@ -121,6 +121,18 @@ from assistant.personal_model import PersonalModel, infer_category
 from assistant.presence_manager import PresenceManager, PresenceState
 from assistant.proactive_suggestions import next_proactive_suggestion
 from assistant.response_composer import ComposerRequest, ResponseComposer
+from assistant.response_language import (
+    ENGLISH_GB,
+    PORTUGUESE_PT,
+    detect_response_language_command,
+    legacy_language_value,
+    localize_deterministic_response,
+    looks_mixed_for_language,
+    normalize_response_language,
+    response_language_instruction,
+    response_language_status,
+    simple_social_response,
+)
 from assistant.security import check_user_request
 from assistant.session_manager import SessionManager
 from assistant.text_encoding import debug_text_encoding, has_mojibake_markers
@@ -401,6 +413,7 @@ class AssistantEngine:
         voice_model: str = "base",
         voice_language: str = "pt",
         voice_critic_llm: OllamaClient | None = None,
+        tts_manager=None,
         model_runtime=None,
         now_provider=None,
         semantic_extractor: SemanticExtractor | None = None,
@@ -512,7 +525,10 @@ class AssistantEngine:
         self.last_context_debug = ""
         self.delegation = DelegationManager()
         self.language_base = "pt-PT"
-        self.current_language = self._load_language_preference()
+        self.tts_manager = tts_manager
+        self.model_runtime = model_runtime
+        self.response_language = self._load_response_language_preference()
+        self.current_language = legacy_language_value(self.response_language)
         self.voice_enabled = voice_enabled
         self.voice_missing_dependencies = voice_missing_dependencies or []
         self.voice_microphone_ok = voice_microphone_ok
@@ -526,7 +542,6 @@ class AssistantEngine:
         self.voice_min_record_seconds = voice_min_record_seconds
         self.voice_model = voice_model
         self.voice_language = voice_language or "pt"
-        self.model_runtime = model_runtime
         self.now_provider = now_provider or (lambda: datetime.now().astimezone())
         self._ensure_language_preferences()
         if self.session_manager is not None and self.presence.state == PresenceState.ACTIVE_CONVERSATION:
@@ -822,6 +837,17 @@ class AssistantEngine:
             )
             self._perf_log("resposta total", request_started_at, time.perf_counter())
             return pending_workspace_response
+
+        language_response = self._try_language_preference_command(user_message)
+        if language_response is not None:
+            language_response = self._complete_turn(
+                user_message,
+                language_response,
+                "LANGUAGE_COMMAND",
+                selected_path="LANGUAGE_COMMAND",
+            )
+            self._perf_log("resposta total", request_started_at, time.perf_counter())
+            return language_response
 
         pending_intent_response = self._try_pending_user_intent(user_message)
         if pending_intent_response is not None:
@@ -1495,9 +1521,9 @@ class AssistantEngine:
             self._perf_log("resposta total", request_started_at, time.perf_counter())
             return response
 
-        language_response = self._try_language_preference_command(user_message)
-        if language_response is not None:
-            return self._complete_turn(user_message, language_response, "RESPONSE_COMPOSER", selected_path="LANGUAGE_COMMAND")
+        tts_response = self._try_tts_command(user_message)
+        if tts_response is not None:
+            return self._complete_turn(user_message, tts_response, "TTS_COMMAND", technical=True, selected_path="VOICE_COMMAND")
 
         presence_question_response = self._try_presence_question(user_message)
         if presence_question_response is not None:
@@ -1597,27 +1623,78 @@ class AssistantEngine:
         return response
 
     def _load_language_preference(self) -> str:
+        return legacy_language_value(self._load_response_language_preference())
+
+    def _load_response_language_preference(self) -> str:
+        store = self._user_settings_store()
+        if store is not None:
+            try:
+                language = normalize_response_language(store.load().get("response_language"))
+            except Exception:
+                language = ""
+            if language:
+                return language
         getter = getattr(self.long_term_memory, "get_preference", None)
         if getter is None:
             return "pt-PT"
-        value = getter("idioma_atual", "pt-PT")
-        return value if value in {"pt-PT", "en"} else "pt-PT"
+        value = normalize_response_language(getter("response_language", "")) or normalize_response_language(
+            getter("idioma_atual", "pt-PT")
+        )
+        return value or "pt-PT"
 
     def _ensure_language_preferences(self) -> None:
         setter = getattr(self.long_term_memory, "set_preference", None)
         getter = getattr(self.long_term_memory, "get_preference", None)
-        if setter is None or getter is None:
-            return
-        if not getter("idioma_base", ""):
-            setter("idioma_base", self.language_base)
-        if not getter("idioma_atual", ""):
-            setter("idioma_atual", self.current_language)
+        if setter is not None and getter is not None:
+            if not getter("idioma_base", ""):
+                setter("idioma_base", self.language_base)
+            if not getter("idioma_atual", ""):
+                setter("idioma_atual", self.current_language)
+            if not getter("response_language", ""):
+                setter("response_language", self.response_language)
+        store = self._user_settings_store()
+        if store is not None:
+            try:
+                if not normalize_response_language(store.load().get("response_language")):
+                    store.update(response_language=self.response_language)
+            except Exception:
+                pass
 
     def _set_current_language(self, language: str) -> None:
-        self.current_language = language
+        self._set_response_language(language)
+
+    def _set_response_language(self, language: str) -> None:
+        normalized = normalize_response_language(language) or PORTUGUESE_PT
+        self.response_language = normalized
+        self.current_language = legacy_language_value(normalized)
+        store = self._user_settings_store()
+        if store is not None:
+            try:
+                store.update(response_language=normalized)
+            except Exception:
+                pass
         setter = getattr(self.long_term_memory, "set_preference", None)
         if setter is not None:
-            setter("idioma_atual", language)
+            setter("idioma_atual", self.current_language)
+            setter("response_language", normalized)
+        self._coordinate_tts_voice_for_language(normalized)
+
+    def _user_settings_store(self):
+        runtime_store = getattr(self.model_runtime, "store", None)
+        if runtime_store is not None:
+            return runtime_store
+        return getattr(self.tts_manager, "store", None)
+
+    def _coordinate_tts_voice_for_language(self, language: str) -> None:
+        manager = self.tts_manager
+        setter = getattr(manager, "set_active_voice", None)
+        if not callable(setter):
+            return
+        target = "english_british_primary" if normalize_response_language(language) == ENGLISH_GB else "portuguese_ptpt_primary"
+        try:
+            setter(target)
+        except Exception:
+            pass
 
     def _system_prompt_for_agent(self, active_contexts: list[ActiveContext]) -> str:
         return (
@@ -1626,22 +1703,7 @@ class AssistantEngine:
         )
 
     def _language_instruction(self) -> str:
-        if self.current_language == "en":
-            current = (
-                "O idioma atual é inglês porque o utilizador pediu. "
-                "Se o utilizador pedir português, volta imediatamente a pt-PT."
-            )
-        else:
-            current = "O idioma atual é português de Portugal."
-        return (
-            "Preferências de idioma:\n"
-            "- idioma_base = pt-PT.\n"
-            f"- idioma_atual = {self.current_language}.\n"
-            f"- {current}\n"
-            "- Vocabulário pt-PT obrigatório quando responderes em português: "
-            "aplicações, ecrã, acompanhar/observar, ficheiros, aceder.\n"
-            "- Evita português do Brasil: aplicativos, tela, assistindo, arquivos, acessar."
-        )
+        return response_language_instruction(self.response_language)
 
     def _try_delegation(self, user_message: str, context: str) -> str | None:
         decision = self.delegation.decide(
@@ -6137,49 +6199,43 @@ class AssistantEngine:
         text = " ".join(text.split())
         if not is_pure_social_turn(user_message):
             return None
-        if text in {"ola", "viva", "olá"}:
-            return "Olá! Como estás?"
-        if text in {"viva tudo bem contigo", "ola tudo bem contigo", "olá tudo bem contigo", "tudo bem contigo"}:
-            return "Tudo bem. E contigo?"
-        if text in {"tambem estou bem", "também estou bem", "tambem estou bem obrigado", "também estou bem obrigado"}:
-            return "Ainda bem."
-        if text in {"bom dia"}:
-            return "Bom dia."
-        if text in {"boa tarde"}:
-            return "Boa tarde."
-        if text in {"boa noite"}:
-            return "Boa noite."
-        if text in {"obrigado", "obrigada", "muito obrigado", "muito obrigada"}:
-            return "De nada."
-        if text in {"ok obrigado", "ok obrigada", "esta bem obrigado", "estÃ¡ bem obrigado"}:
-            return "De nada."
-        if text in {"estas ai", "estÃ¡s ai", "estas aÃ­", "estÃ¡s aÃ­"}:
-            return "Sim, estou aqui."
-        if text in {"como te chamas", "qual e o teu nome", "qual Ã© o teu nome"}:
-            return "Chamo-me Echo."
+        response = simple_social_response(user_message, self.response_language)
+        if response is not None:
+            return response
+        english = normalize_response_language(self.response_language) == ENGLISH_GB
         if "cor preferida" in text:
             if any(marker in text for marker in ("irma de 7 anos", "irmÃ£ de 7 anos", "crianca", "crianÃ§a")):
-                return "Eu escolhia azul, porque parece a cor das minhas luzes."
-            return "Se tivesse de escolher uma, dizia azul — combina comigo."
+                return "I'd choose blue, because it looks like the colour of my lights." if english else "Eu escolhia azul, porque parece a cor das minhas luzes."
+            return "If I had to choose, I'd say blue. It suits me." if english else "Se tivesse de escolher uma, dizia azul — combina comigo."
         if "clube" in text and any(marker in text for marker in ("qual", "tens", "preferido")):
-            return "Não tenho clube, mas posso escolher um só para brincar contigo."
-        return "Estou bem. E tu?"
+            return "I don't have a club, but I can choose one just for fun." if english else "Não tenho clube, mas posso escolher um só para brincar contigo."
+        return "I'm good. How about you?" if english else "Estou bem. E tu?"
 
     def _try_casual_social_share(self, user_message: str) -> str | None:
         text = _normalize_text(user_message)
         if _looks_like_help_or_planning_request(text):
             return None
         if _looks_like_weekend_beach_share(text):
+            english = normalize_response_language(self.response_language) == ENGLISH_GB
             if any(phrase in text for phrase in ("trabalhar em ti", "trabalhar no echo", "neste projeto", "no echo")):
+                if english:
+                    return (
+                        "So you had a calm week, even if part of it was spent fixing me. "
+                        "And that weekend sounds well chosen."
+                    )
                 return (
                     "Então tiveste uma semana tranquila, apesar de a passares parcialmente a corrigir-me. "
                     "E esse fim de semana parece bem escolhido."
                 )
             if any(word in text for word in ("remo", "remar")):
+                if english:
+                    return "That sounds like a good weekend. Beach, friends and rowing fit nicely together."
                 return "Parece um bom fim de semana. Praia, amigos e ir remar combinam bem."
             if any(word in text for word in ("amigos", "amigas")):
+                if english:
+                    return "That sounds like a good weekend. Beach and friends go well together."
                 return "Parece um bom fim de semana. Praia e amigos combinam bem."
-            return "Parece um bom fim de semana."
+            return "That sounds like a good weekend." if english else "Parece um bom fim de semana."
         return None
 
     def _try_voice_question(self, user_message: str) -> str | None:
@@ -6201,7 +6257,7 @@ class AssistantEngine:
             "voz pronta",
         }:
             return None
-        return voice_status_report(
+        status = voice_status_report(
             enabled=self.voice_enabled,
             missing_dependencies=self.voice_missing_dependencies,
             microphone_ok=self.voice_microphone_ok,
@@ -6215,6 +6271,48 @@ class AssistantEngine:
             silent_rms_threshold=self.voice_silent_rms_threshold,
             probe_duration=self.voice_probe_duration,
         )
+        tts_status = self._tts_status_summary()
+        return f"{status}\n\n{tts_status}" if tts_status else status
+
+    def _tts_status_summary(self) -> str:
+        manager = self.tts_manager
+        diagnostics = getattr(manager, "diagnostics", None)
+        if not callable(diagnostics):
+            return "TTS: não está ligado nesta sessão."
+        try:
+            data = diagnostics()
+        except Exception:
+            return "TTS: não consegui verificar a disponibilidade."
+        available = bool(data.get("available"))
+        active_voice_id = str(data.get("active_voice_id") or "")
+        resolved = str(data.get("resolved_voice_name") or data.get("resolved_voice_id") or "")
+        slots = data.get("logical_slots") if isinstance(data.get("logical_slots"), list) else []
+        slot_lines = []
+        for slot in slots:
+            if not isinstance(slot, dict):
+                continue
+            usable = "disponível" if slot.get("usable") else "indisponível"
+            slot_lines.append(f"- {slot.get('raw_id')}: {usable}")
+        language_label = response_language_status(self.response_language)
+        header = (
+            f"Idioma da resposta: {language_label}.\n"
+            f"TTS: {'disponível' if available else 'não encontrei uma voz local compatível'}.\n"
+            f"Voz ativa: {active_voice_id or 'nenhuma'}.\n"
+            f"Voz resolvida: {resolved or 'nenhuma'}."
+        )
+        if slot_lines:
+            return header + "\n" + "\n".join(slot_lines)
+        return header
+
+    def _try_tts_command(self, user_message: str) -> str | None:
+        manager = self.tts_manager
+        handler = getattr(manager, "handle_voice_command", None)
+        if not callable(handler):
+            return None
+        result = handler(user_message)
+        if not getattr(result, "handled", False):
+            return None
+        return str(getattr(result, "message", "") or "Está feito.")
 
     def _try_conversational_refinement(self, user_message: str) -> str | None:
         text = _normalize_text(user_message).strip(" .,!?:;")
@@ -6473,6 +6571,23 @@ class AssistantEngine:
                 if self._turn_trace is not None:
                     self._turn_trace["ungrounded_workspace_operation_claim"] = workspace_claim_reason
 
+        if final_response and not tool_confirmation:
+            localized = localize_deterministic_response(final_response, self.response_language)
+            if localized != final_response:
+                final_response = localized
+                if self._turn_trace is not None:
+                    self._turn_trace["response_language_localized"] = True
+
+        if not technical and not tool_confirmation and looks_mixed_for_language(final_response, self.response_language):
+            final_response = (
+                "I’ll keep this in English. What would you like to do next?"
+                if normalize_response_language(self.response_language) == ENGLISH_GB
+                else "Vou manter a resposta em português. O que queres fazer a seguir?"
+            )
+            final_response_source = "LANGUAGE_GUARD_FALLBACK"
+            if self._turn_trace is not None:
+                self._turn_trace["language_guard_triggered"] = True
+
         self._update_pending_user_intent(user_message, final_response, final_response_source, technical, tool_confirmation)
         self._response_debug(
             source=source,
@@ -6484,6 +6599,7 @@ class AssistantEngine:
             subject_swap = bool(detect_subject_swap(final_response))
             self._turn_trace["model"] = _model_name(self.llm)
             self._turn_trace["provider"] = _provider_name(self.llm)
+            self._turn_trace["response_language"] = self.response_language
             self._turn_trace["response_before_voice_critic"] = original_response
             self._turn_trace["response_after_voice_critic"] = final_response
             self._turn_trace["voice_critic_call_count"] = voice_critic_call_count
@@ -6728,6 +6844,10 @@ class AssistantEngine:
             "selected_path": selected_path,
             "response_source": response_source,
             "final_response_source": self._turn_trace.get("final_response_source") or response_source,
+            "response_language": self.response_language,
+            "response_language_changed": bool(self._turn_trace.get("response_language_changed")),
+            "response_language_localized": bool(self._turn_trace.get("response_language_localized")),
+            "language_guard_triggered": bool(self._turn_trace.get("language_guard_triggered")),
             "configured_model_mode": configured_mode,
             "configured_model_mode_source": configured_source,
             "execution_path": execution_path,
@@ -8329,18 +8449,17 @@ class AssistantEngine:
     def _try_language_preference_command(self, user_message: str) -> str | None:
         text = _normalize_text(user_message)
         if _asks_language_policy(text):
+            if normalize_response_language(self.response_language) == ENGLISH_GB:
+                return "My base language is Portuguese from Portugal, but I'm currently responding in English."
             return "A minha língua base é português de Portugal, mas posso falar inglês quando pedires."
 
-        if _asks_for_english(text):
-            self._set_current_language("en")
-            return (
-                "Understood. I can speak English when you ask, "
-                "but my base language remains Portuguese from Portugal."
-            )
-
-        if _asks_for_portuguese(text):
-            self._set_current_language("pt-PT")
-            return "Claro. Volto ao português de Portugal."
+        command = detect_response_language_command(user_message)
+        if command.handled:
+            self._set_response_language(command.language)
+            if self._turn_trace is not None:
+                self._turn_trace["response_language_changed"] = True
+                self._turn_trace["response_language"] = self.response_language
+            return command.confirmation
 
         return None
 

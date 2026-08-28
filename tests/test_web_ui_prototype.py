@@ -882,13 +882,13 @@ def test_controller_keeps_visual_minimum_durations() -> None:
     controller = (PROTOTYPE / "controller.py").read_text(encoding="utf-8")
 
     assert "thinking_min_ms: int = 300" in controller
-    assert "speaking_duration_ms: int = 1000" in controller
     assert "response_text = str(response or \"\")" in controller
     assert "def _emit_response_ready" in controller
     assert "self.responseReady.emit(response_text)" in controller
     assert "delay_ms = max(0, self.thinking_min_ms - elapsed_ms)" in controller
-    assert "def _enter_speaking" in controller
-    assert "def _finish_speaking" in controller
+    assert "lambda: self._emit_state(\"idle\")" in controller
+    assert "def _handle_tts_started" in controller
+    assert "def _handle_tts_finished" in controller
 
 
 def test_worker_results_are_queued_back_to_controller_thread() -> None:
@@ -1071,7 +1071,7 @@ def test_submit_message_reaches_idle_cleans_worker_and_delivers_progress_event()
 
     app = _qt_app()
     engine = _FakeEngine(reply="Aqui está a versão reescrita.", progress_events=("rewrite_regeneration_started",))
-    controller = EchoUIController(engine.respond, thinking_min_ms=0, speaking_duration_ms=0)
+    controller = EchoUIController(engine.respond, thinking_min_ms=0)
 
     states: list[str] = []
     ui_events: list[str] = []
@@ -1080,10 +1080,8 @@ def test_submit_message_reaches_idle_cleans_worker_and_delivers_progress_event()
     controller.uiEvent.connect(ui_events.append)
     controller.requestFinished.connect(lambda: finished.__setitem__("count", finished["count"] + 1))
 
-    # requestFinished (worker/thread cleanup) fires as soon as the response
-    # is handled -- well before the thinking->speaking->idle visual timers
-    # complete -- so the loop must keep running until "idle" actually shows
-    # up in stateChanged, not just quit on the first requestFinished.
+    # requestFinished fires as soon as the worker is cleaned up; idle is a
+    # separate GUI-thread timer preserving the minimum thinking duration.
     loop = QEventLoop()
     controller.stateChanged.connect(lambda state: loop.quit() if state == "idle" else None)
     controller.submitMessage("Torna-o mais formal, mas não guardes ainda.")
@@ -1286,7 +1284,6 @@ def test_submit_message_reaches_idle_even_if_response_telemetry_fails() -> None:
         get_telemetry=lambda: {"selected_path": "RESEARCH_REQUEST", "llm_calls": 0},
         model_runtime=_FailingTelemetryRuntime(),
         thinking_min_ms=0,
-        speaking_duration_ms=0,
     )
 
     states: list[str] = []
@@ -1308,6 +1305,318 @@ def test_submit_message_reaches_idle_even_if_response_telemetry_fails() -> None:
     assert controller._thread is None
     assert controller._worker is None
     assert controller.has_active_request() is False
+
+
+class _FakeTTSManager:
+    def __init__(
+        self,
+        error: Exception | None = None,
+        available: bool = True,
+        pt_available: bool = True,
+    ) -> None:
+        from pathlib import Path
+
+        from assistant.tts import TTSResult
+
+        self.error = error
+        self.available = available
+        self.pt_available = pt_available
+        self.stopped = False
+        self.calls: list[str] = []
+        self.response_languages: list[str] = []
+        self.result = TTSResult(
+            audio_path=Path("fake.wav"),
+            provider="fake",
+            voice_id="english_british_primary",
+            language="en",
+            synthesis_ms=4.0,
+            text_chars=0,
+        )
+
+    @property
+    def provider(self):
+        available = self.available
+
+        class Provider:
+            def is_available(self) -> bool:
+                return available
+
+        return Provider()
+
+    def is_available(self, response_language: str = "") -> bool:
+        if response_language == "pt-PT" and not self.pt_available:
+            return False
+        return self.available
+
+    def speak_to_file(self, text: str, *, response_language: str = ""):
+        if self.error is not None:
+            raise self.error
+        self.calls.append(text)
+        self.response_languages.append(response_language)
+        return self.result
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+def test_echo_os_tts_speaks_current_response_manually_off_ui_thread() -> None:
+    import json
+
+    from PySide6.QtCore import QCoreApplication, QEventLoop, QThread, QTimer
+
+    from prototype_web_ui.controller import EchoUIController
+
+    app = _qt_app()
+    tts_manager = _FakeTTSManager()
+    player_checks: list[bool] = []
+
+    def fake_player(_path, _stop_checker=None) -> float:
+        player_checks.append(QThread.currentThread() != app.thread())
+        return 7.0
+
+    controller = EchoUIController(
+        _FakeEngine().respond,
+        tts_manager=tts_manager,
+        tts_player=fake_player,
+        get_response_language=lambda: "en-GB",
+    )
+    states: list[str] = []
+    started: list[str] = []
+    finished: list[str] = []
+    controller.stateChanged.connect(states.append)
+    controller.ttsStarted.connect(started.append)
+    controller.ttsFinished.connect(finished.append)
+
+    loop = QEventLoop()
+    controller.ttsFinished.connect(loop.quit)
+    controller.speakText("Olá, Alexandre.")
+    QTimer.singleShot(5000, loop.quit)
+    loop.exec()
+
+    assert tts_manager.calls == ["Olá, Alexandre."]
+    assert tts_manager.response_languages == ["en-GB"]
+    assert player_checks == [True]
+    assert "speaking" in states
+    assert states[-1] == "idle"
+    assert started and "english_british_primary" in started[0]
+    started_payload = json.loads(started[0])
+    assert started_payload["response_language"] == "en-GB"
+    assert started_payload["voice_language"] == "en"
+    assert finished and "playback_ms" in finished[0]
+    assert controller._tts_thread is None
+    assert controller._tts_worker is None
+
+
+def test_echo_os_tts_failure_keeps_textual_response_canonical() -> None:
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    controller = EchoUIController(_FakeEngine().respond, tts_manager=_FakeTTSManager(error=RuntimeError("sem voz")))
+    errors: list[str] = []
+    states: list[str] = []
+    controller.ttsError.connect(errors.append)
+    controller.stateChanged.connect(states.append)
+
+    loop = QEventLoop()
+    controller.ttsError.connect(loop.quit)
+    controller.speakText("Resposta já visível.")
+    QTimer.singleShot(5000, loop.quit)
+    loop.exec()
+
+    assert errors == ["Não consegui falar a resposta: sem voz"]
+    assert "error" in states
+    assert controller._tts_thread is None
+    assert controller._tts_worker is None
+
+
+def test_echo_os_tts_unavailable_stays_idle_and_does_not_start_worker() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    controller = EchoUIController(_FakeEngine().respond, tts_manager=_FakeTTSManager(available=False))
+    errors: list[str] = []
+    states: list[str] = []
+    controller.ttsError.connect(errors.append)
+    controller.stateChanged.connect(states.append)
+
+    assert controller.isTtsAvailable() is False
+
+    controller.speakText("Resposta já visível.")
+
+    assert errors == ["Não encontrei uma voz TTS local compatível."]
+    assert states[-1] == "idle"
+    assert controller._tts_thread is None
+    assert controller._tts_worker is None
+
+
+def test_echo_os_tts_unavailable_for_ptpt_stays_idle_and_preserves_text() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    manager = _FakeTTSManager(available=True, pt_available=False)
+    controller = EchoUIController(
+        _FakeEngine().respond,
+        tts_manager=manager,
+        get_response_language=lambda: "pt-PT",
+    )
+    errors: list[str] = []
+    states: list[str] = []
+    controller.ttsError.connect(errors.append)
+    controller.stateChanged.connect(states.append)
+
+    assert controller.isTtsAvailable() is False
+
+    controller.speakText("Resposta em português.")
+
+    assert errors == ["A voz portuguesa ainda não está disponível."]
+    assert states[-1] == "idle"
+    assert manager.calls == []
+    assert controller._tts_thread is None
+    assert controller._tts_worker is None
+
+
+def test_echo_os_tts_switching_language_changes_speak_availability() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    current_language = {"value": "en-GB"}
+    controller = EchoUIController(
+        _FakeEngine().respond,
+        tts_manager=_FakeTTSManager(available=True, pt_available=False),
+        get_response_language=lambda: current_language["value"],
+    )
+
+    assert controller.isTtsAvailable() is True
+
+    current_language["value"] = "pt-PT"
+    assert controller.isTtsAvailable() is False
+
+    current_language["value"] = "en-GB"
+    assert controller.isTtsAvailable() is True
+
+
+def test_echo_os_tts_playback_failure_returns_to_idle() -> None:
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+
+    def failing_player(_path, _stop_checker=None) -> float:
+        raise RuntimeError("coluna indisponível")
+
+    controller = EchoUIController(_FakeEngine().respond, tts_manager=_FakeTTSManager(), tts_player=failing_player)
+    errors: list[str] = []
+    states: list[str] = []
+    controller.ttsError.connect(errors.append)
+    controller.stateChanged.connect(states.append)
+
+    loop = QEventLoop()
+    controller.stateChanged.connect(lambda state: loop.quit() if state == "idle" else None)
+    controller.speakText("Resposta já visível.")
+    QTimer.singleShot(5000, loop.quit)
+    loop.exec()
+
+    assert errors == ["Não consegui falar a resposta: coluna indisponível"]
+    assert "error" in states
+    assert states[-1] == "idle"
+    assert controller._tts_thread is None
+    assert controller._tts_worker is None
+
+
+def test_echo_os_tts_stop_speaking_returns_idle_and_preserves_controller() -> None:
+    import time
+
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+
+    def slow_player(_path, stop_checker=None) -> float:
+        started = time.perf_counter()
+        while time.perf_counter() - started < 2.0:
+            if stop_checker and stop_checker():
+                return 0.0
+            time.sleep(0.01)
+        return 2000.0
+
+    manager = _FakeTTSManager()
+    controller = EchoUIController(_FakeEngine().respond, tts_manager=manager, tts_player=slow_player)
+    states: list[str] = []
+    controller.stateChanged.connect(states.append)
+
+    speaking_loop = QEventLoop()
+    controller.stateChanged.connect(lambda state: speaking_loop.quit() if state == "speaking" else None)
+    controller.speakText("Resposta longa.")
+    QTimer.singleShot(5000, speaking_loop.quit)
+    speaking_loop.exec()
+
+    finished_loop = QEventLoop()
+    controller.ttsFinished.connect(finished_loop.quit)
+    controller.stopSpeaking()
+    QTimer.singleShot(5000, finished_loop.quit)
+    finished_loop.exec()
+
+    assert manager.stopped is True
+    assert "speaking" in states
+    assert states[-1] == "idle"
+    assert controller._tts_thread is None
+    assert controller._tts_worker is None
+
+
+def test_echo_os_controller_shutdown_stops_active_tts_worker() -> None:
+    import time
+
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+
+    def slow_player(_path, stop_checker=None) -> float:
+        while not (stop_checker and stop_checker()):
+            time.sleep(0.01)
+        return 0.0
+
+    manager = _FakeTTSManager()
+    controller = EchoUIController(_FakeEngine().respond, tts_manager=manager, tts_player=slow_player)
+
+    loop = QEventLoop()
+    controller.stateChanged.connect(lambda state: loop.quit() if state == "speaking" else None)
+    controller.speakText("Resposta longa.")
+    QTimer.singleShot(5000, loop.quit)
+    loop.exec()
+
+    controller.shutdown()
+
+    assert manager.stopped is True
+    assert controller._tts_thread is None
+    assert controller._tts_worker is None
+
+
+def test_echo_os_tts_frontend_has_manual_speak_controls_without_auto_speak() -> None:
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
+    controller = (PROTOTYPE / "controller.py").read_text(encoding="utf-8")
+
+    assert 'id="speakButton"' in html
+    assert 'id="stopSpeechButton"' in html
+    assert "speakText" in controller
+    assert "stopSpeaking" in controller
+    assert "isTtsAvailable" in controller
+    assert "function speakCurrentResponse()" in ui
+    render_block = ui[ui.index("function renderEchoResponse"):ui.index("function applyResponseLayout")]
+    assert "currentResponseText = value" in render_block
+    assert "controller.speakText" not in render_block
+    assert "activeController.ttsStarted" in ui
+    assert "activeController.ttsFinished" in ui
+    assert "activeController.ttsError" in ui
+    tts_error_block = ui[ui.index("activeController.ttsError.connect"):ui.index("activeController.uiEvent.connect")]
+    assert "renderEchoError" not in tts_error_block
+    assert 'applyEchoState("error"' in tts_error_block
 
 
 # --- Echo visual-state redesign (Passo 2): idle/listening/thinking/reading/

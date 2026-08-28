@@ -27,6 +27,25 @@ class FakeLLM:
         return None
 
 
+class FakeTTSCommandManager:
+    def __init__(self) -> None:
+        self.commands: list[str] = []
+        self.active_voice_id = ""
+
+    def handle_voice_command(self, message: str):
+        from assistant.tts import VoiceCommandResult
+
+        self.commands.append(message)
+        if "portugu" not in message.lower():
+            return VoiceCommandResult(handled=False)
+        self.active_voice_id = "portuguese_ptpt_primary"
+        return VoiceCommandResult(
+            handled=True,
+            message="Fica ativa a voz portuguesa.",
+            active_voice_id=self.active_voice_id,
+        )
+
+
 def make_engine(tmp_path: Path) -> AssistantEngine:
     data = tmp_path / "data"
     workspace = tmp_path / "workspace"
@@ -42,6 +61,19 @@ def make_engine(tmp_path: Path) -> AssistantEngine:
         base_system_prompt=get_base_system_prompt(),
         presence_manager=PresenceManager(),
     )
+
+
+def test_tts_voice_switch_is_handled_before_llm(tmp_path: Path) -> None:
+    engine = make_engine(tmp_path)
+    manager = FakeTTSCommandManager()
+    engine.tts_manager = manager
+
+    answer = engine.respond("Echo, muda para português.")
+
+    assert answer == "Fica ativa a voz portuguesa."
+    assert manager.active_voice_id == "portuguese_ptpt_primary"
+    assert engine.llm.chat_calls == 0
+    assert engine.get_last_turn_telemetry()["selected_path"] == "VOICE_COMMAND"
 
 
 def test_unspecified_help_is_short_and_open(tmp_path: Path) -> None:

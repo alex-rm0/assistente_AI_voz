@@ -28,6 +28,8 @@ SAFE_USER_SETTING_KEYS = {
     "daily_budget_usd",
     "max_single_call_estimated_usd",
     "visual_preferences",
+    "active_voice_id",
+    "response_language",
 }
 
 
@@ -192,6 +194,7 @@ class ModelRuntimeBridge:
                 "note": note,
                 "settings_source": self.settings_source,
                 "context_observer_state": self.context_observer_state,
+                "response_language": self._response_language(),
             },
             state=state,
         )
@@ -269,6 +272,7 @@ class ModelRuntimeBridge:
                 "configuration_error": str(telemetry.get("configuration_error") or ""),
                 "settings_source": self.settings_source,
                 "context_observer_state": self.context_observer_state,
+                "response_language": self._response_language(),
             },
             state=state,
         )
@@ -562,6 +566,13 @@ class ModelRuntimeBridge:
         if not snapshot:
             return {"daily_used_usd": 0.0}
         return {"daily_used_usd": float(snapshot.get("accumulated_estimated_cost_usd") or 0.0)}
+
+    def _response_language(self) -> str:
+        try:
+            value = str(self.store.load().get("response_language") or "").strip()
+        except Exception:
+            value = ""
+        return value if value in {"pt-PT", "en-GB"} else "pt-PT"
 
 
 def human_reason_label(reason_code: str) -> str:

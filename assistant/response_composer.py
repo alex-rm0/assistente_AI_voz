@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from assistant.model_provider import ProviderConfigurationError, ProviderTimeoutError
+from assistant.response_language import response_language_instruction, simple_social_response
 from assistant.voice_critic import VoiceCritic
 
 
@@ -84,13 +85,8 @@ class ComposerRequest:
     # forwarded to a provider that doesn't route (ProviderBackedLLM ignores
     # it); only consumed by RoutedLLM.
     task_profile: dict[str, object] | None = None
-    language_instruction: str = (
-        "Preferências de idioma:\n"
-        "- idioma_base = pt-PT.\n"
-        "- idioma_atual = pt-PT.\n"
-        "- Vocabulário pt-PT obrigatório quando responderes em português: "
-        "aplicações, ecrã, acompanhar/observar, ficheiros, aceder."
-    )
+    response_language: str = "pt-PT"
+    language_instruction: str = ""
 
 
 class ResponseComposer:
@@ -201,8 +197,9 @@ def _system_prompt_for(request: ComposerRequest) -> str:
     parts = [_SYSTEM_PROMPT]
     if request.intent_instruction.strip():
         parts.append(request.intent_instruction.strip())
-    if request.language_instruction.strip():
-        parts.append(request.language_instruction.strip())
+    language_instruction = request.language_instruction.strip() or response_language_instruction(request.response_language)
+    if language_instruction:
+        parts.append(language_instruction)
     return "\n\n".join(parts)
 
 
@@ -223,6 +220,9 @@ def _simple_social_response(request: ComposerRequest) -> str | None:
         return None
     if _has_relevant_content_after_greeting(text):
         return None
+    response = simple_social_response(request.user_message, request.response_language)
+    if response is not None:
+        return response
     if text in {"ola", "olá"}:
         return "Olá! Como estás?"
     if text in {"ola como estas", "olá como estás", "como estas", "como estás", "tudo bem"}:

@@ -54,6 +54,8 @@ class EchoOSWindow(QWebEngineView):
         voice_preroll_ms: int = 500,
         voice_ready_delay_ms: int = 200,
         voice_missing_dependencies: list[str] | tuple[str, ...] | None = None,
+        tts_manager: Any | None = None,
+        get_response_language: Callable[[], str] | None = None,
     ) -> None:
         super().__init__()
         self.on_close = on_close
@@ -87,6 +89,8 @@ class EchoOSWindow(QWebEngineView):
             voice_available=voice_available,
             voice_transcriber=voice_transcriber,
             voice_missing_dependencies=voice_missing_dependencies,
+            tts_manager=tts_manager,
+            get_response_language=get_response_language,
         )
         print(
             "[Echo UI DEBUG] registered object name=echoController",

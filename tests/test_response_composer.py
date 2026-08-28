@@ -73,6 +73,22 @@ def test_no_facts_still_calls_llm_for_normal_conversation() -> None:
     assert llm.chat_calls == 1
 
 
+def test_response_language_drives_default_llm_instruction() -> None:
+    llm = FakeLLM("Short English reply.")
+    composer = ResponseComposer(llm)
+    request = ComposerRequest(
+        intent="general_conversation",
+        user_message="Explain briefly what an API is.",
+        response_language="en-GB",
+    )
+
+    answer = composer.compose(request)
+
+    assert answer == "Short English reply."
+    assert "Respond in English" in (llm.last_system_prompt or "")
+    assert "response_language = pt-PT" not in (llm.last_system_prompt or "")
+
+
 def test_llm_failure_falls_back_to_deterministic_text() -> None:
     composer = ResponseComposer(RaisingLLM())
     request = ComposerRequest(

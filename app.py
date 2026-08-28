@@ -27,6 +27,7 @@ from assistant.prompts import get_base_system_prompt
 from assistant.session_manager import SessionManager
 from assistant.secret_storage import WindowsCredentialManagerSecretStorage, resolve_anthropic_api_key
 from assistant.task_research import OllamaSemanticExtractor
+from assistant.tts import TTSManager
 from assistant.tool_registry import tool_registry
 from assistant.voice_input import MicrophoneCheckError, check_microphone, check_voice_runtime
 
@@ -147,6 +148,7 @@ def main() -> int:
     memory_config = settings.get("memory", {})
     data_path = (BASE_DIR / memory_config.get("data_path", "data")).resolve()
     user_settings_store = UserSettingsStore(data_path / "user_settings.json")
+    tts_manager = TTSManager(store=user_settings_store)
     secret_storage = WindowsCredentialManagerSecretStorage()
     memory = ConversationMemory(
         data_path=data_path,
@@ -325,6 +327,7 @@ def main() -> int:
         voice_min_record_seconds=voice_min_record_seconds,
         voice_model=voice_config.get("model", "base"),
         voice_language=voice_config.get("language", "pt"),
+        tts_manager=tts_manager,
         model_runtime=model_runtime,
         semantic_extractor=semantic_extractor,
     )
@@ -360,6 +363,8 @@ def main() -> int:
             voice_preroll_ms=voice_preroll_ms,
             voice_ready_delay_ms=voice_ready_delay_ms,
             voice_missing_dependencies=voice_missing,
+            tts_manager=tts_manager,
+            get_response_language=lambda: engine.response_language,
         )
     else:
         from ui.main_window import MainWindow

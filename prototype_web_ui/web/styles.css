@@ -1901,7 +1901,8 @@ body.workspace-dragging {
   opacity: .55;
 }
 
-.mic-button {
+.mic-button,
+.speak-button {
   border: 0;
   border-radius: 999px;
   padding: 7px 10px;
@@ -1913,12 +1914,14 @@ body.workspace-dragging {
   transition: opacity .25s ease, color .25s ease, background .25s ease, box-shadow .25s ease;
 }
 
-.mic-button:hover:not(:disabled) {
+.mic-button:hover:not(:disabled),
+.speak-button:hover:not(:disabled) {
   color: #d8f4ff;
   background: rgba(102,205,255,.16);
 }
 
-.mic-button:disabled {
+.mic-button:disabled,
+.speak-button:disabled {
   cursor: default;
   opacity: .35;
 }
@@ -1932,6 +1935,16 @@ body.workspace-dragging {
 .mic-button.processing {
   color: #d8f4ff;
   background: rgba(255,255,255,.1);
+}
+
+.speak-button {
+  background: rgba(143,208,196,.075);
+}
+
+.speak-button.active {
+  color: #ecfbff;
+  background: rgba(143,208,196,.18);
+  box-shadow: 0 0 16px rgba(143,208,196,.24);
 }
 
 .clear-button {

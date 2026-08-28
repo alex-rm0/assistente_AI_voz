@@ -56,6 +56,26 @@ def make_bridge(
     )
 
 
+def test_user_settings_store_persists_active_voice_id_without_secrets(tmp_path: Path) -> None:
+    store = UserSettingsStore(tmp_path / "user_settings.json")
+
+    store.update(active_voice_id="portuguese_ptpt_primary", api_key="secret")
+
+    data = store.load()
+    assert data["active_voice_id"] == "portuguese_ptpt_primary"
+    assert "api_key" not in data
+
+
+def test_user_settings_store_persists_response_language_without_secrets(tmp_path: Path) -> None:
+    store = UserSettingsStore(tmp_path / "user_settings.json")
+
+    store.update(response_language="en-GB", api_key="secret")
+
+    data = store.load()
+    assert data["response_language"] == "en-GB"
+    assert "api_key" not in data
+
+
 def test_ui_reads_real_mode_and_local_changes_backend(tmp_path: Path) -> None:
     bridge, router, store, _budget = make_bridge(tmp_path, mode="automatic")
 
