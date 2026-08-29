@@ -6,7 +6,12 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from assistant.model_provider import ProviderConfigurationError, ProviderTimeoutError
-from assistant.response_language import response_language_instruction, simple_social_response
+from assistant.response_language import (
+    ENGLISH_GB,
+    normalize_response_language,
+    response_language_instruction,
+    simple_social_response,
+)
 from assistant.voice_critic import VoiceCritic
 
 
@@ -30,8 +35,6 @@ _SYSTEM_PROMPT = """
 Tu és o Echo, um companheiro digital do Alexandre.
 
 Compreende a mensagem atual através do histórico e responde ao facto concreto.
-
-Fala em português de Portugal e trata o Alexandre por tu.
 
 Sê natural e breve. Uma ou duas frases bastam na maioria das vezes.
 
@@ -177,6 +180,32 @@ class ResponseComposer:
 
     @staticmethod
     def _user_prompt(request: ComposerRequest) -> str:
+        # Phase 7.3.4 (section 1): these scaffolding labels used to be
+        # hardcoded Portuguese regardless of response_language -- a real Qt
+        # run showed that Portuguese-framed content in the USER-facing turn
+        # (as opposed to the system prompt) is enough to pull a small local
+        # model back to Portuguese even with a correct "Respond in English"
+        # system instruction present. Purely cosmetic labels, translated
+        # here from the same response_language already threaded through
+        # ComposerRequest -- callers still supply their own facts/context/
+        # fallback text, which is a separate, narrower fix (see e.g.
+        # AssistantEngine._try_general_knowledge_query).
+        english = normalize_response_language(request.response_language) == ENGLISH_GB
+        if english:
+            parts = [
+                f"Alexandre's message:\n{request.user_message.strip()}",
+                f"Intent:\n{request.intent.strip() or 'conversation'}",
+            ]
+            if request.context.strip():
+                parts.append(f"Relevant context:\n{request.context.strip()}")
+            if request.facts:
+                facts = "\n".join(f"- {fact}" for fact in request.facts if str(fact).strip())
+                if facts:
+                    parts.append(f"Relevant facts:\n{facts}")
+            if request.next_goal.strip():
+                parts.append(f"Next conversation goal:\n{request.next_goal.strip()}")
+            parts.append("Continue the conversation naturally as Echo.")
+            return "\n\n".join(parts)
         parts = [
             f"Mensagem do Alexandre:\n{request.user_message.strip()}",
             f"Intenção:\n{request.intent.strip() or 'conversa'}",
@@ -194,6 +223,12 @@ class ResponseComposer:
 
 
 def _system_prompt_for(request: ComposerRequest) -> str:
+    # Phase 7.3.4: _SYSTEM_PROMPT itself must never hardcode a language --
+    # it used to also say "Fala em português de Portugal", which directly
+    # contradicted this language_instruction whenever response_language was
+    # en-GB (a real regression: the model would often obey the earlier,
+    # more specific Portuguese line and ignore the later English one).
+    # language_instruction is now the SOLE source of language authority.
     parts = [_SYSTEM_PROMPT]
     if request.intent_instruction.strip():
         parts.append(request.intent_instruction.strip())

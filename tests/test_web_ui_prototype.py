@@ -1313,6 +1313,8 @@ class _FakeTTSManager:
         error: Exception | None = None,
         available: bool = True,
         pt_available: bool = True,
+        delay_seconds: float = 0.0,
+        provider_voice: str = "",
     ) -> None:
         from pathlib import Path
 
@@ -1321,6 +1323,7 @@ class _FakeTTSManager:
         self.error = error
         self.available = available
         self.pt_available = pt_available
+        self.delay_seconds = delay_seconds
         self.stopped = False
         self.calls: list[str] = []
         self.response_languages: list[str] = []
@@ -1331,6 +1334,7 @@ class _FakeTTSManager:
             language="en",
             synthesis_ms=4.0,
             text_chars=0,
+            provider_voice=provider_voice,
         )
 
     @property
@@ -1349,6 +1353,10 @@ class _FakeTTSManager:
         return self.available
 
     def speak_to_file(self, text: str, *, response_language: str = ""):
+        if self.delay_seconds:
+            import time
+
+            time.sleep(self.delay_seconds)
         if self.error is not None:
             raise self.error
         self.calls.append(text)
@@ -1405,6 +1413,83 @@ def test_echo_os_tts_speaks_current_response_manually_off_ui_thread() -> None:
     assert finished and "playback_ms" in finished[0]
     assert controller._tts_thread is None
     assert controller._tts_worker is None
+
+
+def test_echo_os_tts_telemetry_reports_pocket_anna_correctly() -> None:
+    """Phase 7.3.3 (section 6): a normal Anna synthesis' ttsStarted payload
+    must surface provider=pocket_tts, voice_id=english_british_primary,
+    provider_voice=anna, response_language=en-GB, fallback_used=false."""
+    import json
+
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    from assistant.tts import TTSResult
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    tts_manager = _FakeTTSManager(provider_voice="anna")
+    tts_manager.result = TTSResult(
+        audio_path=tts_manager.result.audio_path,
+        provider="pocket_tts",
+        voice_id="english_british_primary",
+        language="en",
+        synthesis_ms=4.0,
+        text_chars=0,
+        provider_voice="anna",
+        fallback_used=False,
+    )
+    controller = EchoUIController(
+        _FakeEngine().respond,
+        tts_manager=tts_manager,
+        tts_player=lambda *_a, **_k: 1.0,
+        get_response_language=lambda: "en-GB",
+    )
+    started: list[str] = []
+    controller.ttsStarted.connect(started.append)
+
+    loop = QEventLoop()
+    controller.ttsFinished.connect(loop.quit)
+    controller.speakText("Good morning.")
+    QTimer.singleShot(5000, loop.quit)
+    loop.exec()
+
+    assert started
+    payload = json.loads(started[0])
+    assert payload["provider"] == "pocket_tts"
+    assert payload["voice_id"] == "english_british_primary"
+    assert payload["provider_voice"] == "anna"
+    assert payload["response_language"] == "en-GB"
+    assert payload["fallback_used"] is False
+
+
+def test_echo_os_tts_duplicate_speak_click_is_ignored_while_synthesizing() -> None:
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    manager = _FakeTTSManager(delay_seconds=0.15)
+    controller = EchoUIController(_FakeEngine().respond, tts_manager=manager, get_response_language=lambda: "en-GB")
+    states: list[str] = []
+    controller.stateChanged.connect(states.append)
+
+    working_loop = QEventLoop()
+    controller.stateChanged.connect(lambda state: working_loop.quit() if state == "working" else None)
+    controller.speakText("Hi. How are you?")
+    QTimer.singleShot(1000, working_loop.quit)
+    working_loop.exec()
+
+    controller.speakText("Hi. How are you?")
+
+    finished_loop = QEventLoop()
+    controller.ttsFinished.connect(finished_loop.quit)
+    QTimer.singleShot(5000, finished_loop.quit)
+    finished_loop.exec()
+
+    assert manager.calls == ["Hi. How are you?"]
+    assert states[0] == "working"
+    assert "speaking" in states
+    assert states[-1] == "idle"
 
 
 def test_echo_os_tts_failure_keeps_textual_response_canonical() -> None:
@@ -1527,6 +1612,13 @@ def test_echo_os_tts_playback_failure_returns_to_idle() -> None:
 
 
 def test_echo_os_tts_stop_speaking_returns_idle_and_preserves_controller() -> None:
+    """Phase 7.3.4 (section 5): stopSpeaking() must stop THIS playback
+    (the player's own stop_checker already handles that) without tearing
+    down the shared, persistent TTS manager/worker -- manager.stopped used
+    to assert True here, which was exactly the bug: an ordinary mid-session
+    Stop/next-message action was silently forcing a full Pocket server
+    restart on the next SPEAK. teardown_manager is reserved for real
+    shutdown (see test_echo_os_controller_shutdown_stops_active_tts_worker)."""
     import time
 
     from PySide6.QtCore import QEventLoop, QTimer
@@ -1560,7 +1652,7 @@ def test_echo_os_tts_stop_speaking_returns_idle_and_preserves_controller() -> No
     QTimer.singleShot(5000, finished_loop.quit)
     finished_loop.exec()
 
-    assert manager.stopped is True
+    assert manager.stopped is False
     assert "speaking" in states
     assert states[-1] == "idle"
     assert controller._tts_thread is None
@@ -1608,12 +1700,24 @@ def test_echo_os_tts_frontend_has_manual_speak_controls_without_auto_speak() -> 
     assert "stopSpeaking" in controller
     assert "isTtsAvailable" in controller
     assert "function speakCurrentResponse()" in ui
+    assert "function refreshTtsAvailability()" in ui
+    assert "function performTtsAvailabilityRefresh()" in ui
+    assert "ttsAvailabilityRefreshTimer" in ui
     render_block = ui[ui.index("function renderEchoResponse"):ui.index("function applyResponseLayout")]
     assert "currentResponseText = value" in render_block
+    assert "refreshTtsAvailability();" in render_block
+    speak_block = ui[ui.index("function speakCurrentResponse"):ui.index("function stopSpeaking")]
+    assert "ttsActive = true" in speak_block
+    assert 'applyEchoState("working"' in speak_block
     assert "controller.speakText" not in render_block
     assert "activeController.ttsStarted" in ui
     assert "activeController.ttsFinished" in ui
     assert "activeController.ttsError" in ui
+    telemetry_block = ui[ui.index("activeController.telemetryUpdated.connect"):ui.index("activeController.requestStarted.connect")]
+    assert "refreshTtsAvailability();" in telemetry_block
+    channel_block = ui[ui.index("function initializeEchoChannel"):ui.index("function bindDomEvents")]
+    assert "controller.isTtsAvailable((available)" not in channel_block
+    assert "refreshTtsAvailability();" in channel_block
     tts_error_block = ui[ui.index("activeController.ttsError.connect"):ui.index("activeController.uiEvent.connect")]
     assert "renderEchoError" not in tts_error_block
     assert 'applyEchoState("error"' in tts_error_block

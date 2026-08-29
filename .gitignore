@@ -1,5 +1,10 @@
 .venv/
+.venv_tts/
+.venv_pocket_tts/
 .venv.broken-msstore-*/
+.uv_cache/
+.uv_python/
+.hf_cache/
 __pycache__/
 .pytest_cache/
 *.pyc
@@ -8,6 +13,7 @@ data/user_settings.json
 data/*.sqlite
 data/model_routing_usage.json
 data/debug/*.wav
+data/tts_voice_tests/
 workspace/conversation.json
 evals/results/runs/
 evals/results/latest/

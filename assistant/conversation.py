@@ -125,6 +125,7 @@ from assistant.response_language import (
     ENGLISH_GB,
     PORTUGUESE_PT,
     detect_response_language_command,
+    detect_translate_previous_response_command,
     legacy_language_value,
     localize_deterministic_response,
     looks_mixed_for_language,
@@ -132,6 +133,7 @@ from assistant.response_language import (
     response_language_instruction,
     response_language_status,
     simple_social_response,
+    translation_instruction,
 )
 from assistant.security import check_user_request
 from assistant.session_manager import SessionManager
@@ -838,6 +840,24 @@ class AssistantEngine:
             self._perf_log("resposta total", request_started_at, time.perf_counter())
             return pending_workspace_response
 
+        # Phase 7.3.4 (section 2/3): a deictic reference to the PREVIOUS
+        # reply ("quero essa resposta em inglês") must be resolved BEFORE
+        # the persistent language-switch check below -- some of these
+        # phrases (e.g. "...resposta em inglês") are also substrings the
+        # persistent-switch detector matches on, and a one-off content
+        # transformation must never be confused with changing
+        # response_language going forward.
+        translate_previous_response = self._try_translate_previous_response(user_message)
+        if translate_previous_response is not None:
+            translate_previous_response = self._complete_turn(
+                user_message,
+                translate_previous_response,
+                "RESPONSE_COMPOSER",
+                selected_path="TRANSLATE_PREVIOUS_RESPONSE",
+            )
+            self._perf_log("resposta total", request_started_at, time.perf_counter())
+            return translate_previous_response
+
         language_response = self._try_language_preference_command(user_message)
         if language_response is not None:
             language_response = self._complete_turn(
@@ -1480,6 +1500,7 @@ class AssistantEngine:
                     history=self._recent_conversation_history(user_message),
                     facts=["Interação social simples em Sistema 1."],
                     fallback="Olá Alexandre.",
+                    response_language=self.response_language,
                     language_instruction=self._language_instruction(),
                 )
             )
@@ -1509,6 +1530,7 @@ class AssistantEngine:
                     history=self._recent_conversation_history(user_message),
                     facts=cognitive_reasoning.questions,
                     fallback="Antes de avançarmos, preciso de perceber melhor o que queres fazer.",
+                    response_language=self.response_language,
                     language_instruction=self._language_instruction(),
                 )
             )
@@ -1584,6 +1606,7 @@ class AssistantEngine:
                     context=recurring_context,
                     fallback="Diz-me um pouco melhor o que tens em mente.",
                     intent_instruction=_intent_instruction_for_user_message(user_message),
+                    response_language=self.response_language,
                     language_instruction=self._language_instruction(),
                 )
             )
@@ -1850,16 +1873,28 @@ class AssistantEngine:
     def _try_general_knowledge_query(self, user_message: str) -> str | None:
         if not _is_general_knowledge_query(user_message):
             return None
+        # Phase 7.3.4 (section 1): these two guardrails are BEHAVIORAL
+        # instructions ("don't claim you researched this"), not retrieved
+        # knowledge -- they belong in intent_instruction (appended to the
+        # SYSTEM prompt) rather than `facts` (which lands inside the USER-
+        # facing prompt via _user_prompt). A real Qt run with response_
+        # language=en-GB showed this exact handler answering in Portuguese
+        # despite the correct "Respond in English" system instruction being
+        # present -- the hardcoded Portuguese `facts` text sitting right in
+        # the user turn was enough to pull a small local model back to
+        # Portuguese. Moving it out of the user-message channel removes
+        # that competing signal.
         return self.response_composer.compose(
             ComposerRequest(
                 intent="general_knowledge_query",
                 user_message=user_message,
                 history=self._recent_conversation_history(user_message),
-                facts=[
-                    "Pergunta de conhecimento geral. Não uses memória persistente por defeito.",
-                    "Não afirmes que pesquisaste ou que consultaste fontes.",
-                ],
+                intent_instruction=(
+                    "Pergunta de conhecimento geral. Não uses memória persistente por defeito. "
+                    "Não afirmes que pesquisaste ou que consultaste fontes."
+                ),
                 fallback="Posso explicar isso de forma geral, mas sem fingir fontes externas.",
+                response_language=self.response_language,
                 language_instruction=self._language_instruction(),
             )
         )
@@ -1953,6 +1988,7 @@ class AssistantEngine:
                     "Escreve diretamente o email pedido. Usa apenas os factos recolhidos no workflow. "
                     "Nao assumas projeto, destinatario, apoio ou contexto que nao esteja indicado."
                 ),
+                response_language=self.response_language,
                 language_instruction=self._language_instruction(),
             )
         )
@@ -3732,6 +3768,7 @@ class AssistantEngine:
                     facts=facts,
                     intent_instruction=current_instruction,
                     fallback="Não consegui gerar o email agora. Podes pedir para tentar outra vez.",
+                    response_language=self.response_language,
                     language_instruction=self._language_instruction(),
                     task_profile=task_profile,
                 )
@@ -5512,6 +5549,7 @@ class AssistantEngine:
                             f"Tipo detetado: {context.detected_content_type}.",
                         ],
                         fallback="Consigo reescrever o documento, mas preciso de me basear apenas no texto que li.",
+                        response_language=self.response_language,
                         language_instruction=self._language_instruction(),
                         temperature=_REWRITE_TEMPERATURE,
                         num_predict=_REWRITE_MAX_OUTPUT_TOKENS,
@@ -5819,6 +5857,7 @@ class AssistantEngine:
                     "Não afirmes que vais ler, abrir ou pesquisar; o conteúdo já está disponível.",
                 ],
                 fallback="Consigo analisar o documento, mas preciso de me basear apenas no texto que li.",
+                response_language=self.response_language,
                 language_instruction=self._language_instruction(),
             )
         )
@@ -5880,6 +5919,7 @@ class AssistantEngine:
                     "Não afirmes que vais ler, abrir ou pesquisar; o conteúdo já está disponível.",
                 ],
                 fallback="Consigo comentar o documento, mas preciso de me basear apenas no texto que li.",
+                response_language=self.response_language,
                 language_instruction=self._language_instruction(),
             )
         )
@@ -5990,6 +6030,7 @@ class AssistantEngine:
                     "Não afirmes que pesquisaste na web.",
                 ],
                 fallback="Posso trabalhar esse ficheiro, mas preciso de conteúdo legível para responder bem.",
+                response_language=self.response_language,
                 language_instruction=self._language_instruction(),
             )
         )
@@ -6848,6 +6889,8 @@ class AssistantEngine:
             "response_language_changed": bool(self._turn_trace.get("response_language_changed")),
             "response_language_localized": bool(self._turn_trace.get("response_language_localized")),
             "language_guard_triggered": bool(self._turn_trace.get("language_guard_triggered")),
+            "translated_previous_response": bool(self._turn_trace.get("translated_previous_response")),
+            "translate_previous_target_language": self._turn_trace.get("translate_previous_target_language") or "",
             "configured_model_mode": configured_mode,
             "configured_model_mode_source": configured_source,
             "execution_path": execution_path,
@@ -7860,6 +7903,7 @@ class AssistantEngine:
                             "Usa apenas o contexto recuperado. NÃ£o inventes objetivos, datas, progresso ou prÃ³ximos passos. "
                             "Se o Alexandre pedir quatro pontos, responde em exatamente quatro pontos curtos."
                         ),
+                        response_language=self.response_language,
                         language_instruction=self._language_instruction(),
                     )
                 )
@@ -7892,6 +7936,7 @@ class AssistantEngine:
                     "Resume diretamente o texto pedido. Não trates 'pontos' como tarefas. "
                     "Não faças perguntas de esclarecimento se o texto estiver presente."
                 ),
+                response_language=self.response_language,
                 language_instruction=self._language_instruction(),
             )
         )
@@ -8059,6 +8104,7 @@ class AssistantEngine:
                     "Executa agora o pedido original diretamente. "
                     "Não perguntes se quer ajuda e não reinicies a conversa."
                 ),
+                response_language=self.response_language,
                 language_instruction=self._language_instruction(),
             )
         )
@@ -8218,6 +8264,7 @@ class AssistantEngine:
                 fallback=fallback,
                 show_technical=show_details,
                 technical_text=technical_text,
+                response_language=self.response_language,
                 language_instruction=self._language_instruction(),
             )
         )
@@ -8235,6 +8282,7 @@ class AssistantEngine:
                 history=self._recent_conversation_history(query),
                 facts=self._facts_with_cognitive_reasoning(facts),
                 fallback=f"Ainda não tenho contexto suficiente sobre {query}.",
+                response_language=self.response_language,
                 language_instruction=self._language_instruction(),
             )
         )
@@ -8358,6 +8406,7 @@ class AssistantEngine:
                 history=self._recent_conversation_history(user_message),
                 facts=self._facts_with_cognitive_reasoning(facts),
                 fallback=fallback,
+                response_language=self.response_language,
                 language_instruction=self._language_instruction(),
             )
         )
@@ -8445,6 +8494,42 @@ class AssistantEngine:
         if not suggestion:
             return "Neste momento não tenho nenhuma sugestão nova relevante."
         return f"Sugestão: {suggestion}"
+
+    def _try_translate_previous_response(self, user_message: str) -> str | None:
+        """Section 2/3 (Phase 7.3.4): "quero essa resposta em inglês" /
+        "traduz essa resposta para inglês" / "diz isso em inglês" / "agora
+        em inglês" / "say that in English" -- a one-off transformation of
+        the PREVIOUS assistant reply, never a persistent response_language
+        change. self.response_language (and the active TTS voice, settings
+        store, long-term-memory preference) are deliberately left
+        untouched here -- only _try_language_preference_command owns that
+        persistent state."""
+        command = detect_translate_previous_response_command(user_message)
+        if not command.handled or not command.target_language:
+            return None
+        previous = self._last_assistant_response_text()
+        if not previous:
+            return None
+        response = self.response_composer.compose(
+            ComposerRequest(
+                intent="traduzir_resposta_anterior",
+                user_message=previous,
+                fallback=previous,
+                intent_instruction=translation_instruction(command.target_language),
+                response_language=command.target_language,
+                language_instruction=response_language_instruction(command.target_language),
+            )
+        )
+        if self._turn_trace is not None:
+            self._turn_trace["translated_previous_response"] = True
+            self._turn_trace["translate_previous_target_language"] = command.target_language
+        return response
+
+    def _last_assistant_response_text(self) -> str:
+        for message in reversed(self.memory.load()):
+            if message.get("role") == "assistant":
+                return str(message.get("content", "") or "").strip()
+        return ""
 
     def _try_language_preference_command(self, user_message: str) -> str | None:
         text = _normalize_text(user_message)
@@ -8667,6 +8752,9 @@ def is_pure_social_turn(message: str) -> bool:
     pure_turns = {
         "ola",
         "olá",
+        "hello",
+        "hi",
+        "hey",
         "viva",
         "bom dia",
         "boa tarde",
@@ -8692,6 +8780,8 @@ def is_pure_social_turn(message: str) -> bool:
         "Ã© a minha irmÃ£ de 7 anos a perguntar a tua cor preferida",
         "como estas",
         "como estás",
+        "how are you",
+        "how are you doing",
         "tudo bem",
         "estas bem",
         "estás bem",

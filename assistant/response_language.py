@@ -17,6 +17,18 @@ class ResponseLanguageCommand:
     confirmation: str = ""
 
 
+@dataclass(frozen=True)
+class TranslatePreviousResponseCommand:
+    """Section 2/3 (Phase 7.3.4): a CONTEXTUAL, one-off request to
+    transform/translate the PREVIOUS assistant reply into a target
+    language -- distinct from ResponseLanguageCommand, which changes the
+    PERSISTENT response_language preference going forward. Handling this
+    must never call _set_response_language."""
+
+    handled: bool
+    target_language: str = ""
+
+
 def normalize_response_language(value: object) -> str:
     text = str(value or "").strip()
     if text in SUPPORTED_RESPONSE_LANGUAGES:
@@ -68,6 +80,66 @@ def detect_response_language_command(message: str) -> ResponseLanguageCommand:
     if _asks_for_portuguese(text):
         return ResponseLanguageCommand(True, PORTUGUESE_PT, "Claro. Vou responder em português.")
     return ResponseLanguageCommand(False)
+
+
+# Section 2/3 (Phase 7.3.4): phrases that refer DEICTICALLY to the
+# assistant's own PREVIOUS reply ("essa resposta", "isso", "that") and ask
+# for it in another language -- a one-off content transformation, never a
+# persistent preference change. Checked (and consumed) BEFORE
+# detect_response_language_command so a phrase like "quero essa resposta em
+# inglês" -- which also contains the substring "resposta em ingles" that
+# _asks_for_english matches on -- is never mistaken for a persistent
+# language switch.
+_TRANSLATE_PREVIOUS_TRIGGER_PHRASES = (
+    "traduz essa resposta",
+    "traduz esta resposta",
+    "traduz isso",
+    "traduz isto",
+    "traduzir essa resposta",
+    "quero essa resposta em",
+    "quero essa resposta traduzida",
+    "quero esta resposta em",
+    "diz isso em",
+    "diz isto em",
+    "diz-me isso em",
+    "diz me isso em",
+    "repete isso em",
+    "repete essa resposta em",
+    "agora em ingles",
+    "agora em portugues",
+    "say that in english",
+    "say that in portuguese",
+    "say this in english",
+    "say this in portuguese",
+    "translate that",
+    "translate this",
+    "translate the previous",
+)
+
+
+def detect_translate_previous_response_command(message: str) -> TranslatePreviousResponseCommand:
+    text = _normalize(message).strip(" .,!?:;")
+    if not text:
+        return TranslatePreviousResponseCommand(False)
+    if not any(phrase in text for phrase in _TRANSLATE_PREVIOUS_TRIGGER_PHRASES):
+        return TranslatePreviousResponseCommand(False)
+    if "ingles" in text or "english" in text:
+        return TranslatePreviousResponseCommand(True, ENGLISH_GB)
+    if "portugues" in text or "portuguese" in text:
+        return TranslatePreviousResponseCommand(True, PORTUGUESE_PT)
+    # A trigger phrase matched (e.g. "translate that") but no explicit
+    # target language was named -- never guess; let the caller fall through
+    # to normal handling instead of silently picking a language.
+    return TranslatePreviousResponseCommand(False)
+
+
+def translation_instruction(target_language: str) -> str:
+    normalized = normalize_response_language(target_language) or PORTUGUESE_PT
+    label = "English" if normalized == ENGLISH_GB else "português de Portugal"
+    return (
+        f"Traduz o texto seguinte para {label}, mantendo o significado, o tom e o nível de detalhe. "
+        "Devolve apenas o texto traduzido, sem comentários adicionais nem explicações sobre a tradução."
+    )
 
 
 def simple_social_response(message: str, language: str) -> str | None:
@@ -138,6 +210,14 @@ def localize_deterministic_response(response: str, language: str) -> str:
         ),
         "nao tenho essa informacao guardada sobre isso.": "I don't have that information saved.",
         "nao tenho memoria suficiente para confirmar essa duracao.": "I don't have enough memory to confirm that duration.",
+        # Phase 7.3.4: compose_email task-dialogue questions (conversation.py
+        # _compose_email_question) -- a technical/deterministic turn, so it
+        # never reaches the LLM/language_instruction path at all; without an
+        # entry here it always leaked out in Portuguese regardless of
+        # response_language.
+        "claro. para quem e?": "Sure. Who's it for?",
+        "o que precisas de pedir ou dizer nesse email?": "What do you need to ask for or say in that email?",
+        "sobre que assunto, mais especificamente?": "What subject, more specifically?",
     }
     if normalized in exact:
         return exact[normalized]

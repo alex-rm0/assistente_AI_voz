@@ -89,8 +89,22 @@ class EchoTTSWorker(QObject):
         self.response_language = response_language
         self.stop_event = threading.Event()
 
-    def stop(self) -> None:
+    def stop(self, *, teardown_manager: bool = False) -> None:
+        # Phase 7.3.4 (section 5): stopping THIS request/playback must never
+        # tear down the shared, persistent Pocket worker -- it used to call
+        # tts_manager.stop() unconditionally, which cascades through
+        # LocalTTSProvider.stop() into every provider's .stop(), including
+        # PocketTTSLocalProvider.shutdown() (kills the long-lived subprocess
+        # and nulls self._process). Since stopSpeaking() is wired to fire
+        # automatically before every new user message and on "clear
+        # conversation" while TTS is playing (see echo_ui.js), that
+        # unconditional teardown silently forced a full cold Pocket restart
+        # on the very next SPEAK -- an ordinary mid-session UI action, not a
+        # worker failure or app exit. teardown_manager=True is reserved for
+        # genuine session-ending shutdown (see EchoUIController.shutdown()).
         self.stop_event.set()
+        if not teardown_manager:
+            return
         stop = getattr(self.tts_manager, "stop", None)
         if callable(stop):
             stop()
@@ -110,11 +124,21 @@ class EchoTTSWorker(QObject):
                     {
                         "provider": result.provider,
                         "voice_id": result.voice_id,
+                        "provider_voice": result.provider_voice,
                         "language": self.response_language or result.language,
                         "response_language": self.response_language,
                         "voice_language": result.language,
+                        "model": result.model,
+                        "device": result.device,
+                        "worker_launch_ms": int(result.worker_launch_ms),
+                        "model_load_ms": int(result.model_load_ms),
+                        "reference_prepare_ms": int(result.reference_prepare_ms),
+                        "first_audio_ms": int(result.first_audio_ms),
                         "synthesis_ms": int(result.synthesis_ms),
+                        "audio_duration_ms": int(result.audio_duration_ms),
                         "text_chars": result.text_chars,
+                        "reference_used": result.reference_used,
+                        "reference_cache_hit": result.reference_cache_hit,
                         "fallback_used": result.fallback_used,
                         "fallback_reason": result.fallback_reason,
                     }
@@ -299,6 +323,9 @@ class EchoUIController(QObject):
         if not message:
             self.ttsError.emit("Não há resposta para falar.")
             return
+        if self._tts_worker is not None:
+            _debug_tts("[TTS]", "duplicate_request_ignored=true")
+            return
         if self.tts_manager is None:
             self.ttsError.emit("A fala ainda não está ligada nesta sessão.")
             return
@@ -313,8 +340,6 @@ class EchoUIController(QObject):
                 self.ttsError.emit(_tts_unavailable_message(response_language))
                 self._emit_state("idle")
                 return
-        if self._tts_worker is not None:
-            self.stopSpeaking()
         self._visual_token += 1
         self._tts_thread = QThread(self)
         self._tts_worker = EchoTTSWorker(self.tts_manager, message, self.tts_player, response_language)
@@ -324,6 +349,7 @@ class EchoUIController(QObject):
         self._tts_worker.finished.connect(self._handle_tts_finished, Qt.ConnectionType.QueuedConnection)
         self._tts_worker.failed.connect(self._handle_tts_error, Qt.ConnectionType.QueuedConnection)
         _debug_tts("[TTS]", "event=request", f"text_chars={len(message)}", f"response_language={response_language}")
+        self._emit_state("working")
         self._tts_thread.start()
 
     @Slot()
@@ -455,7 +481,7 @@ class EchoUIController(QObject):
             self._voice_worker.stop()
             self._cleanup_voice_worker()
         if self._tts_worker is not None:
-            self._tts_worker.stop()
+            self._tts_worker.stop(teardown_manager=True)
             self._cleanup_tts_worker()
         if self._thread is None:
             return
@@ -743,9 +769,13 @@ def _bounded_tts_payload(payload: str) -> str:
         "language",
         "response_language",
         "voice_language",
+        "model",
+        "device",
+        "model_load_ms",
         "text_chars",
         "synthesis_ms",
         "playback_ms",
+        "reference_used",
         "fallback_used",
         "fallback_reason",
     ):

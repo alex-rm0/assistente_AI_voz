@@ -16,6 +16,7 @@
   let voiceInputProcessing = false;
   let ttsAvailable = false;
   let ttsActive = false;
+  let ttsAvailabilityRefreshTimer = null;
   let currentResponseText = "";
 
   const APP_VERSION = "v0.4.0";
@@ -322,6 +323,27 @@
     }
   }
 
+  function refreshTtsAvailability() {
+    if (ttsAvailabilityRefreshTimer) {
+      window.clearTimeout(ttsAvailabilityRefreshTimer);
+    }
+    ttsAvailabilityRefreshTimer = window.setTimeout(() => {
+      ttsAvailabilityRefreshTimer = null;
+      performTtsAvailabilityRefresh();
+    }, 80);
+  }
+
+  function performTtsAvailabilityRefresh() {
+    if (!controllerReady || !controller || typeof controller.isTtsAvailable !== "function") {
+      updateTtsControls();
+      return;
+    }
+    controller.isTtsAvailable((available) => {
+      ttsAvailable = Boolean(available);
+      updateTtsControls();
+    });
+  }
+
   function speakCurrentResponse() {
     if (!controllerReady || !controller) {
       renderEchoError("A ligação ao Python ainda não está pronta.");
@@ -337,6 +359,9 @@
       applyEchoState("error");
       return;
     }
+    ttsActive = true;
+    updateTtsControls();
+    applyEchoState("working", {progressLabel: "A preparar voz…"});
     controller.speakText(currentResponseText);
   }
 
@@ -1838,7 +1863,7 @@
     if (bridgeReply) bridgeReply.textContent = value;
     if (workspaceHint) workspaceHint.classList.remove("visible");
     if (clearButton) clearButton.classList.add("visible");
-    updateTtsControls();
+    refreshTtsAvailability();
     if (telemetryDebugMode && (telemetryMode === "automatic" || telemetryState === "thinking_cloud")) {
       applyTelemetryMock("response_ready");
     } else if (telemetryDebugMode) {
@@ -2461,6 +2486,7 @@
       activeController.telemetryUpdated.connect((payload) => {
         console.log("[Echo UI JS] telemetryUpdated recebido:", payload);
         applyRealTelemetry(payload);
+        refreshTtsAvailability();
       });
     }
 
@@ -2468,6 +2494,7 @@
       activeController.modelModeChanged.connect((payload) => {
         console.log("[Echo UI JS] modelModeChanged recebido:", payload);
         applyRealTelemetry(payload);
+        refreshTtsAvailability();
       });
     }
 
@@ -2533,12 +2560,7 @@
           setVoiceControlState(available ? "idle" : "disabled");
         });
       }
-      if (typeof controller.isTtsAvailable === "function") {
-        controller.isTtsAvailable((available) => {
-          ttsAvailable = Boolean(available);
-          updateTtsControls();
-        });
-      }
+      refreshTtsAvailability();
       setInputEnabled(true);
       focusInput();
     });

@@ -113,12 +113,16 @@ class ContextManager:
             f"- {item.name.value} ({item.weight:.2f}): {item.description}"
             for item in active_contexts
         )
+        # Phase 7.3.4: no hardcoded language mandate here -- this string used
+        # to unconditionally say "Usa sempre portugues de Portugal", which
+        # directly contradicted AssistantEngine._language_instruction() (the
+        # response_language-aware instruction the caller appends afterward,
+        # see _system_prompt_for_agent) whenever response_language was
+        # en-GB. That instruction is now the sole source of language
+        # authority for this prompt.
         return (
             "Es o AssistenteIA, um assistente local persistente para Windows 11.\n"
-            "Usa sempre portugues de Portugal. Trata o utilizador por tu, de forma informal e consistente. "
-            "Evita portugues do Brasil. Usa 'aplicacoes', nunca 'aplicativos'; 'ecra', nunca 'tela'; "
-            "'estou a acompanhar' ou 'estou a observar', nunca 'estou assistindo'; "
-            "'ficheiros', nunca 'arquivos'; 'aceder', nunca 'acessar'; 'utilizador', nunca 'usuario'.\n"
+            "Trata o utilizador de forma informal e consistente.\n"
             "Mantem-te seguro: nao executes comandos do sistema, nao acedas a ficheiros fora da pasta workspace "
             "e nao finjas ter capacidades que ainda nao existem nesta versao. "
             "Nunca inventes informacoes sobre janelas, aplicacoes, programas ou atividade do computador; "
