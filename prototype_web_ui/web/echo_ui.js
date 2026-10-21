@@ -17,6 +17,13 @@
   let ttsAvailable = false;
   let ttsActive = false;
   let ttsAvailabilityRefreshTimer = null;
+  // Phase 7.4/7.6 (section 3/16): pure RENDER caches of the backend's
+  // voice_conversation_active / voice_standby_active -- only ever set from
+  // their respective *Changed signals or the initial isVoice*Active()
+  // queries, never flipped optimistically by a click. The backend is the
+  // single source of truth and guarantees these two are never both true.
+  let voiceConversationActive = false;
+  let voiceStandbyActive = false;
   let currentResponseText = "";
 
   const APP_VERSION = "v0.4.0";
@@ -308,6 +315,67 @@
     micButton.classList.toggle("processing", cleanState === "processing");
     micButton.textContent = label || (cleanState === "listening" ? "STOP" : cleanState === "processing" ? "..." : "MIC");
     micButton.disabled = !voiceInputAvailable || requestActive || cleanState === "processing" || cleanState === "disabled";
+  }
+
+  function setVoiceConversationState(active) {
+    voiceConversationActive = Boolean(active);
+    renderVoiceModeButton();
+  }
+
+  function setVoiceStandbyState(active) {
+    voiceStandbyActive = Boolean(active);
+    renderVoiceModeButton();
+  }
+
+  // Phase 7.6 (section 2/16): one small tri-state render, combining the
+  // two independent backend booleans -- OFF / STANDBY / ACTIVE. LISTENING/
+  // SPEAKING keep coming from the existing body stateChanged signal
+  // (unchanged); this button only ever communicates whether the
+  // conversation loop is off, waiting for a wake phrase, or fully active.
+  function renderVoiceModeButton() {
+    const button = byId("voiceConversationButton");
+    if (!button) return;
+    const mode = voiceConversationActive ? "active" : voiceStandbyActive ? "standby" : "off";
+    button.classList.toggle("active", mode === "active");
+    button.classList.toggle("standby", mode === "standby");
+    button.dataset.voiceMode = mode;
+    button.textContent = mode === "active" ? "VOICE MODE · ON" : mode === "standby" ? "VOICE MODE · STANDBY" : "VOICE MODE";
+    button.setAttribute("aria-pressed", mode !== "off" ? "true" : "false");
+  }
+
+  function toggleVoiceConversation() {
+    if (!controllerReady || !controller) {
+      renderEchoError("A ligação ao Python ainda não está pronta.");
+      applyEchoState("error");
+      return;
+    }
+    if (voiceConversationActive) {
+      if (typeof controller.stopVoiceConversation === "function") {
+        controller.stopVoiceConversation();
+      }
+      return;
+    }
+    if (voiceStandbyActive) {
+      if (typeof controller.stopVoiceStandby === "function") {
+        controller.stopVoiceStandby();
+      }
+      return;
+    }
+    // Phase 7.6 (section 15): the manual control's fallback role is now to
+    // enter STANDBY (wake-word listening), not jump straight to ACTIVE --
+    // saying a wake phrase from standby is what promotes the loop. Falls
+    // back to the pre-7.6 direct-to-active behavior for older controller
+    // builds that don't expose startVoiceStandby.
+    if (typeof controller.startVoiceStandby === "function") {
+      controller.startVoiceStandby();
+      return;
+    }
+    if (typeof controller.startVoiceConversation !== "function") {
+      renderEchoError("O modo de conversa por voz ainda não está ligado nesta interface.");
+      applyEchoState("error");
+      return;
+    }
+    controller.startVoiceConversation();
   }
 
   function updateTtsControls() {
@@ -1828,8 +1896,27 @@
     echoSays.classList.toggle("visible", Boolean(text));
   }
 
+  // Phase 8.1.1: the JS half of the bounded [UI_RESPONSE] trace (the
+  // Python side logs event=emit). Counts/flags only, never content.
+  function logUiResponse(event, fields = {}) {
+    const parts = ["[UI_RESPONSE]", `event=${event}`];
+    Object.entries(fields).forEach(([key, value]) => parts.push(`${key}=${value}`));
+    console.log(parts.join(" "));
+  }
+
+  function isResponseVisible(element) {
+    if (!element || element.hidden) return false;
+    const styles = getComputedStyle(element);
+    // Computed opacity can still read "0" while the fade-in transition is
+    // starting; the inline opacity renderEchoResponse sets is the intent.
+    const opaque = element.style.opacity === "1" || styles.opacity !== "0";
+    return styles.display !== "none" && styles.visibility !== "hidden" && opaque
+      && Boolean(element.textContent.trim());
+  }
+
   function renderEchoResponse(text) {
     console.log("[Echo UI JS] renderEchoResponse:", text);
+    logUiResponse("render_start");
 
     const element = byId("echoResponse");
     if (!element) {
@@ -1879,6 +1966,7 @@
       opacity: styles.opacity,
       zIndex: styles.zIndex
     });
+    logUiResponse("render_complete", {chars: value.length, visible: isResponseVisible(element)});
   }
 
   function applyResponseLayout(element, text, options = {}) {
@@ -2365,6 +2453,7 @@
       if (replyFadeToken !== token) return;
       echoResponse.textContent = "";
       echoResponse.classList.remove("muted");
+      logUiResponse("cleared", {reason: "new_message"});
     }, 220);
   }
 
@@ -2405,6 +2494,7 @@
 
     activeController.responseReady.connect((text) => {
       console.log("[Echo UI JS] responseReady recebido:", text);
+      logUiResponse("received", {chars: String(text ?? "").length});
       renderEchoResponse(String(text));
     });
 
@@ -2426,7 +2516,16 @@
     if (activeController.voiceTranscriptionReady) {
       activeController.voiceTranscriptionReady.connect((text) => {
         console.log("[Echo UI JS] voiceTranscriptionReady recebido:", text);
-        insertVoiceTranscription(text);
+        // Phase 7.4.1 (section 1): inside Voice Conversation Mode the
+        // controller auto-submits the accepted transcript itself (it never
+        // routes through this UI's own sendMessage(), which is what clears
+        // the composer for a typed/manual submission) -- filling #voiceIn
+        // here would leave already-submitted speech visibly "waiting" in a
+        // composer that represents unsent text. Outside the mode this is
+        // still the existing manual-MIC fill-but-don't-send behavior.
+        if (!voiceConversationActive) {
+          insertVoiceTranscription(text);
+        }
       });
     }
 
@@ -2475,6 +2574,20 @@
         } else {
           applyEchoState("error", {progressLabel: String(message || "Não consegui falar.")});
         }
+      });
+    }
+
+    if (activeController.voiceConversationChanged) {
+      activeController.voiceConversationChanged.connect((active) => {
+        console.log("[Echo UI JS] voiceConversationChanged recebido:", active);
+        setVoiceConversationState(active);
+      });
+    }
+
+    if (activeController.voiceStandbyChanged) {
+      activeController.voiceStandbyChanged.connect((active) => {
+        console.log("[Echo UI JS] voiceStandbyChanged recebido:", active);
+        setVoiceStandbyState(active);
       });
     }
 
@@ -2560,6 +2673,16 @@
           setVoiceControlState(available ? "idle" : "disabled");
         });
       }
+      if (typeof controller.isVoiceConversationActive === "function") {
+        controller.isVoiceConversationActive((active) => {
+          setVoiceConversationState(active);
+        });
+      }
+      if (typeof controller.isVoiceStandbyActive === "function") {
+        controller.isVoiceStandbyActive((active) => {
+          setVoiceStandbyState(active);
+        });
+      }
       refreshTtsAvailability();
       setInputEnabled(true);
       focusInput();
@@ -2572,6 +2695,7 @@
     const micButton = byId("micButton");
     const speakButton = byId("speakButton");
     const stopSpeechButton = byId("stopSpeechButton");
+    const voiceConversationButton = byId("voiceConversationButton");
     const closeResearch = byId("closeResearch");
     const telemetryCompact = byId("telemetryCompact");
     const closeTelemetry = byId("closeTelemetry");
@@ -2612,6 +2736,12 @@
       });
     }
 
+    if (voiceConversationButton) {
+      voiceConversationButton.addEventListener("click", () => {
+        toggleVoiceConversation();
+      });
+    }
+
     if (clearButton) {
       clearButton.addEventListener("click", () => {
         const bridgeReply = byId("bridgeReply");
@@ -2627,6 +2757,7 @@
         if (ttsActive) stopSpeaking();
         if (echoResponse) {
           echoResponse.textContent = "";
+          logUiResponse("cleared", {reason: "clear_button"});
           currentResponseText = "";
           echoResponse.dataset.responseMode = "short";
           echoResponse.dataset.responseLayout = "inline";

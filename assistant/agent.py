@@ -87,6 +87,12 @@ class AgentContext:
     pending_tasks: str = ""
     session_summary: str = ""
     presence_state: str = "ACTIVE_CONVERSATION"
+    # Phase 7.7 (section 1): the ONE source of truth for which language
+    # Echo's visible/spoken output must respect, independent of routing
+    # path -- threaded into every tool call via _prepare_tool_arguments so
+    # a tool that returns its own presentation text (e.g. get_open_windows)
+    # can localize it without hardcoding a language.
+    response_language: str = ""
     tools_enabled: bool = True
     suggestions_enabled: bool = True
     confirmations_enabled: bool = True
@@ -738,6 +744,11 @@ class Agent:
             prepared["active_contexts"] = self._current_context.active_contexts or []
             prepared["relevant_memory"] = self._current_context.recurring_context
             prepared["pending_tasks"] = self._current_context.pending_tasks
+            # Phase 7.7 (section 1/5): always available to any tool that
+            # declares this parameter (Tool.run() filters by the tool
+            # function's own signature, so a tool that doesn't accept it
+            # simply never receives it -- no other tool is affected).
+            prepared["response_language"] = self._current_context.response_language
         return prepared
 
     def _system_prompt_with_tools(self, context: AgentContext, tools_description: str) -> str:

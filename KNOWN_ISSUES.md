@@ -1,0 +1,100 @@
+# Problemas conhecidos
+
+Data: 2026-10-21
+Estado dos testes: pytest: 1808 passed
+
+Ponto de estabilização. Estes problemas estão identificados e **ainda não
+foram corrigidos**. Cada entrada tem o sintoma, a evidência e o estado.
+
+---
+
+## 1. Autoridade do idioma da resposta (response_language)
+
+- **Sintoma:** com `response_language=en-GB` e o utilizador a falar
+  português, o Echo respondeu em português. A resposta do composer também
+  inventou atividade ("Estava a trabalhar num projeto até à noite").
+- **Evidência (log real de 2026-10-21):**
+  - `voice_reviewed=no`: o voice critic **não** correu.
+  - `response_before_voice_critic` era a resposta inventada do composer.
+    `response_after_voice_critic` passou a ser um literal fixo em português:
+    "Não tenho essa informação sobre a tua atividade real — só o Context
+    Observer sabe isso."
+  - A substituição foi feita por `_detect_ungrounded_activity_claim`
+    (definida em `assistant/conversation.py:11627`; o literal está em
+    `assistant/conversation.py:6656`).
+  - Esse literal não passa por `localize_deterministic_response` nem é
+    apanhado por `looks_mixed_for_language` (`assistant/response_language.py`).
+    Por isso sai em português mesmo com en-GB.
+  - A mensagem expõe ao utilizador o nome interno "Context Observer".
+- **Estado:** aberto.
+
+## 2. Campos de trace `voice_critic_*` com nome enganador
+
+- **Sintoma:** os campos `response_before_voice_critic` e
+  `response_after_voice_critic` sugerem uma medição do voice critic.
+- **Evidência:** no caso acima mudaram de valor com `voice_reviewed=no`. Na
+  prática medem a diferença antes/depois dos guards de resposta, não o critic.
+- **Estado:** aberto.
+
+## 3. Saudação formal não apanhada pelo social fast path
+
+- **Sintoma:** "Olá, como está?" (forma formal) não segue pelo social fast
+  path.
+- **Evidência:** no log real foi `GENERAL_CONVERSATION` →
+  `RESPONSE_COMPOSER`, com uma chamada ao LLM (`llm_calls=1`).
+- **Estado:** aberto.
+
+## 4. Embeddings nunca funcionaram
+
+- **Sintoma:** a pesquisa semântica da memória de longo prazo nunca
+  funcionou; só existe o fallback por texto.
+- **Evidência:**
+  - `LongTermMemory` / `llm.embed` chamam `/api/embeddings` com o modelo de
+    chat (`llama3.1:8b`). O Ollama responde HTTP 500, e cada chamada a frio
+    demora cerca de 7 s (medido: 7,7 s).
+  - 0 de 216 memórias em `data/long_term_memory.sqlite` têm embedding.
+  - Uma destas chamadas corre no fecho da app (resumo de sessão). Desde a
+    Phase 7.6.7 corre com a janela já escondida, mas continua a atrasar o
+    fim do processo.
+- **Estado:** aberto.
+
+## 5. Memória poluída com resumos de sessão
+
+- **Sintoma:** a memória de longo prazo está dominada por resumos de sessão
+  sem conteúdo útil, um por cada arranque e fecho da app.
+- **Evidência:** 202 de 216 memórias começam por "Resumo de sessao". São
+  texto padrão (hora de início e fim, motivo de fecho, atividade genérica,
+  ficheiros como `output.txt`/`.pytest_cache`), sem factos relevantes.
+- **Estado:** aberto.
+
+## 6. Arranques a frio
+
+- **Sintoma:** latência alta na primeira utilização de cada componente.
+- **Evidência:**
+  - Whisper medium: cerca de 9 s a frio (o primeiro fallback de wake na
+    sessão mediu `stt_ms=9184`).
+  - Pocket TTS: arranque do servidor e carregamento do modelo na primeira
+    fala (`pocket_tts_server_start` → `ready` em cerca de 5 s no log real).
+  - Ollama: carregamento a frio do modelo na primeira chamada.
+- **Estado:** aberto.
+
+## 7. Política de idioma por decidir
+
+- **Sintoma:** não está definido o que o Echo deve fazer quando o
+  utilizador fala português com a definição en-GB (responder em en-GB,
+  seguir o idioma falado, ou perguntar).
+- **Evidência:** é o caso real do problema 1. O STT deteta `pt`, a definição
+  é `en-GB` e o TTS usa a voz inglesa para texto em português.
+- **Estado:** aberto (decisão de produto).
+
+## 8. Phase 8.1.1: UI não mostrava respostas depois do STANDBY
+
+- **Sintoma:** em Voice Mode a resposta era gerada e falada pelo TTS, mas
+  não aparecia na UI. Depois de entrar em STANDBY, nenhum sinal
+  controller → JS chegava à página.
+- **Evidência:** `_on_wake_prewarm_finished` estava ligado a um sinal sem
+  `@Slot()`. O PySide acrescentava então um slot dinâmico ao QMetaObject do
+  controller já publicado no QWebChannel. Reproduzido e verificado com
+  QWebEngine real (`tests/test_ui_response_delivery.py`).
+- **Estado:** corrigido no código e coberto por testes. **Falta a
+  validação manual na app real** (microfone e janela reais).

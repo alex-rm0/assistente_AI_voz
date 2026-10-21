@@ -8,6 +8,7 @@ from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWebEngineWidgets import QWebEngineView
+from PySide6.QtWidgets import QApplication
 
 from prototype_web_ui.controller import EchoUIController
 from assistant.voice_input import VoiceTranscriber
@@ -59,6 +60,8 @@ class EchoOSWindow(QWebEngineView):
     ) -> None:
         super().__init__()
         self.on_close = on_close
+        self._close_in_progress = False
+        self._close_completed = False
         self.setWindowTitle(title)
         self.resize(1328, 860)
 
@@ -67,6 +70,17 @@ class EchoOSWindow(QWebEngineView):
             VoiceTranscriber(
                 model_name=voice_model,
                 language=voice_language or "pt",
+                # Phase 7.5 (section 10/12): input_language for the NEW
+                # Voice-Conversation-Mode VAD path is deliberately threaded
+                # from this SAME existing voice.language config value (not
+                # from response_language -- see section 10's decoupling
+                # requirement), so today's config ("pt") preserves exactly
+                # today's real behavior with zero risk. The class-level
+                # default is "auto" for anyone not explicitly configuring
+                # "pt"/"en" -- flipping the real config value to "auto" is
+                # deferred until a human validates it with a live
+                # microphone (see the Phase 7.5 report).
+                input_language=voice_language or "auto",
                 sample_rate=voice_sample_rate,
                 input_device=voice_input_device,
                 auto_select_input=voice_auto_select_input,
@@ -105,10 +119,35 @@ class EchoOSWindow(QWebEngineView):
         self.load(QUrl.fromLocalFile(str((WEB_DIR / "index.html").resolve())))
 
     def closeEvent(self, event) -> None:
-        self.controller.shutdown()
-        if self.on_close is not None:
-            self.on_close()
-        super().closeEvent(event)
+        # Phase 7.6.7 (section 9): closing used to run controller.shutdown()
+        # and on_close() synchronously right here, on the GUI thread -- a
+        # real close sat ~8s in on_close's session-summary embedding call
+        # (cold Ollama model) and Windows marked the window "Não
+        # responde". Now the first close request is refused, the window is
+        # hidden at once, and the controller drains its workers while the
+        # event loop keeps running; once that finishes, close() is called
+        # again and this time accepted.
+        if self._close_completed:
+            super().closeEvent(event)
+            return
+        event.ignore()
+        if self._close_in_progress:
+            return
+        self._close_in_progress = True
+        self.hide()
+        self.controller.shutdown_async(self._finish_close, session_close=self.on_close)
+
+    def _finish_close(self) -> None:
+        self._close_completed = True
+        self.close()
+        # A window that was already hidden doesn't trigger Qt's
+        # quit-on-last-window-closed when close() is accepted (verified
+        # offscreen), so quit explicitly once nothing else is visible.
+        app = QApplication.instance()
+        if app is not None and app.quitOnLastWindowClosed() and not any(
+            widget.isVisible() for widget in app.topLevelWidgets()
+        ):
+            app.quit()
 
     def _handle_load_finished(self, ok: bool) -> None:
         print(f"[Echo UI DEBUG] page_load_finished={ok}")

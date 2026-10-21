@@ -118,6 +118,12 @@ from assistant.personal_assistant import (
     generate_task_summary,
 )
 from assistant.personal_model import PersonalModel, infer_category
+from assistant.presence_decision import (
+    PersonalCandidate,
+    PreferredAddress,
+    PresenceDecision,
+    compute_presence_decision,
+)
 from assistant.presence_manager import PresenceManager, PresenceState
 from assistant.proactive_suggestions import next_proactive_suggestion
 from assistant.response_composer import ComposerRequest, ResponseComposer
@@ -127,6 +133,7 @@ from assistant.response_language import (
     detect_response_language_command,
     detect_translate_previous_response_command,
     legacy_language_value,
+    localize,
     localize_deterministic_response,
     looks_mixed_for_language,
     normalize_response_language,
@@ -378,6 +385,14 @@ def _local_ollama_semantic_extractor(llm) -> SemanticExtractor | None:
     return OllamaSemanticExtractor(llm)
 
 
+# Phase 8.1 (section 11): internal feature flag for the FIRST activated
+# Presence behavior (question discipline). Deliberately a plain module
+# constant, not config/settings.json -- flip to False to instantly restore
+# exact pre-Phase-8.1 composer behavior during manual validation, with no
+# user-facing settings surface involved.
+PRESENCE_QUESTION_DISCIPLINE_ENABLED = True
+
+
 class AssistantEngine:
     """Coordinates conversation, tools, memory and safety policy."""
 
@@ -513,6 +528,15 @@ class AssistantEngine:
         # allowed to call the LLM for task generation.
         self._task_execution_requested = False
         self._conversation_segment_start = 0
+        # Phase 8.0/8.0.1 (section 9/12/14): sparse address-recency tracking
+        # for PresenceDecision only. Starts at 0 -- i.e. a brand new session
+        # behaves as if Echo "just addressed" the user, so the very first
+        # turn of a conversation can never produce an eager address moment;
+        # eligibility only opens up after real conversation turns accumulate
+        # (see assistant/presence_decision.py's two-tier recency gate).
+        # Shadow-mode bookkeeping only; nothing reads this to actually
+        # address the user.
+        self._presence_turns_since_address = 0
         self.presence = presence_manager or PresenceManager()
         self.context_observer = context_observer
         self.session_manager = session_manager
@@ -766,6 +790,7 @@ class AssistantEngine:
         user_message = str(user_message or "")
         if has_mojibake_markers(user_message):
             debug_text_encoding("assistant_engine_input", user_message)
+        inactive_summary = None
         if self.session_manager is not None:
             inactive_summary = self.session_manager.end_if_inactive(60 * 60 * 2, self.context_observer)
             if inactive_summary is not None:
@@ -785,6 +810,12 @@ class AssistantEngine:
                 self.session_manager.start_session()
         request_started_at = time.perf_counter()
         self._begin_turn_trace(user_message)
+        if self._turn_trace is not None:
+            # Phase 8.0 (section 5/7): capture the existing session-restart
+            # signal for PresenceDecision's continuity logic. Reuses
+            # end_if_inactive's own >2h-gap determination rather than
+            # re-detecting a restart independently.
+            self._turn_trace["is_restart"] = inactive_summary is not None
         self._run_shadow_interpreter(user_message)
         self._record_tool_intent_check(user_message)
         self._perf_log("pedido recebido", request_started_at, request_started_at)
@@ -1502,6 +1533,7 @@ class AssistantEngine:
                     fallback="Olá Alexandre.",
                     response_language=self.response_language,
                     language_instruction=self._language_instruction(),
+                    question_discipline_instruction=self._presence_question_discipline_instruction(user_message, "SOCIAL_PATH"),
                 )
             )
             response = self._complete_turn(
@@ -1608,6 +1640,9 @@ class AssistantEngine:
                     intent_instruction=_intent_instruction_for_user_message(user_message),
                     response_language=self.response_language,
                     language_instruction=self._language_instruction(),
+                    question_discipline_instruction=self._presence_question_discipline_instruction(
+                        user_message, "GENERAL_CONVERSATION"
+                    ),
                 )
             )
             return self._complete_turn(user_message, response, "RESPONSE_COMPOSER", selected_path="GENERAL_CONVERSATION")
@@ -1627,6 +1662,7 @@ class AssistantEngine:
                 tools_enabled=self.presence.can_use_tools(),
                 suggestions_enabled=self.presence.can_make_suggestions(),
                 confirmations_enabled=self.presence.can_ask_confirmation(),
+                response_language=self.response_language,
             ),
         )
         self._perf_log("agent/LLM quando necessario", llm_started_at, time.perf_counter())
@@ -1772,8 +1808,14 @@ class AssistantEngine:
     def pending_tasks_summary(self) -> str:
         task_panel_summary = getattr(self.long_term_memory, "task_panel_summary", None)
         if task_panel_summary is not None:
-            return task_panel_summary()
-        return self.long_term_memory.pending_tasks()
+            try:
+                return task_panel_summary(response_language=self.response_language)
+            except TypeError:
+                return task_panel_summary()
+        try:
+            return self.long_term_memory.pending_tasks(response_language=self.response_language)
+        except TypeError:
+            return self.long_term_memory.pending_tasks()
 
     def pending_task_count(self) -> int:
         counter = getattr(self.long_term_memory, "pending_task_count", None)
@@ -1864,11 +1906,8 @@ class AssistantEngine:
     def _try_deterministic_help_response(self, user_message: str) -> str | None:
         text = _normalize_text(user_message)
         if _looks_like_travel_destination_followup(text, self._previous_user_message()):
-            return (
-                "Acho que ainda me falta perceber como gostas de viajar. "
-                "Isso vai influenciar mais a escolha do que saber apenas a zona."
-            )
-        return _deterministic_help_response(text) or None
+            return localize("help.travel_destination_followup", self.response_language)
+        return _deterministic_help_response(text, self.response_language) or None
 
     def _try_general_knowledge_query(self, user_message: str) -> str | None:
         if not _is_general_knowledge_query(user_message):
@@ -1896,6 +1935,9 @@ class AssistantEngine:
                 fallback="Posso explicar isso de forma geral, mas sem fingir fontes externas.",
                 response_language=self.response_language,
                 language_instruction=self._language_instruction(),
+                question_discipline_instruction=self._presence_question_discipline_instruction(
+                    user_message, "GENERAL_KNOWLEDGE_QUERY"
+                ),
             )
         )
 
@@ -3277,7 +3319,7 @@ class AssistantEngine:
         task = self._active_task_context
         if task is None or task.status in ("completed", "cancelled"):
             return None
-        response = answer_task_query(self._work_session, task, user_message)
+        response = answer_task_query(self._work_session, task, user_message, response_language=self.response_language)
         if not response:
             return None
         if self._turn_trace is not None:
@@ -3618,8 +3660,9 @@ class AssistantEngine:
             ctx,
             user_message,
             knowledge_delta=knowledge_delta or [],
+            response_language=self.response_language,
         )
-        return response or _generic_activity_question(ctx)
+        return response or _generic_activity_question(ctx, self.response_language)
 
     def _update_task_artifact_ui(self, ctx: ActiveTaskContext) -> None:
         # Section 9/10/16: a progressive WorkspaceObject that fills in as
@@ -3631,12 +3674,14 @@ class AssistantEngine:
         # the field-by-field summary -- never a raw internal enum value
         # (section 9's "request_clarification" must never reach the UI).
         if ctx.task_type != "compose_email":
-            title = _generic_task_title(ctx)
-            content = _generic_task_card_content(ctx)
-            intelligence_lines = task_card_summary(self._work_session, ctx)
+            title = _generic_task_title(ctx, self.response_language)
+            content = _generic_task_card_content(ctx, self.response_language)
+            intelligence_lines = task_card_summary(self._work_session, ctx, response_language=self.response_language)
             if intelligence_lines:
                 content = content + "\n" + "\n".join(intelligence_lines)
-            presentation = cognitive_task_view_model(self._work_session, ctx, title=title)
+            presentation = cognitive_task_view_model(
+                self._work_session, ctx, title=title, response_language=self.response_language
+            )
             if not ctx.active_artifact_id:
                 ctx.active_artifact_id = f"artifact-{ctx.id}"
             ctx.active_artifact_revision += 1
@@ -6207,7 +6252,12 @@ class AssistantEngine:
 
     def _fast_agent_context(self) -> AgentContext:
         return AgentContext(
-            system_prompt=self.base_system_prompt,
+            # Phase 7.7 (section 1/12): FAST_ROUTE must respect
+            # response_language exactly like the cognitive path does --
+            # base_system_prompt alone never carried a language instruction,
+            # which meant this routing path could silently answer in the
+            # wrong language independent of what the user actually asked for.
+            system_prompt=f"{self.base_system_prompt}\n\n{self._language_instruction()}",
             history=[],
             active_contexts=["FAST_ROUTE"],
             session_summary=self._session_summary_for_agent(),
@@ -6215,6 +6265,7 @@ class AssistantEngine:
             tools_enabled=self.presence.can_use_tools(),
             suggestions_enabled=False,
             confirmations_enabled=self.presence.can_ask_confirmation(),
+            response_language=self.response_language,
         )
 
     def _test_microphone_now(self) -> str:
@@ -6529,18 +6580,24 @@ class AssistantEngine:
             )
             if source == "RESPONSE_COMPOSER" and severe_conflict:
                 regeneration_reason = "deterministic_semantic_conflict"
-                regenerated = self.response_composer.regenerate(user_message, history, regeneration_reason)
+                regenerated = self.response_composer.regenerate(
+                    user_message, history, regeneration_reason, response_language=self.response_language
+                )
                 response_regenerated = True
                 composer_call_count += 1
                 if regenerated and not _is_still_semantically_unsafe(user_message, regenerated):
                     final_response = regenerated
                     final_response_source = "COMPOSER_REGENERATED"
                 else:
-                    final_response = self.response_composer.local_safe_fallback(user_message, original_response)
+                    final_response = self.response_composer.local_safe_fallback(
+                        user_message, original_response, response_language=self.response_language
+                    )
                     final_response_source = "LOCAL_SAFE_FALLBACK"
             if source == "RESPONSE_COMPOSER" and _writing_request_kind(user_message) and _looks_like_help_offer(final_response):
                 regeneration_reason = "writing_request_help_offer"
-                regenerated = self.response_composer.regenerate(user_message, history, regeneration_reason)
+                regenerated = self.response_composer.regenerate(
+                    user_message, history, regeneration_reason, response_language=self.response_language
+                )
                 response_regenerated = True
                 composer_call_count += 1
                 if regenerated and not _looks_like_help_offer(regenerated):
@@ -6619,7 +6676,14 @@ class AssistantEngine:
                 if self._turn_trace is not None:
                     self._turn_trace["response_language_localized"] = True
 
-        if not technical and not tool_confirmation and looks_mixed_for_language(final_response, self.response_language):
+        # Phase 7.7 (section 20): a DIAGNOSTIC-only check for an obvious
+        # Echo-authored language mismatch -- computed once and reused by
+        # both the existing guard (which still only replaces the visible
+        # text for non-technical/non-tool-confirmation turns) and the log
+        # line below, which fires for EVERY source so a tool-result/task
+        # leak is visible even in cases the guard itself doesn't touch.
+        language_mismatch_detected = looks_mixed_for_language(final_response, self.response_language)
+        if not technical and not tool_confirmation and language_mismatch_detected:
             final_response = (
                 "I’ll keep this in English. What would you like to do next?"
                 if normalize_response_language(self.response_language) == ENGLISH_GB
@@ -6628,6 +6692,8 @@ class AssistantEngine:
             final_response_source = "LANGUAGE_GUARD_FALLBACK"
             if self._turn_trace is not None:
                 self._turn_trace["language_guard_triggered"] = True
+        if language_mismatch_detected:
+            _log_language_audit(response_language=self.response_language, source=source)
 
         self._update_pending_user_intent(user_message, final_response, final_response_source, technical, tool_confirmation)
         self._response_debug(
@@ -6677,7 +6743,162 @@ class AssistantEngine:
                         self._turn_trace["model_routing_reason_code"] = error_code
                         self._turn_trace["model_routing_reason"] = _local_reason_label(error_code)
             self._turn_trace.setdefault("fallback_used", final_response_source in {"LOCAL_SAFE_FALLBACK", "FALLBACK"})
+            self._compute_presence_decision_shadow(user_message)
         return final_response
+
+    def _compute_presence_decision_shadow(self, user_message: str) -> None:
+        """Phase 8.0 (sections 4/18) + Phase 8.0.1 (section 4): SHADOW MODE
+        ONLY. Called from _finalize_response strictly after final_response
+        is already settled -- this method only reads state and writes
+        diagnostic fields onto self._turn_trace; it must never touch
+        final_response, final_response_source, self._active_task_context,
+        or any other response/routing/memory state. Wrapped defensively so
+        a bug here can never break a real turn (shadow-safety invariant,
+        section 24).
+
+        Phase 8.0.1 section 4 audit: does the task model distinguish
+        REQUIRED vs OPTIONAL missing information? No separate distinction
+        exists, and none is needed -- `_missing_compose_email_fields`
+        (recipient/purpose/topic) and `_missing_generic_activity_fields`
+        (travel_style/criteria/materials/scope/artifact_type) both already
+        return ONLY fields that block progress; nothing "nice to have" is
+        ever added to ctx.missing_information (see e.g. the "course is
+        nice-to-have context, not blocking" comment on
+        _missing_compose_email_fields, which deliberately never tracks
+        that field at all). So `bool(task.missing_information)` below is
+        already the conservative, required-only signal section 4 asks for.
+        """
+        if self._turn_trace is None:
+            return
+        try:
+            task = self._active_task_context
+            active_task_present = task is not None
+            active_task_unresolved = bool(task is not None and task.missing_information)
+            active_task_dense = bool(task is not None and task.status in {"working", "reviewing"})
+            task_recently_completed = bool(task is not None and task.status == "completed")
+            is_restart = bool(self._turn_trace.get("is_restart"))
+
+            def _record_field(record, name, default):
+                value = getattr(record, name, None)
+                if value is None and isinstance(record, dict):
+                    value = record.get(name, default)
+                return value if value is not None else default
+
+            personal_candidates: list[PersonalCandidate] = []
+            searcher = getattr(self.long_term_memory, "search", None)
+            if callable(searcher):
+                for record in searcher(user_message, limit=2) or []:
+                    personal_candidates.append(
+                        PersonalCandidate(
+                            id=str(_record_field(record, "id", "")),
+                            category=str(_record_field(record, "category", "")),
+                            score=float(_record_field(record, "score", 0.0) or 0.0),
+                        )
+                    )
+
+            # Shadow-only placeholder preference (section 11's "name or none
+            # only" for pt-PT relies on `name` being set here, or "name"
+            # address_mode could never be exercised/observed at all).
+            preferred_address = PreferredAddress(name="Alexandre", honorific_by_language={"en-GB": "Sir"})
+
+            decision = compute_presence_decision(
+                user_message=user_message,
+                response_language=self.response_language,
+                active_task_present=active_task_present,
+                active_task_unresolved=active_task_unresolved,
+                active_task_dense=active_task_dense,
+                is_restart=is_restart,
+                personal_candidates=personal_candidates,
+                preferred_address=preferred_address,
+                turns_since_address=self._presence_turns_since_address,
+                task_recently_completed=task_recently_completed,
+            )
+
+            if decision.address_mode != "none":
+                self._presence_turns_since_address = 0
+            else:
+                self._presence_turns_since_address += 1
+
+            self._turn_trace["presence_continuity"] = decision.continuity
+            self._turn_trace["presence_initiative"] = decision.initiative
+            self._turn_trace["presence_question_needed"] = decision.question_needed
+            self._turn_trace["presence_tone"] = decision.tone
+            self._turn_trace["presence_address_mode"] = decision.address_mode
+            self._turn_trace["presence_personal_candidates_count"] = decision.personal_candidates_count
+            self._turn_trace["presence_personal_selected_count"] = decision.personal_selected_count
+            self._turn_trace["presence_confidence"] = decision.confidence
+            self._turn_trace["presence_reason_codes"] = list(decision.reason_codes)
+            print(
+                "[PRESENCE]\n"
+                f"continuity={decision.continuity}\n"
+                f"initiative={decision.initiative}\n"
+                f"question_needed={'true' if decision.question_needed else 'false'}\n"
+                f"tone={decision.tone}\n"
+                f"address_mode={decision.address_mode}\n"
+                f"personal_candidates={decision.personal_candidates_count}\n"
+                f"personal_selected={decision.personal_selected_count}\n"
+                f"confidence={decision.confidence:.2f}\n"
+                f"reason_codes={','.join(decision.reason_codes)}"
+            )
+        except Exception as exc:  # pragma: no cover - shadow diagnostics must never break a turn
+            self._turn_trace.setdefault("presence_shadow_error", str(exc))
+
+    def _presence_question_discipline_instruction(self, user_message: str, source: str) -> str:
+        """Phase 8.1 (sections 3/5/10/11): the FIRST activated Presence
+        behavior. A bounded PRE-composition PresenceDecision -- reuses the
+        exact same pure compute_presence_decision() the post-response
+        shadow computation already calls (no duplicated logic, no LLM
+        call); the only thing this does with the result is decide whether
+        to hand the composer a compact "don't add an optional follow-up"
+        instruction. It never touches final_response text directly (section
+        2) and never overrides a deterministic/task-required question,
+        since it is only ever called from conversational composer paths
+        that have already been confirmed to have discretion (section 4).
+
+        Fail-closed (section 10): any error, or the feature flag being
+        off, returns "" (no instruction) -- i.e. exactly today's
+        pre-Phase-8.1 behavior, never a blocked or altered response."""
+        if not PRESENCE_QUESTION_DISCIPLINE_ENABLED:
+            self._log_presence_active(source, question_needed=None, applied=False, reason="feature_disabled")
+            return ""
+        try:
+            task = self._active_task_context
+            active_task_present = task is not None
+            active_task_unresolved = bool(task is not None and task.missing_information)
+            active_task_dense = bool(task is not None and task.status in {"working", "reviewing"})
+            is_restart = bool(self._turn_trace.get("is_restart")) if self._turn_trace is not None else False
+            decision = compute_presence_decision(
+                user_message=user_message,
+                response_language=self.response_language,
+                active_task_present=active_task_present,
+                active_task_unresolved=active_task_unresolved,
+                active_task_dense=active_task_dense,
+                is_restart=is_restart,
+            )
+        except Exception as exc:
+            if self._turn_trace is not None:
+                self._turn_trace.setdefault("presence_activation_error", str(exc))
+            self._log_presence_active(source, question_needed=None, applied=False, reason="presence_activation_error")
+            return ""
+
+        if self._turn_trace is not None:
+            self._turn_trace["presence_question_discipline_applied"] = not decision.question_needed
+        if decision.question_needed:
+            self._log_presence_active(source, question_needed=True, applied=False, reason="deterministic_required_question")
+            return ""
+        self._log_presence_active(source, question_needed=False, applied=True, reason="")
+        return localize("composer.question_discipline.suppress_optional_followup", self.response_language)
+
+    @staticmethod
+    def _log_presence_active(source: str, *, question_needed: bool | None, applied: bool, reason: str) -> None:
+        lines = ["[PRESENCE_ACTIVE]", "feature=question_discipline"]
+        if question_needed is not None:
+            lines.append(f"question_needed={'true' if question_needed else 'false'}")
+        lines.append(f"applied={'true' if applied else 'false'}")
+        if not applied and reason:
+            lines.append(f"reason={reason}")
+        lines.append(f"source={source}")
+        print("\n".join(lines))
 
     def _response_debug(self, source: str, voice_reviewed: bool, tools_exposed: bool) -> None:
         if not (self.debug or self.debug_agent or self.debug_ollama_payload):
@@ -7243,6 +7464,25 @@ class AssistantEngine:
             "writing_subject": self._turn_trace.get("writing_subject") or "",
             "writing_project": self._turn_trace.get("writing_project") or "",
             "writing_missing_fields": self._turn_trace.get("writing_missing_fields") or [],
+            # Phase 8.0 (Presence Decision Foundation) -- SHADOW MODE ONLY
+            # (section 4/20): observability only, exactly like the
+            # Interaction Interpreter shadow fields above. Never read by any
+            # routing/composition decision anywhere; computed and logged in
+            # _finalize_response strictly after final_response is already
+            # settled, so it cannot influence the response it describes.
+            "presence_continuity": self._turn_trace.get("presence_continuity") or "",
+            "presence_initiative": self._turn_trace.get("presence_initiative") or "",
+            "presence_question_needed": self._turn_trace.get("presence_question_needed"),
+            "presence_tone": self._turn_trace.get("presence_tone") or "",
+            "presence_address_mode": self._turn_trace.get("presence_address_mode") or "",
+            "presence_personal_candidates_count": int(self._turn_trace.get("presence_personal_candidates_count") or 0),
+            "presence_personal_selected_count": int(self._turn_trace.get("presence_personal_selected_count") or 0),
+            "presence_confidence": self._turn_trace.get("presence_confidence"),
+            "presence_reason_codes": self._turn_trace.get("presence_reason_codes") or [],
+            "presence_shadow_error": self._turn_trace.get("presence_shadow_error") or "",
+            # Phase 8.1 (question discipline activation) diagnostics:
+            "presence_question_discipline_applied": self._turn_trace.get("presence_question_discipline_applied"),
+            "presence_activation_error": self._turn_trace.get("presence_activation_error") or "",
         }
         self._turn_trace = None
 
@@ -8293,11 +8533,11 @@ class AssistantEngine:
 
         if _asks_tasks_for_today(text):
             if show_details:
-                return self.long_term_memory.tasks_for_today(show_details=True)
+                return self._call_long_term_memory("tasks_for_today", show_details=True)
             return generate_task_summary(self.long_term_memory)
 
         if _asks_tasks_for_week(text):
-            return self.long_term_memory.tasks_for_week(show_details=show_details)
+            return self._call_long_term_memory("tasks_for_week", show_details=show_details)
 
         if _asks_pending_tasks(text):
             if show_details:
@@ -8332,7 +8572,7 @@ class AssistantEngine:
 
     def _run_task_tool(self, tool_name: str, **arguments) -> str:
         tool = self.tools.get(tool_name)
-        prepared = {"long_term_memory": self.long_term_memory, **arguments}
+        prepared = {"long_term_memory": self.long_term_memory, "response_language": self.response_language, **arguments}
         if tool is not None:
             return tool.run(prepared)
 
@@ -8344,8 +8584,21 @@ class AssistantEngine:
         }
         fallback = fallback_tools.get(tool_name)
         if fallback is None:
-            return "Não consegui alterar a tarefa. Ela continua pendente."
+            return localize("task.action.missing_manager", self.response_language)
         return fallback(**prepared)
+
+    def _call_long_term_memory(self, method_name: str, **arguments) -> str:
+        # Phase 7.7 (section 1): a direct (non-agent-loop) call path -- the
+        # SAME response_language injection the agent's _prepare_tool_
+        # arguments already does for tool-loop calls, applied here since
+        # this deterministic task-command shortcut never goes through that.
+        method = getattr(self.long_term_memory, method_name, None)
+        if method is None:
+            return localize("task.action.missing_manager", self.response_language)
+        try:
+            return method(response_language=self.response_language, **arguments)
+        except TypeError:
+            return method(**arguments)
 
     def _previous_user_message(self) -> str:
         for message in reversed(self.memory.load()):
@@ -8455,7 +8708,7 @@ class AssistantEngine:
 
         if _asks_daily_briefing(text):
             if _asks_task_details(text):
-                return self.long_term_memory.tasks_for_today(show_details=True)
+                return self._call_long_term_memory("tasks_for_today", show_details=True)
             return generate_daily_briefing(self.long_term_memory, self.context_observer)
 
         if _asks_session_continuity(text):
@@ -8579,31 +8832,36 @@ class AssistantEngine:
         return None
 
     def _available_information_summary(self) -> str:
-        sections = ["Tenho acesso a estas fontes de informação:"]
+        # Phase 7.7.1 (section 9): fixed section headers/empty-states
+        # localize; dynamic content (memory_context, task list, timeline,
+        # workspace file listing, observed context) is left exactly as its
+        # own source produces it.
+        lang = self.response_language
+        sections = [localize("info_summary.intro", lang)]
 
         memory_context = self.long_term_memory.context_for(
             "utilizador projetos preferencias tarefas relacoes contexto",
             limit=5,
         )
-        sections.append("\nMemória permanente:")
-        sections.append(memory_context or "- Ainda não encontrei memória permanente relevante.")
+        sections.append(localize("info_summary.permanent_memory_header", lang))
+        sections.append(memory_context or localize("info_summary.no_permanent_memory", lang))
 
-        sections.append("\nTarefas:")
-        sections.append(self.long_term_memory.pending_tasks())
+        sections.append(localize("info_summary.tasks_header", lang))
+        sections.append(self._call_long_term_memory("pending_tasks"))
 
-        sections.append("\nTimeline:")
+        sections.append(localize("info_summary.timeline_header", lang))
         sections.append(self.long_term_memory.current_work_context())
 
-        sections.append("\nFicheiros da workspace:")
+        sections.append(localize("info_summary.workspace_files_header", lang))
         workspace_tool = self.tools.get("list_workspace_files")
         if workspace_tool is None:
-            sections.append("- A ferramenta de listagem da workspace não está ligada.")
+            sections.append(localize("info_summary.workspace_tool_missing", lang))
         else:
             sections.append(workspace_tool.run({"workspace_path": self.workspace_path}))
 
-        sections.append("\nContexto observado do computador:")
+        sections.append(localize("info_summary.observed_context_header", lang))
         observed = self._observed_context_summary()
-        sections.append(observed or "- Ainda não tenho contexto observado disponível.")
+        sections.append(observed or localize("info_summary.no_observed_context", lang))
 
         return "\n".join(sections)
 
@@ -9013,6 +9271,23 @@ def _single_client_chat_count(llm: object) -> int:
             except Exception:
                 return 0
     return 0
+
+
+def _log_language_audit(*, response_language: str, source: str) -> None:
+    # Phase 7.7 (section 20): diagnostic-only -- never mutates the
+    # response itself (the existing LANGUAGE_GUARD_FALLBACK guard, run just
+    # before this, already owns any actual content change). detected_
+    # language is the OPPOSITE of response_language, since looks_mixed_
+    # for_language (the caller's mismatch check) only ever fires when the
+    # response looks like it drifted into the other supported language.
+    detected_language = "pt" if normalize_response_language(response_language) == ENGLISH_GB else "en"
+    print(
+        "[LANGUAGE_AUDIT] "
+        f"response_language={response_language} "
+        f"source={source} "
+        f"detected_language={detected_language} "
+        "mismatch=true"
+    )
 
 
 def _model_name(llm: object) -> str:
@@ -11541,17 +11816,11 @@ def _direct_short_phrase_response(text: str) -> str:
     return ""
 
 
-def _deterministic_help_response(text: str) -> str:
+def _deterministic_help_response(text: str, response_language: str = "pt-PT") -> str:
     if "modulenotfounderror" in text and "pyside6" in text:
-        return (
-            "Esse erro quer dizer que o PySide6 não está instalado no ambiente Python que estás a usar. "
-            "Instala-o no venv com: pip install PySide6"
-        )
+        return localize("help.pyside6_missing", response_language)
     if "planear" in text and any(word in text for word in ("ferias", "férias", "viagem")):
-        return (
-            "Boa ideia. Antes de sugerir sítios, deixa-me perceber uma coisa: "
-            "procuras mais descansar, conhecer sítios novos ou alguma aventura?"
-        )
+        return localize("help.travel_planning_intro", response_language)
     return ""
 
 
@@ -13455,68 +13724,82 @@ def _missing_generic_activity_fields(ctx: "ActiveTaskContext") -> list[str]:
     return []
 
 
-def _generic_activity_question(ctx: "ActiveTaskContext") -> str:
+def _generic_activity_question(ctx: "ActiveTaskContext", response_language: str = "pt-PT") -> str:
+    # Phase 7.7.1 (section 3/7): the conversational clarifying question
+    # around the (already-localized, Phase 7.7) task artifact card must
+    # ALSO respect response_language -- ctx.task_type (canonical) is
+    # unchanged, only the rendered sentence localizes.
     if ctx.task_type == "plan_trip":
         if ctx.parameters.get("destination"):
-            return "Acho que ainda me falta perceber como gostas de viajar. Procuras mais descansar, conhecer sítios novos ou alguma aventura?"
-        return "Boa ideia. Antes de escolhermos sítios, procuras mais descansar, conhecer sítios novos ou alguma aventura?"
+            return localize("task.activity_question.plan_trip_with_destination", response_language)
+        return localize("task.activity_question.plan_trip_no_destination", response_language)
     if ctx.task_type == "make_decision":
-        return "Certo. Qual é o critério que pesa mais nessa decisão?"
+        return localize("task.activity_question.make_decision", response_language)
     if ctx.task_type == "study_topic":
-        return "Vamos a isso. Que disciplina é? Já tens apontamentos ou vais começar pelos materiais da cadeira?"
+        return localize("task.activity_question.study_topic", response_language)
     if ctx.task_type == "research_topic":
-        return "Certo. Queres uma visão geral primeiro ou queres comparar opções concretas?"
+        return localize("task.activity_question.research_topic", response_language)
     if ctx.task_type == "generic_comparison":
-        return "Certo. Já temos essa comparação aberta."
+        return localize("task.activity_question.generic_comparison", response_language)
     if ctx.task_type == "generic_activity":
-        return "Certo. Vamos trabalhando nisso por partes."
+        return localize("task.activity_question.generic_activity", response_language)
     if ctx.task_type == "writing":
-        return "Claro. O que queres escrever?"
-    return "Certo. Diz-me só qual é o próximo passo."
+        return localize("task.activity_question.writing", response_language)
+    return localize("task.activity_question.default", response_language)
 
 
-def _generic_task_title(ctx: "ActiveTaskContext") -> str:
+def _generic_task_title(ctx: "ActiveTaskContext", response_language: str = "pt-PT") -> str:
+    # Phase 7.7 (section 6/7, the reported "Planeamento de férias" bug):
+    # these are Echo-authored presentation labels for the task artifact
+    # card -- ctx.task_type (the canonical semantic key, e.g. "plan_trip")
+    # is completely unchanged; only the rendered title localizes.
     if ctx.task_type == "plan_trip":
-        return "Planeamento de férias"
+        return localize("task.title.vacation_planning", response_language)
     if ctx.task_type == "make_decision":
-        return "Decisão em preparação"
+        return localize("task.title.decision", response_language)
     if ctx.task_type == "study_topic":
-        return "Plano de estudo"
+        return localize("task.title.study_plan", response_language)
     if ctx.task_type == "research_topic":
-        return "Investigação"
+        return localize("task.title.research", response_language)
     if ctx.task_type == "generic_comparison":
         category = ctx.parameters.get("category") or ""
         if category:
-            return f"Comparação: {category}"
+            return localize("task.title.comparison_category", response_language, category=category)
         options = ctx.parameters.get("options") or ""
-        return f"Comparação: {options}" if options else "Comparação"
+        return localize("task.title.comparison_category", response_language, category=options) if options else localize(
+            "task.title.comparison", response_language
+        )
     if ctx.task_type == "generic_activity":
-        return "Atividade em curso"
+        return localize("task.title.activity", response_language)
     if ctx.task_type == "writing":
-        return "Escrita em conjunto"
-    return "Tarefa"
+        return localize("task.title.writing", response_language)
+    return localize("task.title.generic", response_language)
 
 
-def _generic_task_card_content(ctx: "ActiveTaskContext") -> str:
-    lines = [f"Objetivo: {ctx.goal or _generic_task_title(ctx).lower()}"]
+def _generic_task_card_content(ctx: "ActiveTaskContext", response_language: str = "pt-PT") -> str:
+    # Phase 7.7 (section 7): field LABELS localize; the values themselves
+    # (destination names, topics, options, free-text facts/requests) are
+    # user/content data and are never translated (section 18).
+    goal_label = localize("task.card.goal", response_language)
+    lines = [f"{goal_label} {ctx.goal or _generic_task_title(ctx, response_language).lower()}"]
     if ctx.parameters.get("destination"):
-        lines.append(f"Destino: {ctx.parameters['destination']}")
+        lines.append(f"{localize('task.card.destination', response_language)} {ctx.parameters['destination']}")
     if ctx.parameters.get("travel_style"):
-        lines.append(f"Preferência: {ctx.parameters['travel_style']}")
+        lines.append(f"{localize('task.card.preference', response_language)} {ctx.parameters['travel_style']}")
     if ctx.parameters.get("topic"):
-        lines.append(f"Tema: {ctx.parameters['topic']}")
+        lines.append(f"{localize('task.card.theme', response_language)} {ctx.parameters['topic']}")
     if ctx.parameters.get("category"):
-        lines.append(f"Categoria: {ctx.parameters['category']}")
+        lines.append(f"{localize('task.card.category', response_language)} {ctx.parameters['category']}")
     if ctx.parameters.get("options"):
-        lines.append(f"Opções: {ctx.parameters['options']}")
+        lines.append(f"{localize('task.card.options', response_language)} {ctx.parameters['options']}")
     if ctx.parameters.get("criteria"):
-        lines.append(f"Critérios: {ctx.parameters['criteria']}")
+        lines.append(f"{localize('task.card.criteria', response_language)} {ctx.parameters['criteria']}")
     if ctx.requested_outputs:
-        lines.append("Pedidos: " + "; ".join(ctx.requested_outputs[-3:]))
+        lines.append(localize("task.card.requests", response_language) + " " + "; ".join(ctx.requested_outputs[-3:]))
     if ctx.collected_facts:
-        lines.append("Notas: " + "; ".join(ctx.collected_facts[-3:]))
+        lines.append(localize("task.card.notes", response_language) + " " + "; ".join(ctx.collected_facts[-3:]))
     if len(lines) == 1:
-        lines.append("[a recolher contexto]")
+        lines.append(localize("task.card.collecting_context", response_language))
     return "\n".join(lines)
 
 

@@ -13,7 +13,7 @@
   "model_routing": {
     "mode": "local",
     "automatic": {
-      "claude_enabled": false,
+      "claude_enabled": true,
       "daily_budget_usd": 0.25,
       "max_single_call_estimated_usd": 0.05
     }
@@ -51,7 +51,7 @@
   },
   "voice": {
     "enabled": true,
-    "model": "base",
+    "model": "medium",
     "language": "pt",
     "input_device": "default",
     "auto_select_input": true,

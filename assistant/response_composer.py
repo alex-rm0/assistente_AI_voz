@@ -8,6 +8,7 @@ from typing import Protocol
 from assistant.model_provider import ProviderConfigurationError, ProviderTimeoutError
 from assistant.response_language import (
     ENGLISH_GB,
+    localize,
     normalize_response_language,
     response_language_instruction,
     simple_social_response,
@@ -56,6 +57,11 @@ _REGENERATION_INSTRUCTION = (
     "Responde novamente em uma ou duas frases curtas, sem inverter a emoção da mensagem, "
     "sem falar de ti como se tivesses vivido a experiência do Alexandre, e com no máximo uma pergunta."
 )
+_REGENERATION_INSTRUCTION_EN = (
+    "The previous reply was semantically inconsistent with Alexandre's message.\n"
+    "Reply again in one or two short sentences, without reversing the message's emotion, "
+    "without talking about yourself as if you'd lived Alexandre's experience, and with at most one question."
+)
 
 
 @dataclass
@@ -90,6 +96,13 @@ class ComposerRequest:
     task_profile: dict[str, object] | None = None
     response_language: str = "pt-PT"
     language_instruction: str = ""
+    # Phase 8.1 (Presence question discipline, section 3/5): pre-rendered
+    # composition guidance, set only by callers on an activated path when
+    # PresenceDecision.question_needed is False for this turn -- see
+    # assistant/conversation.py's _presence_question_discipline_instruction.
+    # Never post-processes the generated reply; purely a system-prompt
+    # addition the model composes with, exactly like language_instruction.
+    question_discipline_instruction: str = ""
 
 
 class ResponseComposer:
@@ -153,21 +166,32 @@ class ResponseComposer:
 
         return reply
 
-    def regenerate(self, user_message: str, history: list[dict[str, str]] | None, reason: str) -> str:
-        """One extra LLM call to correct a response with a severe semantic conflict."""
+    def regenerate(
+        self, user_message: str, history: list[dict[str, str]] | None, reason: str, response_language: str = "pt-PT"
+    ) -> str:
+        """One extra LLM call to correct a response with a severe semantic conflict.
+
+        Phase 7.7 (section 1): this used to call the LLM with plain
+        `_SYSTEM_PROMPT` -- unlike compose()'s `_system_prompt_for(request)`,
+        it never appended the language instruction at all, so a regenerated
+        reply had no language authority to follow and could drift back to
+        Portuguese regardless of response_language."""
+        english = normalize_response_language(response_language) == ENGLISH_GB
         instruction = (
-            "A resposta anterior ofereceu ajuda em vez de executar um pedido de escrita completo.\n"
-            "Executa agora o pedido diretamente. Não perguntes se o Alexandre quer ajuda."
+            localize("composer.regeneration_instruction", response_language)
             if reason == "writing_request_help_offer"
-            else _REGENERATION_INSTRUCTION
+            else (_REGENERATION_INSTRUCTION_EN if english else _REGENERATION_INSTRUCTION)
         )
+        message_label = "Alexandre's message" if english else "Mensagem do Alexandre"
+        reason_label = "Correction reason" if english else "Motivo da correção"
+        system_prompt = f"{_SYSTEM_PROMPT}\n\n{response_language_instruction(response_language)}"
         try:
             _mark_llm_source(self.llm, "RESPONSE_COMPOSER_REGENERATION")
             reply = self.llm.chat(
-                f"{instruction}\n\nMensagem do Alexandre:\n{user_message.strip()}\n\n"
-                f"Motivo da correção: {reason}",
+                f"{instruction}\n\n{message_label}:\n{user_message.strip()}\n\n"
+                f"{reason_label}: {reason}",
                 history=history or [],
-                system_prompt=_SYSTEM_PROMPT,
+                system_prompt=system_prompt,
             )
         except ProviderConfigurationError:
             raise
@@ -175,8 +199,10 @@ class ResponseComposer:
             return ""
         return (reply or "").strip()
 
-    def local_safe_fallback(self, user_message: str, fallback: str = "") -> str:
-        return _local_safe_fallback(user_message) or fallback or NO_CONTEXT_FALLBACK
+    def local_safe_fallback(self, user_message: str, fallback: str = "", response_language: str = "pt-PT") -> str:
+        return _local_safe_fallback(user_message, response_language) or fallback or localize(
+            "composer.no_context_fallback", response_language
+        )
 
     @staticmethod
     def _user_prompt(request: ComposerRequest) -> str:
@@ -232,6 +258,8 @@ def _system_prompt_for(request: ComposerRequest) -> str:
     parts = [_SYSTEM_PROMPT]
     if request.intent_instruction.strip():
         parts.append(request.intent_instruction.strip())
+    if request.question_discipline_instruction.strip():
+        parts.append(request.question_discipline_instruction.strip())
     language_instruction = request.language_instruction.strip() or response_language_instruction(request.response_language)
     if language_instruction:
         parts.append(language_instruction)
@@ -280,7 +308,7 @@ def _simple_fallback(request: ComposerRequest) -> str:
             return " ".join(questions[:2])
     if request.fallback and request.fallback != NO_CONTEXT_FALLBACK:
         return request.fallback
-    return NO_CONTEXT_FALLBACK
+    return localize("composer.no_context_fallback", request.response_language)
 
 
 def _questions_from_facts(facts: list[str]) -> list[str]:
@@ -316,17 +344,51 @@ def _has_relevant_content_after_greeting(text: str) -> bool:
     )
 
 
-def _local_safe_fallback(user_message: str) -> str:
-    """Small, content-aware safe replies used only when composition and regeneration both fail."""
+def _local_safe_fallback(user_message: str, response_language: str = "pt-PT") -> str:
+    """Small, content-aware safe replies used only when composition and
+    regeneration both fail.
+
+    Phase 7.7.1 (section 10): trigger detection now understands BOTH
+    supported input forms (Portuguese and English phrases) -- input
+    language and response_language are independent (section 16), so
+    English input must reach the SAME matched category as its Portuguese
+    equivalent; only the RENDERED reply follows response_language,
+    via localize(), exactly as before."""
     message = _normalize(user_message)
-    if any(phrase in message for phrase in ("chumbei", "falhei", "correu mal", "corri mal", "resultado negativo")):
-        return "Lamento que tenha corrido mal."
-    if "nao me sinto motivado" in message or "nao me sinto motivada" in message or "desmotivado" in message or "desmotivada" in message:
-        return "Percebo que isso te tenha deixado desmotivado."
-    if "medo" in message or "assustado" in message or "assustada" in message:
-        return "Percebo que isso te esteja a pesar."
-    if "triste" in message or "frustrado" in message or "frustrada" in message:
-        return "Lamento. Deve ser difícil."
+    if any(
+        phrase in message
+        for phrase in (
+            "chumbei",
+            "falhei",
+            "correu mal",
+            "corri mal",
+            "resultado negativo",
+            "i failed",
+            "i flunked",
+            "went badly",
+            "went wrong",
+            "negative result",
+        )
+    ):
+        return localize("composer.local_safe_fallback.negative_result", response_language)
+    if any(
+        phrase in message
+        for phrase in (
+            "nao me sinto motivado",
+            "nao me sinto motivada",
+            "desmotivado",
+            "desmotivada",
+            "i dont feel motivated",
+            "i do not feel motivated",
+            "unmotivated",
+            "not motivated",
+        )
+    ):
+        return localize("composer.local_safe_fallback.unmotivated", response_language)
+    if any(phrase in message for phrase in ("medo", "assustado", "assustada", "afraid", "scared")):
+        return localize("composer.local_safe_fallback.afraid", response_language)
+    if any(phrase in message for phrase in ("triste", "frustrado", "frustrada", "sad", "frustrated")):
+        return localize("composer.local_safe_fallback.sad", response_language)
     return ""
 
 

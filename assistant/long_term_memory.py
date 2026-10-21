@@ -11,6 +11,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
+from assistant.response_language import localize
 from assistant.task_formatter import format_task_collection_for_assistant, format_tasks_panel
 
 
@@ -406,50 +407,61 @@ class LongTermMemory:
         suffix = f" ({'; '.join(details)})" if details else ""
         return f"Guardei a tarefa: {task_title}{suffix}"
 
-    def tasks_for_date(self, due_date: date, show_details: bool = False) -> str:
+    def tasks_for_date(self, due_date: date, show_details: bool = False, response_language: str = "pt-PT") -> str:
         tasks = self._tasks_for_date(due_date)
         if not tasks:
-            return f"Nao tens tarefas registadas para {due_date.isoformat()}."
+            return localize("task.panel.no_tasks_for_date", response_language, date=due_date.isoformat())
+        heading_key = "task.panel.for_today_header" if due_date == date.today() else "task.panel.today_header"
         return format_task_collection_for_assistant(
             tasks,
-            "Para esse dia, tens" if due_date != date.today() else "Para hoje, tens",
+            localize(heading_key, response_language),
             show_details=show_details,
+            response_language=response_language,
         )
 
-    def tasks_for_today(self, show_details: bool = False) -> str:
-        return self.tasks_for_date(date.today(), show_details=show_details)
+    def tasks_for_today(self, show_details: bool = False, response_language: str = "pt-PT") -> str:
+        return self.tasks_for_date(date.today(), show_details=show_details, response_language=response_language)
 
-    def overdue_tasks(self, today: date | None = None, show_details: bool = False) -> str:
+    def overdue_tasks(
+        self, today: date | None = None, show_details: bool = False, response_language: str = "pt-PT"
+    ) -> str:
         current = today or date.today()
         tasks = self._overdue_tasks(current)
         if not tasks:
-            return "Nao tens tarefas atrasadas."
+            return localize("task.panel.no_overdue", response_language)
         return format_task_collection_for_assistant(
             tasks,
-            "Tens em atraso",
+            localize("task.panel.overdue_header", response_language),
             show_details=show_details,
+            response_language=response_language,
         )
 
-    def tasks_for_week(self, start_date: date | None = None, show_details: bool = False) -> str:
+    def tasks_for_week(
+        self, start_date: date | None = None, show_details: bool = False, response_language: str = "pt-PT"
+    ) -> str:
         start = start_date or date.today()
         end = start + timedelta(days=6)
         tasks = self._tasks_for_range(start, end)
         if not tasks:
-            return f"Nao tens tarefas registadas entre {start.isoformat()} e {end.isoformat()}."
+            return localize(
+                "task.panel.no_tasks_in_range", response_language, start=start.isoformat(), end=end.isoformat()
+            )
         return format_task_collection_for_assistant(
             tasks,
-            "Esta semana, tens",
+            localize("task.panel.week_header", response_language),
             show_details=show_details,
+            response_language=response_language,
         )
 
-    def pending_tasks(self, limit: int = 10, show_details: bool = False) -> str:
+    def pending_tasks(self, limit: int = 10, show_details: bool = False, response_language: str = "pt-PT") -> str:
         tasks = self._pending_tasks(limit=limit)
         if not tasks:
-            return "Nao tens tarefas pendentes registadas."
+            return localize("task.panel.no_pending_registered", response_language)
         return format_task_collection_for_assistant(
             tasks,
-            "Tens pendente",
+            localize("task.panel.pending_header", response_language),
             show_details=show_details,
+            response_language=response_language,
         )
 
     def complete_task(self, query: str = "") -> str:
@@ -458,12 +470,17 @@ class LongTermMemory:
     def cancel_task(self, query: str = "") -> str:
         return self._update_task_status(query, "cancelled")
 
-    def postpone_task(self, query: str = "", due_date: date | None = None) -> str:
+    def postpone_task(self, query: str = "", due_date: date | None = None, response_language: str = "pt-PT") -> str:
         task = self._find_pending_task(query)
         inferred_due_date = due_date or infer_task_due_date(query)
         if task is None and inferred_due_date is not None:
             task = self._find_pending_task("")
         if task is None:
+            # NOTE: this exact "Nao encontrei"/"Não encontrei" wording is an
+            # internal signal tools.py's postpone_task() matches on to
+            # substitute its own localizable failure message -- never
+            # actually shown to the user directly, so it is intentionally
+            # left untranslated here (see the Phase 7.7 report).
             return "Nao encontrei uma tarefa pendente para adiar."
 
         new_due_date = inferred_due_date or (date.today() + timedelta(days=1))
@@ -472,13 +489,13 @@ class LongTermMemory:
                 "UPDATE tasks SET due_date = ? WHERE id = ?",
                 (new_due_date.isoformat(), task.id),
             )
-        return f"Adiei a tarefa '{task.title}' para {new_due_date.isoformat()}."
+        return localize("task.action.postponed", response_language, title=task.title, date=new_due_date.isoformat())
 
-    def task_panel_summary(self, limit: int = 8, show_details: bool = False) -> str:
+    def task_panel_summary(self, limit: int = 8, show_details: bool = False, response_language: str = "pt-PT") -> str:
         tasks = self._pending_tasks(limit=limit)
         if not tasks:
-            return "Sem tarefas pendentes."
-        return format_tasks_panel(tasks, show_details=show_details)
+            return localize("task.panel.empty", response_language)
+        return format_tasks_panel(tasks, show_details=show_details, response_language=response_language)
 
     def pending_task_count(self) -> int:
         return len(self._pending_tasks(limit=200))

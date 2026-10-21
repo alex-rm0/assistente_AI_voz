@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import os
 import queue
+import struct
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import wave
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -1658,14 +1660,300 @@ def resolve_voice_command_target(message: str, active_voice_id: str = DEFAULT_EN
     return None
 
 
-def play_audio_file(audio_path: Path, stop_checker: Any | None = None) -> float:
+def play_audio_file(
+    audio_path: Path,
+    stop_checker: Any | None = None,
+    *,
+    on_playback_event: Any | None = None,
+    allow_winsound_fallback: bool = True,
+) -> float:
+    """Phase 7.6.2's fix (winsound SND_ASYNC + polled SND_PURGE) turned out
+    NOT to be reliable in real use -- real logs showed playback still
+    running to its full natural duration (e.g. playback_ms=38751) no
+    matter when STOP was pressed. winsound's async playback + purge is a
+    thin wrapper over the legacy Windows mmsystem sound API, whose
+    interruption behavior is documented as unreliable for anything beyond
+    trivial system sounds; it is not a dependable backend for stoppable
+    speech playback (section 3).
+
+    Phase 7.6.3 replaced it with sounddevice (already a project dependency
+    for STT capture) via a DEDICATED sd.OutputStream this function owns
+    end-to-end. Phase 7.6.4 found that this backend was silently falling
+    back to winsound on every real Pocket TTS utterance: Pocket writes its
+    WAV via `scipy.io.wavfile.write` on a raw float32 numpy array, which
+    encodes as WAV format code 3 (IEEE float) -- a format the stdlib
+    `wave` module cannot parse at all (`wave.Error: unknown format: 3`),
+    silently swallowed by the old decoder's bare except. `_decode_wav_for_playback`
+    below replaces `wave` with a small dependency-free RIFF/WAVE chunk
+    parser that handles both PCM (format 1) and IEEE float (format 3, the
+    real format Pocket produces), and now RAISES descriptive exceptions
+    instead of swallowing them, so every fallback is diagnosed via a
+    `backend_failed` event rather than happening silently (section 3).
+
+    Voice Conversation Mode must never silently degrade to the
+    non-interruptible winsound fallback and pretend STOP/barge-in still
+    work (section 7): when `allow_winsound_fallback` is False, a failure
+    to open the interruptible sounddevice path raises TTSError instead of
+    falling back -- callers already treat a raised TTSError from playback
+    as a bounded TTS failure (text stays visible, voice mode recovers).
+    `allow_winsound_fallback=True` (the default) preserves the old
+    degrade-gracefully behavior for manual/non-interactive TTS."""
     started = time.perf_counter()
     if stop_checker is not None and callable(stop_checker) and stop_checker():
         return 0.0
+
+    def _fallback_or_raise(exc: Exception, extra_fields: dict[str, Any]) -> float:
+        _emit_playback_event(
+            on_playback_event,
+            "backend_failed",
+            {
+                "backend": "sounddevice",
+                "exception_type": type(exc).__name__,
+                "exception_message": str(exc)[:200],
+                "fallback": "winsound" if allow_winsound_fallback else "none",
+                **extra_fields,
+            },
+        )
+        if not allow_winsound_fallback:
+            raise TTSError(
+                f"Reprodução interrompível indisponível ({type(exc).__name__}: {exc})"
+            ) from exc
+        return _play_audio_file_winsound_fallback(audio_path, started, on_playback_event)
+
+    try:
+        audio, sample_rate, channels, dtype_name, bits_per_sample, frame_count = _decode_wav_for_playback(
+            audio_path
+        )
+    except Exception as exc:
+        return _fallback_or_raise(exc, {})
+
+    try:
+        import sounddevice as sd
+    except Exception as exc:
+        return _fallback_or_raise(
+            exc,
+            {
+                "samplerate": sample_rate,
+                "channels": channels,
+                "dtype": dtype_name,
+            },
+        )
+
+    device_index, device_name = _select_output_device(sd)
+    _emit_playback_event(
+        on_playback_event,
+        "started",
+        {
+            "backend": "sounddevice",
+            "sample_rate": sample_rate,
+            "channels": channels,
+            "sample_width": bits_per_sample // 8,
+            "numpy_dtype": dtype_name,
+            "frame_count": frame_count,
+            "device": device_name,
+        },
+    )
+    total_frames = audio.shape[0]
+    position = 0
+    finished = threading.Event()
+    callback_exception: list[BaseException] = []
+
+    def _callback(outdata, frame_count, time_info, status) -> None:
+        nonlocal position
+        try:
+            remaining = total_frames - position
+            if remaining <= 0:
+                outdata[:] = 0
+                raise sd.CallbackStop()
+            chunk = min(frame_count, remaining)
+            outdata[:chunk] = audio[position : position + chunk]
+            if chunk < frame_count:
+                outdata[chunk:] = 0
+            position += chunk
+            if position >= total_frames:
+                raise sd.CallbackStop()
+        except sd.CallbackStop:
+            raise
+        except Exception as exc:  # PortAudio otherwise hides callback errors silently
+            callback_exception.append(exc)
+            raise sd.CallbackStop()
+
+    try:
+        stream = sd.OutputStream(
+            samplerate=sample_rate,
+            channels=channels,
+            dtype=dtype_name,
+            device=device_index,
+            callback=_callback,
+            finished_callback=finished.set,
+        )
+    except Exception as exc:
+        # A real device/driver failure opening a dedicated output stream.
+        return _fallback_or_raise(
+            exc,
+            {
+                "samplerate": sample_rate,
+                "channels": channels,
+                "dtype": dtype_name,
+                "device": device_name,
+            },
+        )
+
+    stopped_early = False
+    poll_interval_seconds = 0.02
+    with stream:
+        while not finished.is_set():
+            if stop_checker is not None and callable(stop_checker) and stop_checker():
+                stopped_early = True
+                stream.abort()
+                break
+            time.sleep(poll_interval_seconds)
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    if callback_exception:
+        _emit_playback_event(
+            on_playback_event,
+            "callback_error",
+            {
+                "backend": "sounddevice",
+                "exception_type": type(callback_exception[0]).__name__,
+                "exception_message": str(callback_exception[0])[:200],
+            },
+        )
+    _emit_playback_event(
+        on_playback_event,
+        "stopped" if stopped_early else "completed",
+        {"backend": "sounddevice", "elapsed_ms": int(elapsed_ms)},
+    )
+    return elapsed_ms
+
+
+def _play_audio_file_winsound_fallback(audio_path: Path, started: float, on_playback_event: Any | None) -> float:
     if winsound is None:
         raise TTSError("A reprodução local de áudio só está disponível no Windows nesta versão.")
+    _emit_playback_event(on_playback_event, "started", {"backend": "winsound_fallback"})
     winsound.PlaySound(str(audio_path), winsound.SND_FILENAME)
-    return (time.perf_counter() - started) * 1000.0
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    _emit_playback_event(on_playback_event, "completed", {"backend": "winsound_fallback", "elapsed_ms": int(elapsed_ms)})
+    return elapsed_ms
+
+
+def _emit_playback_event(on_playback_event: Any | None, event: str, fields: dict[str, Any]) -> None:
+    if on_playback_event is None or not callable(on_playback_event):
+        return
+    try:
+        on_playback_event(event, fields)
+    except Exception:
+        pass  # diagnostics must never break playback
+
+
+def _select_output_device(sd: Any) -> tuple[int | None, str]:
+    """Only overrides sounddevice's own default output device when that
+    default is NOT actually output-capable -- picks the first
+    output-capable device deterministically (lowest index) in that case.
+    Never hardcodes a machine-specific index and never touches the
+    process-wide sd.default.device unless asked to via the return value
+    consumed by a single OutputStream call (section 5)."""
+    try:
+        devices = sd.query_devices()
+        default_output = sd.default.device
+        # sd.default.device is normally a 2-item [input, output] sequence,
+        # but sounddevice returns its own _InputOutputPair type (not a
+        # list/tuple instance) -- duck-type via subscripting instead of
+        # isinstance, since a plain int (single-device override) doesn't
+        # support [1] and should be used as-is.
+        try:
+            default_output = default_output[1]
+        except (TypeError, IndexError):
+            pass
+        if default_output is not None and 0 <= default_output < len(devices):
+            info = devices[default_output]
+            if info.get("max_output_channels", 0) > 0:
+                return None, f"default:{info.get('name', default_output)}"
+        for index, info in enumerate(devices):
+            if info.get("max_output_channels", 0) > 0:
+                return index, f"{index}:{info.get('name', index)}"
+    except Exception:
+        pass
+    return None, "default"
+
+
+def _decode_wav_for_playback(path: Path) -> tuple[Any, int, int, str, int, int]:
+    """Decode a WAV file into a (frames, channels)-shaped numpy array ready
+    for sounddevice, using only the stdlib (`struct`) + numpy -- NOT the
+    stdlib `wave` module, which cannot parse IEEE-float WAV (format code 3)
+    at all and raises `wave.Error: unknown format: 3`. This matters
+    because Pocket TTS's own output IS exactly that format:
+    assistant/pocket_tts_runner.py writes the raw float32 numpy array
+    straight from the model via `scipy.io.wavfile.write`, which encodes it
+    as IEEE-float, not PCM -- confirmed by reproducing that exact write
+    call in Pocket's own dedicated venv and observing the stdlib `wave`
+    module fail on the result.
+
+    Walks RIFF chunks directly to support standard PCM (format 1) and IEEE
+    float (format 3), plus WAVE_FORMAT_EXTENSIBLE (0xFFFE) by reading the
+    real sub-format code from the extended fmt chunk. Raises a descriptive
+    exception (ValueError, OSError) for anything else, rather than
+    swallowing it -- callers are responsible for logging and deciding
+    whether to fall back (section 3)."""
+    import numpy as np
+
+    raw = path.read_bytes()
+    if raw[0:4] != b"RIFF" or raw[8:12] != b"WAVE":
+        raise ValueError(f"not a RIFF/WAVE file (header={raw[0:12]!r})")
+
+    pos = 12
+    fmt_code: int | None = None
+    channels: int | None = None
+    sample_rate: int | None = None
+    bits_per_sample: int | None = None
+    data_bytes: bytes | None = None
+    while pos + 8 <= len(raw):
+        chunk_id = raw[pos : pos + 4]
+        chunk_size = struct.unpack_from("<I", raw, pos + 4)[0]
+        chunk_start = pos + 8
+        chunk_end = chunk_start + chunk_size
+        if chunk_end > len(raw):
+            break
+        if chunk_id == b"fmt ":
+            fmt_code, channels, sample_rate, _, _, bits_per_sample = struct.unpack_from(
+                "<HHIIHH", raw, chunk_start
+            )
+            if fmt_code == 0xFFFE and chunk_size >= 40:
+                fmt_code = struct.unpack_from("<H", raw, chunk_start + 24)[0]
+        elif chunk_id == b"data":
+            data_bytes = raw[chunk_start:chunk_end]
+        pos = chunk_end + (chunk_end % 2)  # chunks are word-aligned
+
+    if fmt_code is None:
+        raise ValueError("no fmt chunk found in WAV file")
+    if data_bytes is None:
+        raise ValueError("no data chunk found in WAV file")
+    if not channels:
+        raise ValueError(f"invalid channel count in fmt chunk: {channels}")
+
+    if fmt_code == 1:  # PCM
+        if bits_per_sample == 16:
+            dtype_name = "int16"
+        elif bits_per_sample == 8:
+            dtype_name = "uint8"
+        elif bits_per_sample == 32:
+            dtype_name = "int32"
+        else:
+            raise ValueError(f"unsupported PCM bits_per_sample={bits_per_sample}")
+    elif fmt_code == 3:  # IEEE float -- the format Pocket TTS actually writes
+        if bits_per_sample == 32:
+            dtype_name = "float32"
+        elif bits_per_sample == 64:
+            dtype_name = "float64"
+        else:
+            raise ValueError(f"unsupported IEEE-float bits_per_sample={bits_per_sample}")
+    else:
+        raise ValueError(f"unsupported WAV format code={fmt_code}")
+
+    audio = np.frombuffer(data_bytes, dtype=dtype_name)
+    usable_frames = audio.shape[0] // channels
+    audio = audio[: usable_frames * channels].reshape(usable_frames, channels)
+    return audio, sample_rate, channels, dtype_name, bits_per_sample, usable_frames
 
 
 def _voice_from_sapi_record(record: dict[str, Any]) -> VoiceSpec:

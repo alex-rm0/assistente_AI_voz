@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import queue
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -19,6 +21,7 @@ from assistant.tts import (
     WindowsSapiProvider,
     _culture_from_windows_value,
     _voice_from_registry_record,
+    play_audio_file,
     resolve_voice_command_target,
 )
 
@@ -1247,3 +1250,706 @@ def test_stop_delegates_to_provider() -> None:
     manager.stop()
 
     assert provider.stopped is True
+
+
+# --- Phase 7.6.2/7.6.3: play_audio_file stop-respecting playback ------------
+# Real-mic validation showed STOP during speech had no effect. Phase 7.6.2's
+# first fix (winsound SND_ASYNC + polled SND_PURGE) turned out to ALSO not
+# reliably stop real playback -- winsound's async+purge interruption is not
+# dependable for anything beyond trivial system sounds. Phase 7.6.3 replaced
+# the backend with sounddevice (already a project dependency for STT
+# capture) via a dedicated sd.OutputStream this function owns end-to-end;
+# these tests mock `sounddevice` itself (same pattern as
+# tests/test_voice_input.py's capture tests) rather than real audio
+# hardware, so they stay fast/deterministic/silent while still exercising
+# the REAL frame-consuming callback and stop-detection logic in
+# assistant/tts.py, not just a fake player.
+
+
+class _FakeWinsound:
+    SND_FILENAME = 0x00020000
+    SND_ASYNC = 0x0001
+    SND_PURGE = 0x0040
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, int]] = []
+
+    def PlaySound(self, sound, flags) -> None:
+        self.calls.append((sound, flags))
+
+
+class _FakeCallbackStop(Exception):
+    pass
+
+
+class _FakeOutputStream:
+    """Drives play_audio_file's REAL callback from a background thread in
+    small chunks (paced with a short sleep), so a stop_checker can
+    realistically interrupt mid-playback -- mirrors how a real
+    sounddevice.OutputStream calls back repeatedly as it drains its buffer,
+    without needing real audio hardware or real-time-accurate durations."""
+
+    def __init__(self, module: "_FakeSoundDevice", **kwargs) -> None:
+        self.module = module
+        self.channels = kwargs["channels"]
+        self.dtype = kwargs["dtype"]
+        self.callback = kwargs["callback"]
+        self.finished_callback = kwargs.get("finished_callback")
+        self.aborted = False
+        self.closed = False
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        def feed() -> None:
+            import numpy as np
+
+            chunk_frames = 64
+            while not self.aborted:
+                outdata = np.zeros((chunk_frames, self.channels), dtype=self.dtype)
+                try:
+                    self.callback(outdata, chunk_frames, None, None)
+                except _FakeCallbackStop:
+                    break
+                time.sleep(0.01)
+            if self.finished_callback is not None:
+                self.finished_callback()
+
+        self._thread = threading.Thread(target=feed, daemon=True)
+        self._thread.start()
+
+    def abort(self) -> None:
+        self.aborted = True
+
+    def close(self) -> None:
+        self.closed = True
+
+    def __enter__(self) -> "_FakeOutputStream":
+        self.start()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+
+class _FakeSoundDevice:
+    CallbackStop = _FakeCallbackStop
+
+    def __init__(self) -> None:
+        self.streams: list[_FakeOutputStream] = []
+        self.raise_on_open = False
+
+    def OutputStream(self, **kwargs) -> _FakeOutputStream:
+        if self.raise_on_open:
+            raise RuntimeError("no output device available")
+        stream = _FakeOutputStream(self, **kwargs)
+        self.streams.append(stream)
+        return stream
+
+
+def _write_silence_wav(path: Path, duration_seconds: float, frame_rate: int = 8000) -> None:
+    import wave
+
+    frame_count = max(1, int(duration_seconds * frame_rate))
+    with wave.open(str(path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(frame_rate)
+        wav_file.writeframes(b"\x00\x00" * frame_count)
+
+
+def _install_fake_sounddevice(monkeypatch) -> _FakeSoundDevice:
+    import sys
+
+    fake_sd = _FakeSoundDevice()
+    monkeypatch.setitem(sys.modules, "sounddevice", fake_sd)
+    return fake_sd
+
+
+def test_play_audio_file_a_stop_checker_true_before_playback_never_plays(monkeypatch, tmp_path: Path) -> None:
+    fake_sd = _install_fake_sounddevice(monkeypatch)
+    audio_path = tmp_path / "sample.wav"
+    _write_silence_wav(audio_path, duration_seconds=1.0)
+
+    playback_ms = play_audio_file(audio_path, stop_checker=lambda: True)
+
+    assert playback_ms == 0.0
+    assert fake_sd.streams == []
+
+
+def test_play_audio_file_b_no_stop_checker_still_plays_via_sounddevice(monkeypatch, tmp_path: Path) -> None:
+    fake_sd = _install_fake_sounddevice(monkeypatch)
+    audio_path = tmp_path / "sample.wav"
+    _write_silence_wav(audio_path, duration_seconds=0.05)
+
+    play_audio_file(audio_path, stop_checker=None)
+
+    assert len(fake_sd.streams) == 1
+    assert fake_sd.streams[0].aborted is False
+
+
+def test_play_audio_file_c_stop_mid_playback_aborts_and_returns_early(monkeypatch, tmp_path: Path) -> None:
+    """C (the exact real bug, section 2/15.A/B/C): a stop_checker that
+    flips to True shortly after playback starts must interrupt a LONG file
+    almost immediately -- not run to the file's full natural duration --
+    and must call stream.abort(), the mechanism that actually silences
+    audio output (unlike winsound's purge, which real logs showed didn't)."""
+    fake_sd = _install_fake_sounddevice(monkeypatch)
+    audio_path = tmp_path / "long.wav"
+    _write_silence_wav(audio_path, duration_seconds=30.0)  # would take 30s if not interrupted
+
+    started_at = time.perf_counter()
+    call_count = 0
+
+    def stop_after_a_couple_polls() -> bool:
+        nonlocal call_count
+        call_count += 1
+        return call_count >= 3
+
+    playback_ms = play_audio_file(audio_path, stop_checker=stop_after_a_couple_polls)
+    wall_clock_ms = (time.perf_counter() - started_at) * 1000.0
+
+    assert playback_ms < 1000  # stopped in well under 1s, not the full 30s
+    assert wall_clock_ms < 1000
+    assert len(fake_sd.streams) == 1
+    assert fake_sd.streams[0].aborted is True
+
+
+def test_play_audio_file_d_natural_completion_does_not_abort(monkeypatch, tmp_path: Path) -> None:
+    fake_sd = _install_fake_sounddevice(monkeypatch)
+    audio_path = tmp_path / "short.wav"
+    _write_silence_wav(audio_path, duration_seconds=0.05)
+
+    play_audio_file(audio_path, stop_checker=lambda: False)
+
+    assert len(fake_sd.streams) == 1
+    assert fake_sd.streams[0].aborted is False
+
+
+def test_play_audio_file_e_repeated_play_stop_play_works(monkeypatch, tmp_path: Path) -> None:
+    """E: play/stop/play in sequence must work cleanly -- no leaked state
+    from one call affecting the next."""
+    fake_sd = _install_fake_sounddevice(monkeypatch)
+    audio_path = tmp_path / "long.wav"
+    _write_silence_wav(audio_path, duration_seconds=30.0)
+
+    call_count = 0
+
+    def stop_after_a_couple_polls() -> bool:
+        nonlocal call_count
+        call_count += 1
+        return call_count >= 3
+
+    play_audio_file(audio_path, stop_checker=stop_after_a_couple_polls)
+    assert fake_sd.streams[0].aborted is True
+
+    short_path = tmp_path / "short.wav"
+    _write_silence_wav(short_path, duration_seconds=0.05)
+    play_audio_file(short_path, stop_checker=lambda: False)
+    assert fake_sd.streams[1].aborted is False
+
+
+def test_play_audio_file_falls_back_when_wav_cannot_be_decoded(monkeypatch, tmp_path: Path) -> None:
+    """A non-WAV/corrupt file must not crash -- falls back to the original
+    blocking winsound call rather than raising or hanging."""
+    fake_sd = _install_fake_sounddevice(monkeypatch)
+    fake_winsound = _FakeWinsound()
+    monkeypatch.setattr("assistant.tts.winsound", fake_winsound)
+    audio_path = tmp_path / "not_a_real_wav.wav"
+    audio_path.write_bytes(b"not a wav file")
+
+    play_audio_file(audio_path, stop_checker=lambda: False)
+
+    assert fake_sd.streams == []
+    assert fake_winsound.calls == [(str(audio_path), _FakeWinsound.SND_FILENAME)]
+
+
+def test_play_audio_file_falls_back_when_output_device_unavailable(monkeypatch, tmp_path: Path) -> None:
+    """A real device/driver failure opening the dedicated output stream
+    must degrade to winsound rather than losing speech entirely."""
+    fake_sd = _install_fake_sounddevice(monkeypatch)
+    fake_sd.raise_on_open = True
+    fake_winsound = _FakeWinsound()
+    monkeypatch.setattr("assistant.tts.winsound", fake_winsound)
+    audio_path = tmp_path / "sample.wav"
+    _write_silence_wav(audio_path, duration_seconds=0.05)
+
+    play_audio_file(audio_path, stop_checker=lambda: False)
+
+    assert fake_sd.streams == []
+    assert fake_winsound.calls == [(str(audio_path), _FakeWinsound.SND_FILENAME)]
+
+
+def test_play_audio_file_reports_playback_events(monkeypatch, tmp_path: Path) -> None:
+    """The optional on_playback_event hook (used by EchoTTSWorker for the
+    [TTS_PLAYBACK] diagnostics) fires started + stopped/completed with the
+    right backend/elapsed_ms, and never raises even if the hook itself does."""
+    fake_sd = _install_fake_sounddevice(monkeypatch)
+    audio_path = tmp_path / "sample.wav"
+    _write_silence_wav(audio_path, duration_seconds=0.05)
+    events: list[tuple[str, dict]] = []
+
+    play_audio_file(audio_path, stop_checker=lambda: False, on_playback_event=lambda e, f: events.append((e, dict(f))))
+
+    assert events[0][0] == "started"
+    assert events[0][1]["backend"] == "sounddevice"
+    assert events[-1][0] == "completed"
+    assert "elapsed_ms" in events[-1][1]
+
+    # A raising hook must never break playback.
+    def bad_hook(event, fields):
+        raise RuntimeError("boom")
+
+    play_audio_file(audio_path, stop_checker=lambda: False, on_playback_event=bad_hook)
+
+
+def test_play_audio_file_g_stopping_playback_does_not_corrupt_subsequent_capture(monkeypatch, tmp_path: Path) -> None:
+    """G (section 15): play_audio_file owns a DEDICATED OutputStream and
+    only ever calls .abort()/.close() on that specific instance -- never a
+    module-level sd.stop()/sd.play() that could reach into an unrelated
+    stream. Confirmed here by opening a SEPARATE InputStream (standing in
+    for microphone capture) on the SAME fake sounddevice module right
+    after an interrupted playback, and checking it is completely
+    unaffected -- a real regression here would be play_audio_file reaching
+    for a global stop that also touches whatever stream this represents."""
+    import inspect
+
+    from assistant.tts import play_audio_file as target
+
+    source = inspect.getsource(target)
+    code_only = source.replace(target.__doc__ or "", "")  # the docstring itself explains why NOT to use these
+    assert "sd.stop(" not in code_only
+    assert "sd.play(" not in code_only
+
+    class _FakeInputStream:
+        def __init__(self, **kwargs) -> None:
+            self.closed = False
+            self.aborted = False
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+        def close(self) -> None:
+            self.closed = True
+
+        def __enter__(self) -> "_FakeInputStream":
+            self.start()
+            return self
+
+        def __exit__(self, *exc_info: object) -> None:
+            self.close()
+
+    class _CombinedFakeSoundDevice(_FakeSoundDevice):
+        def __init__(self) -> None:
+            super().__init__()
+            self.input_streams: list[_FakeInputStream] = []
+
+        def InputStream(self, **kwargs) -> _FakeInputStream:
+            stream = _FakeInputStream(**kwargs)
+            self.input_streams.append(stream)
+            return stream
+
+    fake_sd = _CombinedFakeSoundDevice()
+    import sys
+
+    monkeypatch.setitem(sys.modules, "sounddevice", fake_sd)
+    audio_path = tmp_path / "long.wav"
+    _write_silence_wav(audio_path, duration_seconds=30.0)
+
+    call_count = 0
+
+    def stop_after_a_couple_polls() -> bool:
+        nonlocal call_count
+        call_count += 1
+        return call_count >= 3
+
+    play_audio_file(audio_path, stop_checker=stop_after_a_couple_polls)
+    assert fake_sd.streams[0].aborted is True
+
+    # A capture stream opened AFTER the interrupted playback must work
+    # completely independently -- unaffected, unaborted, not pre-closed.
+    with fake_sd.InputStream(samplerate=44100, channels=1, callback=lambda *a: None) as capture_stream:
+        assert capture_stream.aborted is False
+        assert capture_stream.closed is False
+    assert capture_stream.closed is True
+    assert fake_sd.streams[0].aborted is True  # unchanged by the capture stream's own lifecycle
+
+
+# ---------------------------------------------------------------------------
+# Phase 7.6.4: sounddevice playback was silently falling back to winsound on
+# every real Pocket TTS utterance. Root cause: Pocket writes its WAV via
+# scipy.io.wavfile.write on a raw float32 numpy array, which encodes as WAV
+# format code 3 (IEEE float) -- a format the stdlib `wave` module cannot
+# parse at all (wave.Error: unknown format: 3), silently swallowed by the
+# old decoder's bare except. The tests below cover the replacement
+# dependency-free RIFF/WAVE parser (PCM + IEEE float), the new
+# backend_failed/callback_error diagnostics, output-device selection, and
+# Voice Mode's "never silently degrade to non-interruptible playback" rule.
+# ---------------------------------------------------------------------------
+
+
+def _write_pcm_wav(path: Path, duration_seconds: float, frame_rate: int = 8000, channels: int = 1) -> None:
+    import wave
+
+    frame_count = max(1, int(duration_seconds * frame_rate))
+    with wave.open(str(path), "wb") as wav_file:
+        wav_file.setnchannels(channels)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(frame_rate)
+        wav_file.writeframes(b"\x00\x00" * frame_count * channels)
+
+
+def _write_float_wav(path: Path, duration_seconds: float, frame_rate: int = 24000, channels: int = 1) -> None:
+    """Builds a WAV exactly the way Pocket TTS's real pipeline does
+    (assistant/pocket_tts_runner.py -> scipy.io.wavfile.write on a raw
+    float32 numpy array): format code 3 (IEEE float), NOT format code 1
+    (PCM). Written by hand via `struct` (no scipy dependency in the main
+    venv/test environment) so it byte-for-byte matches a real RIFF/WAVE
+    IEEE-float file."""
+    import struct as struct_mod
+
+    import numpy as np
+
+    frame_count = max(1, int(duration_seconds * frame_rate))
+    samples = np.zeros((frame_count, channels), dtype=np.float32)
+    data_bytes = samples.tobytes()
+    byte_rate = frame_rate * channels * 4
+    block_align = channels * 4
+    fmt_chunk = struct_mod.pack("<HHIIHH", 3, channels, frame_rate, byte_rate, block_align, 32)
+    riff_size = 4 + (8 + len(fmt_chunk)) + (8 + len(data_bytes))
+    with open(path, "wb") as f:
+        f.write(b"RIFF")
+        f.write(struct_mod.pack("<I", riff_size))
+        f.write(b"WAVE")
+        f.write(b"fmt ")
+        f.write(struct_mod.pack("<I", len(fmt_chunk)))
+        f.write(fmt_chunk)
+        f.write(b"data")
+        f.write(struct_mod.pack("<I", len(data_bytes)))
+        f.write(data_bytes)
+
+
+def _write_unsupported_format_wav(path: Path) -> None:
+    """Format code 6 (A-law) -- neither PCM (1) nor IEEE float (3), so the
+    new decoder must raise a descriptive ValueError rather than guess."""
+    import struct as struct_mod
+
+    data_bytes = b"\x00" * 16
+    fmt_chunk = struct_mod.pack("<HHIIHH", 6, 1, 8000, 8000, 1, 8)
+    riff_size = 4 + (8 + len(fmt_chunk)) + (8 + len(data_bytes))
+    with open(path, "wb") as f:
+        f.write(b"RIFF")
+        f.write(struct_mod.pack("<I", riff_size))
+        f.write(b"WAVE")
+        f.write(b"fmt ")
+        f.write(struct_mod.pack("<I", len(fmt_chunk)))
+        f.write(fmt_chunk)
+        f.write(b"data")
+        f.write(struct_mod.pack("<I", len(data_bytes)))
+        f.write(data_bytes)
+
+
+def test_play_audio_file_pocket_style_float32_wav_uses_sounddevice_not_winsound(monkeypatch, tmp_path: Path) -> None:
+    """THE regression test for the real reported bug: a Pocket-style
+    float32 (IEEE format code 3) WAV must decode and play through the real
+    sounddevice backend -- never silently fall back to the non-
+    interruptible winsound path, which is what real logs showed happening
+    on every actual Pocket utterance before this fix."""
+    fake_sd = _install_fake_sounddevice(monkeypatch)
+    fake_winsound = _FakeWinsound()
+    monkeypatch.setattr("assistant.tts.winsound", fake_winsound)
+    audio_path = tmp_path / "pocket_style.wav"
+    _write_float_wav(audio_path, duration_seconds=0.05)
+    events: list[tuple[str, dict]] = []
+
+    play_audio_file(audio_path, stop_checker=lambda: False, on_playback_event=lambda e, f: events.append((e, dict(f))))
+
+    assert fake_winsound.calls == []
+    assert len(fake_sd.streams) == 1
+    started = events[0]
+    assert started[0] == "started"
+    assert started[1]["backend"] == "sounddevice"
+    assert started[1]["numpy_dtype"] == "float32"
+    assert started[1]["channels"] == 1
+    assert started[1]["sample_width"] == 4
+    assert started[1]["sample_rate"] == 24000
+    assert started[1]["frame_count"] > 0
+
+
+def test_decode_wav_for_playback_mono_pcm_shapes_correctly(tmp_path: Path) -> None:
+    """D: a valid mono PCM WAV must decode to a (frames, 1) array with the
+    dtype sounddevice's OutputStream expects."""
+    from assistant.tts import _decode_wav_for_playback
+
+    audio_path = tmp_path / "mono.wav"
+    _write_pcm_wav(audio_path, duration_seconds=0.1, channels=1)
+
+    audio, sample_rate, channels, dtype_name, bits_per_sample, frame_count = _decode_wav_for_playback(audio_path)
+
+    assert channels == 1
+    assert audio.shape == (frame_count, 1)
+    assert dtype_name == "int16"
+    assert bits_per_sample == 16
+    assert sample_rate == 8000
+
+
+def test_decode_wav_for_playback_stereo_pcm_shapes_correctly(tmp_path: Path) -> None:
+    """E: a valid stereo PCM WAV must decode to a (frames, 2) array."""
+    from assistant.tts import _decode_wav_for_playback
+
+    audio_path = tmp_path / "stereo.wav"
+    _write_pcm_wav(audio_path, duration_seconds=0.1, channels=2)
+
+    audio, sample_rate, channels, dtype_name, bits_per_sample, frame_count = _decode_wav_for_playback(audio_path)
+
+    assert channels == 2
+    assert audio.shape == (frame_count, 2)
+    assert dtype_name == "int16"
+
+
+def test_decode_wav_for_playback_float32_stereo_shapes_correctly(tmp_path: Path) -> None:
+    """E (float variant): Pocket-style IEEE-float stereo output must also
+    shape correctly, not just mono."""
+    from assistant.tts import _decode_wav_for_playback
+
+    audio_path = tmp_path / "float_stereo.wav"
+    _write_float_wav(audio_path, duration_seconds=0.05, channels=2)
+
+    audio, sample_rate, channels, dtype_name, bits_per_sample, frame_count = _decode_wav_for_playback(audio_path)
+
+    assert channels == 2
+    assert audio.shape == (frame_count, 2)
+    assert dtype_name == "float32"
+    assert bits_per_sample == 32
+
+
+def test_play_audio_file_backend_failed_event_reports_wav_decode_exception(monkeypatch, tmp_path: Path) -> None:
+    """A: a corrupt/undecodable file must log a backend_failed event with
+    the real exception type/message -- never fall back silently with zero
+    diagnostics (section 3)."""
+    fake_sd = _install_fake_sounddevice(monkeypatch)
+    fake_winsound = _FakeWinsound()
+    monkeypatch.setattr("assistant.tts.winsound", fake_winsound)
+    audio_path = tmp_path / "not_a_real_wav.wav"
+    audio_path.write_bytes(b"not a wav file")
+    events: list[tuple[str, dict]] = []
+
+    play_audio_file(audio_path, stop_checker=lambda: False, on_playback_event=lambda e, f: events.append((e, dict(f))))
+
+    backend_failed = [fields for event, fields in events if event == "backend_failed"]
+    assert len(backend_failed) == 1
+    assert backend_failed[0]["exception_type"] == "ValueError"
+    assert "RIFF" in backend_failed[0]["exception_message"]
+    assert backend_failed[0]["fallback"] == "winsound"
+    assert fake_winsound.calls  # still degrades gracefully when allowed
+
+
+def test_play_audio_file_backend_failed_event_reports_unsupported_format(monkeypatch, tmp_path: Path) -> None:
+    """B: an unsupported WAV format code (neither PCM nor IEEE float) must
+    be diagnosed explicitly, not silently guessed at."""
+    fake_sd = _install_fake_sounddevice(monkeypatch)
+    fake_winsound = _FakeWinsound()
+    monkeypatch.setattr("assistant.tts.winsound", fake_winsound)
+    audio_path = tmp_path / "unsupported.wav"
+    _write_unsupported_format_wav(audio_path)
+    events: list[tuple[str, dict]] = []
+
+    play_audio_file(audio_path, stop_checker=lambda: False, on_playback_event=lambda e, f: events.append((e, dict(f))))
+
+    backend_failed = [fields for event, fields in events if event == "backend_failed"]
+    assert len(backend_failed) == 1
+    assert backend_failed[0]["exception_type"] == "ValueError"
+    assert "format code=6" in backend_failed[0]["exception_message"]
+    assert fake_winsound.calls
+
+
+def test_play_audio_file_backend_failed_event_reports_device_open_exception(monkeypatch, tmp_path: Path) -> None:
+    """C: a real device/driver failure opening the dedicated OutputStream
+    must be diagnosed with samplerate/channels/dtype/device details, not
+    just silently degraded."""
+    fake_sd = _install_fake_sounddevice(monkeypatch)
+    fake_sd.raise_on_open = True
+    fake_winsound = _FakeWinsound()
+    monkeypatch.setattr("assistant.tts.winsound", fake_winsound)
+    audio_path = tmp_path / "sample.wav"
+    _write_silence_wav(audio_path, duration_seconds=0.05)
+    events: list[tuple[str, dict]] = []
+
+    play_audio_file(audio_path, stop_checker=lambda: False, on_playback_event=lambda e, f: events.append((e, dict(f))))
+
+    backend_failed = [fields for event, fields in events if event == "backend_failed"]
+    assert len(backend_failed) == 1
+    assert backend_failed[0]["exception_type"] == "RuntimeError"
+    assert "no output device available" in backend_failed[0]["exception_message"]
+    assert backend_failed[0]["samplerate"] == 8000
+    assert backend_failed[0]["channels"] == 1
+    assert backend_failed[0]["dtype"] == "int16"
+    assert fake_winsound.calls
+
+
+def test_play_audio_file_callback_exception_is_surfaced_not_silently_hidden(monkeypatch, tmp_path: Path) -> None:
+    """F: a callback that raises (e.g. a shape/dtype mismatch) must be
+    logged via a callback_error event instead of letting PortAudio hide it
+    -- and playback must still end cleanly rather than hang."""
+    import sys
+
+    class _FakeOutputStreamBadShape(_FakeOutputStream):
+        def start(self) -> None:
+            def feed() -> None:
+                import numpy as np
+
+                # outdata deliberately smaller than the frame_count the
+                # callback is told to fill -- forces a real (non-
+                # CallbackStop) broadcast exception inside the callback,
+                # exercising the "don't let PortAudio hide it" path.
+                outdata = np.zeros((8, self.channels), dtype=self.dtype)
+                try:
+                    self.callback(outdata, 64, None, None)
+                except _FakeCallbackStop:
+                    pass
+                if self.finished_callback is not None:
+                    self.finished_callback()
+
+            self._thread = threading.Thread(target=feed, daemon=True)
+            self._thread.start()
+
+    class _FakeSoundDeviceBadCallback(_FakeSoundDevice):
+        def OutputStream(self, **kwargs) -> _FakeOutputStreamBadShape:
+            stream = _FakeOutputStreamBadShape(self, **kwargs)
+            self.streams.append(stream)
+            return stream
+
+    fake_sd = _FakeSoundDeviceBadCallback()
+    monkeypatch.setitem(sys.modules, "sounddevice", fake_sd)
+    audio_path = tmp_path / "sample.wav"
+    _write_silence_wav(audio_path, duration_seconds=0.05)
+    events: list[tuple[str, dict]] = []
+
+    play_audio_file(audio_path, stop_checker=lambda: False, on_playback_event=lambda e, f: events.append((e, dict(f))))
+
+    callback_errors = [fields for event, fields in events if event == "callback_error"]
+    assert len(callback_errors) == 1
+    assert callback_errors[0]["exception_type"] in ("ValueError",)
+
+
+def test_play_audio_file_raises_instead_of_silently_falling_back_when_interruptible_required(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """G/section 7: Voice Conversation Mode must never silently degrade to
+    the non-interruptible winsound fallback. When allow_winsound_fallback
+    is False, a decode failure raises TTSError instead of playing via
+    winsound -- the caller (EchoTTSWorker) treats this like any other TTS
+    failure: text stays visible, voice mode recovers safely."""
+    fake_sd = _install_fake_sounddevice(monkeypatch)
+    fake_winsound = _FakeWinsound()
+    monkeypatch.setattr("assistant.tts.winsound", fake_winsound)
+    audio_path = tmp_path / "not_a_real_wav.wav"
+    audio_path.write_bytes(b"not a wav file")
+
+    with pytest.raises(TTSError):
+        play_audio_file(audio_path, stop_checker=lambda: False, allow_winsound_fallback=False)
+
+    assert fake_winsound.calls == []
+
+
+def test_play_audio_file_raises_when_device_open_fails_and_interruptible_required(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """G/section 7 (device-open variant): the same rule applies when the
+    OutputStream itself fails to open, not just when decoding fails."""
+    fake_sd = _install_fake_sounddevice(monkeypatch)
+    fake_sd.raise_on_open = True
+    fake_winsound = _FakeWinsound()
+    monkeypatch.setattr("assistant.tts.winsound", fake_winsound)
+    audio_path = tmp_path / "sample.wav"
+    _write_silence_wav(audio_path, duration_seconds=0.05)
+
+    with pytest.raises(TTSError):
+        play_audio_file(audio_path, stop_checker=lambda: False, allow_winsound_fallback=False)
+
+    assert fake_winsound.calls == []
+
+
+def test_play_audio_file_manual_fallback_remains_safe_when_interruptible_not_required(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """H: manual/non-interactive TTS (allow_winsound_fallback=True, the
+    default) must keep degrading gracefully rather than raising -- only
+    Voice Mode opts into the stricter no-silent-fallback behavior."""
+    fake_sd = _install_fake_sounddevice(monkeypatch)
+    fake_sd.raise_on_open = True
+    fake_winsound = _FakeWinsound()
+    monkeypatch.setattr("assistant.tts.winsound", fake_winsound)
+    audio_path = tmp_path / "sample.wav"
+    _write_silence_wav(audio_path, duration_seconds=0.05)
+
+    play_audio_file(audio_path, stop_checker=lambda: False, allow_winsound_fallback=True)
+
+    assert fake_winsound.calls == [(str(audio_path), _FakeWinsound.SND_FILENAME)]
+
+
+def test_play_audio_file_successful_sounddevice_playback_can_still_be_aborted(monkeypatch, tmp_path: Path) -> None:
+    """I: with allow_winsound_fallback=False (Voice Mode), a SUCCESSFUL
+    sounddevice open must still honor stop_checker / stream.abort() -- the
+    stricter fallback rule must not interfere with normal interruption."""
+    fake_sd = _install_fake_sounddevice(monkeypatch)
+    audio_path = tmp_path / "long.wav"
+    _write_silence_wav(audio_path, duration_seconds=30.0)
+    call_count = 0
+
+    def stop_after_a_couple_polls() -> bool:
+        nonlocal call_count
+        call_count += 1
+        return call_count >= 3
+
+    playback_ms = play_audio_file(
+        audio_path, stop_checker=stop_after_a_couple_polls, allow_winsound_fallback=False
+    )
+
+    assert playback_ms < 1000
+    assert fake_sd.streams[0].aborted is True
+
+
+class _FakeDefaultDevicePair:
+    def __init__(self, device: list[int]) -> None:
+        self.device = device
+
+
+def test_select_output_device_falls_back_when_default_output_is_not_output_capable(monkeypatch) -> None:
+    """Section 5: if the default output device is invalid/unavailable,
+    pick the first output-capable device deterministically -- never a
+    hardcoded machine-specific index."""
+    from assistant.tts import _select_output_device
+
+    fake_sd = _install_fake_sounddevice(monkeypatch)
+    fake_sd.default = _FakeDefaultDevicePair([0, 99])  # index 99 doesn't exist
+    fake_sd.query_devices = lambda: [
+        {"name": "Built-in Mic", "max_output_channels": 0},
+        {"name": "USB Speakers", "max_output_channels": 2},
+    ]
+
+    index, name = _select_output_device(fake_sd)
+
+    assert index == 1
+    assert "USB Speakers" in name
+
+
+def test_select_output_device_keeps_valid_default_untouched(monkeypatch) -> None:
+    """Section 5: never override the user's default output device unless
+    it is genuinely invalid -- a valid default must be left alone (None
+    means "let sounddevice use its own default")."""
+    from assistant.tts import _select_output_device
+
+    fake_sd = _install_fake_sounddevice(monkeypatch)
+    fake_sd.default = _FakeDefaultDevicePair([0, 1])
+    fake_sd.query_devices = lambda: [
+        {"name": "Built-in Mic", "max_output_channels": 0},
+        {"name": "Headset Speakers", "max_output_channels": 2},
+    ]
+
+    index, name = _select_output_device(fake_sd)
+
+    assert index is None
+    assert "Headset Speakers" in name

@@ -7,6 +7,7 @@ from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Any
 
+from assistant.response_language import localize
 from assistant.text_matching import contains_any_phrase, normalize_for_matching
 
 
@@ -198,7 +199,13 @@ def classify_task_query(message: str) -> str:
     return ""
 
 
-def answer_task_query(work_session, task, message: str) -> str:
+def answer_task_query(work_session, task, message: str, response_language: str = "pt-PT") -> str:
+    """Phase 7.7.1: status/missing/next-step/summary/recommendation/why
+    queries now render through response_language. _format_important/
+    _format_sources/_format_evidence_answer/_format_conflicts (evidence
+    and cross-option comparison prose) are a separate, deeper sentence-
+    generation surface intentionally left for a future pass -- see the
+    Phase 7.7.1 report."""
     if task is None:
         return ""
     query = classify_task_query(message)
@@ -206,31 +213,31 @@ def answer_task_query(work_session, task, message: str) -> str:
         return ""
     knowledge = _active_entries(task_knowledge(work_session, task.id))
     if query == "known":
-        return _format_known(task, knowledge)
+        return _format_known(task, knowledge, response_language)
     if query == "important":
-        return _format_important(task, knowledge, task_reasoning(work_session, task.id))
+        return _format_important(task, knowledge, task_reasoning(work_session, task.id), response_language)
     if query == "unknowns":
-        return _format_unknowns(task, knowledge)
+        return _format_unknowns(task, knowledge, response_language)
     if query == "decisions":
-        return _format_decisions(task, knowledge)
+        return _format_decisions(task, knowledge, response_language)
     if query == "recommendation":
         if task.task_type == "plan_trip":
-            return _format_travel_recommendation(task, knowledge)
-        reasoning = _refresh_reasoning(work_session, task)
-        return _format_recommendation(reasoning)
+            return _format_travel_recommendation(task, knowledge, response_language)
+        reasoning = _refresh_reasoning(work_session, task, response_language)
+        return _format_recommendation(reasoning, response_language)
     if query == "why":
         reasoning = task_reasoning(work_session, task.id)
         if not reasoning.reasons:
-            reasoning = _refresh_reasoning(work_session, task)
-        return _format_why(reasoning)
+            reasoning = _refresh_reasoning(work_session, task, response_language)
+        return _format_why(reasoning, response_language)
     if query == "source":
-        return _format_sources(knowledge, message)
+        return _format_sources(knowledge, message, response_language)
     if query == "evidence":
-        return _format_evidence_answer(task, knowledge, message)
+        return _format_evidence_answer(task, knowledge, message, response_language)
     if query == "conflicts":
-        return _format_conflicts(knowledge)
+        return _format_conflicts(knowledge, response_language)
     if query == "next_step":
-        return _format_next_step(task, knowledge)
+        return _format_next_step(task, knowledge, response_language)
     return ""
 
 
@@ -240,28 +247,35 @@ def task_dialogue_response(
     message: str = "",
     *,
     knowledge_delta: list[KnowledgeEntry] | None = None,
+    response_language: str = "pt-PT",
 ) -> str:
     """Natural task dialogue grounded in the current structured state.
 
     The UI projection and this text both derive from the same TaskKnowledge
     and TaskReasoningState. The delta only explains what changed this turn.
+
+    Phase 7.7.1: response_language is threaded through the plan_trip and
+    generic dialogue paths (the ones this phase closes); the
+    generic_comparison path (_plan_comparison_dialogue) is a separate,
+    larger sentence-generation subsystem intentionally left for a future
+    pass -- see the Phase 7.7.1 report's "known remaining inconsistencies".
     """
     if task is None:
         return ""
     knowledge = _knowledge_with_task_fields(task, _active_entries(task_knowledge(work_session, task.id)))
-    reasoning = _refresh_reasoning(work_session, task)
+    reasoning = _refresh_reasoning(work_session, task, response_language)
     delta = [entry for entry in (knowledge_delta or []) if entry and entry.status == "active"]
     if task.task_type == "plan_trip":
-        plan = _plan_travel_dialogue(task, knowledge, reasoning, delta, message)
+        plan = _plan_travel_dialogue(task, knowledge, reasoning, delta, message, response_language)
     elif task.task_type == "generic_comparison":
-        plan = _plan_comparison_dialogue(task, knowledge, reasoning, delta)
+        plan = _plan_comparison_dialogue(task, knowledge, reasoning, delta, response_language)
     else:
-        plan = _plan_generic_dialogue(task, knowledge, reasoning, delta)
+        plan = _plan_generic_dialogue(task, knowledge, reasoning, delta, response_language)
     rendered = plan.render()
-    return rendered or _fallback_task_dialogue(task, knowledge, reasoning)
+    return rendered or _fallback_task_dialogue(task, knowledge, reasoning, response_language)
 
 
-def task_card_summary(work_session, task) -> list[str]:
+def task_card_summary(work_session, task, response_language: str = "pt-PT") -> list[str]:
     if task is None:
         return []
     knowledge = _active_entries(task_knowledge(work_session, task.id))
@@ -271,98 +285,176 @@ def task_card_summary(work_session, task) -> list[str]:
     if task.task_type == "generic_comparison":
         options = _subjects_with_kind(knowledge, "option")
         if options:
-            lines.append("Opções: " + _join_pt(options[:4]))
+            lines.append(localize("task.card_summary.options", response_language, options=_join_pt(options[:4], response_language)))
         constraints = [e for e in knowledge if e.kind == "constraint"]
         preferences = [e for e in knowledge if e.kind == "preference"]
         if constraints:
-            lines.append("Limite: " + _entry_phrase(constraints[-1]))
+            lines.append(
+                localize("task.card_summary.limit", response_language, value=_entry_phrase(constraints[-1], response_language))
+            )
         if preferences:
-            lines.append("Prioridade: " + _entry_phrase(preferences[-1]))
+            lines.append(
+                localize(
+                    "task.card_summary.priority", response_language, value=_entry_phrase(preferences[-1], response_language)
+                )
+            )
     elif task.task_type == "plan_trip":
         essentials = [e for e in knowledge if e.predicate in {"destination", "date_range", "duration", "budget_max", "travel_style", "flight_constraint"}]
         for entry in essentials[:4]:
-            lines.append(_entry_phrase(entry))
+            lines.append(_entry_phrase(entry, response_language))
     else:
         for entry in knowledge[:4]:
-            lines.append(_entry_phrase(entry))
-    unknowns = infer_unknowns(task, knowledge)
+            lines.append(_entry_phrase(entry, response_language))
+    unknowns = infer_unknowns(task, knowledge, response_language)
     if unknowns:
-        lines.append("Em aberto: " + _join_pt(unknowns[:3]))
+        lines.append(localize("task.card_summary.open", response_language, items=_join_pt(unknowns[:3], response_language)))
     return lines
 
 
-def cognitive_task_view_model(work_session, task, *, title: str = "") -> dict[str, Any]:
+def cognitive_task_view_model(
+    work_session, task, *, title: str = "", response_language: str = "pt-PT"
+) -> dict[str, Any]:
     """Read-only projection for the Task Surface.
 
     This deliberately derives from task knowledge/reasoning every time. It
     does not create a second mutable source of truth for the UI.
+
+    Phase 7.7 (section 1/7/16): every section TITLE/label here is
+    Echo-authored presentation text and localizes via response_language
+    (the canonical section `role` -- "overview"/"options"/"decisions"/etc.
+    -- is unchanged and remains the real semantic key; only its rendered
+    `title` changes with language, matching section 16's "canonical
+    semantics, localized presentation" split). The recommendation/next-
+    step SENTENCE CONTENT (_next_step_label, reasoning.current_
+    recommendation's own text) is a deeper, free-text dialogue-generation
+    gap this phase does not attempt -- see the Phase 7.7 report's "known
+    remaining language inconsistencies".
     """
     if task is None:
         return {}
     knowledge = _knowledge_with_task_fields(task, _active_entries(task_knowledge(work_session, task.id)))
-    reasoning = _refresh_reasoning(work_session, task)
+    reasoning = _refresh_reasoning(work_session, task, response_language)
     stage = infer_task_stage(task, knowledge) or reasoning.stage
     sections: list[CognitiveTaskSection] = []
 
-    overview_items = _overview_items(task, knowledge)
+    overview_items = _overview_items(task, knowledge, response_language)
     if overview_items:
-        sections.append(CognitiveTaskSection("overview", _overview_title(task), "high", overview_items))
+        sections.append(
+            CognitiveTaskSection("overview", _overview_title(task, response_language), "high", overview_items)
+        )
 
     if task.task_type == "generic_comparison":
-        option_items = _option_view_items(knowledge)
+        option_items = _option_view_items(knowledge, response_language)
         if option_items:
-            sections.append(CognitiveTaskSection("options", "Opções", "high", option_items))
+            sections.append(
+                CognitiveTaskSection("options", localize("task.section.options", response_language), "high", option_items)
+            )
     elif task.task_type == "plan_trip":
         found_items = _travel_found_items(knowledge)
         if found_items:
-            sections.append(CognitiveTaskSection("found", "Encontrado", "high", found_items[:5]))
+            sections.append(
+                CognitiveTaskSection(
+                    "found", localize("task.section.found", response_language), "high", found_items[:5]
+                )
+            )
 
     constraints = _entries_for_roles(knowledge, {"constraint"})
     if constraints:
-        sections.append(CognitiveTaskSection("constraints", "Limites", "high", _entry_view_items(constraints[:3])))
+        sections.append(
+            CognitiveTaskSection(
+                "constraints",
+                localize("task.section.limits", response_language),
+                "high",
+                _entry_view_items(constraints[:3], response_language),
+            )
+        )
 
     preferences = _entries_for_roles(knowledge, {"preference"})
     if preferences:
-        sections.append(CognitiveTaskSection("priorities", "Prioridades", "medium", _entry_view_items(preferences[:4])))
+        sections.append(
+            CognitiveTaskSection(
+                "priorities",
+                localize("task.section.priorities", response_language),
+                "medium",
+                _entry_view_items(preferences[:4], response_language),
+            )
+        )
 
     decisions = _entries_for_roles(knowledge, {"decision"})
     if decisions:
-        sections.append(CognitiveTaskSection("decisions", "Decisões", "high", _entry_view_items(decisions[:3])))
+        sections.append(
+            CognitiveTaskSection(
+                "decisions",
+                localize("task.section.decisions", response_language),
+                "high",
+                _entry_view_items(decisions[:3], response_language),
+            )
+        )
 
-    facts = _non_duplicated_fact_items(task, knowledge)
+    facts = _non_duplicated_fact_items(task, knowledge, response_language)
     if facts:
-        sections.append(CognitiveTaskSection("key_information", "O que já sabemos", "medium", facts[:6]))
+        sections.append(
+            CognitiveTaskSection(
+                "key_information", localize("task.section.known", response_language), "medium", facts[:6]
+            )
+        )
 
     if reasoning.current_recommendation:
         sections.append(
             CognitiveTaskSection(
                 "recommendation",
-                "Neste momento",
+                localize("task.section.now", response_language),
                 "high",
-                [{"label": f"{reasoning.current_recommendation} parece a melhor opção", "details": reasoning.reasons[:3]}],
+                [
+                    {
+                        "label": localize(
+                            "task.recommendation.seems_best", response_language, recommendation=reasoning.current_recommendation
+                        ),
+                        "details": reasoning.reasons[:3],
+                    }
+                ],
             )
         )
     elif task.task_type == "plan_trip" and stage == "plan":
         sections.append(
             CognitiveTaskSection(
                 "plan_areas",
-                "A organizar",
+                localize("task.section.organizing", response_language),
                 "medium",
-                [{"label": item, "details": []} for item in ("Alojamento", "Transportes", "Itinerário", "Custos")],
+                [
+                    {"label": item, "details": []}
+                    for item in (
+                        localize("task.item.accommodation", response_language),
+                        localize("task.item.transport", response_language),
+                        localize("task.item.itinerary", response_language),
+                        localize("task.item.costs", response_language),
+                    )
+                ],
             )
         )
 
     conflicts = _conflict_items(knowledge)
     if conflicts:
-        sections.append(CognitiveTaskSection("conflicts", "Atenção", "high", conflicts[:3]))
+        sections.append(
+            CognitiveTaskSection("conflicts", localize("task.section.attention", response_language), "high", conflicts[:3])
+        )
 
-    unknowns = _prioritized_unknowns(task, knowledge, reasoning)
+    unknowns = _prioritized_unknowns(task, knowledge, reasoning, response_language)
     if unknowns:
-        sections.append(CognitiveTaskSection("unknowns", "Ainda falta", "medium", [{"label": item, "details": []} for item in unknowns[:4]]))
+        sections.append(
+            CognitiveTaskSection(
+                "unknowns",
+                localize("task.section.still_missing", response_language),
+                "medium",
+                [{"label": item, "details": []} for item in unknowns[:4]],
+            )
+        )
 
-    next_step = _next_step_label(task, knowledge, reasoning)
+    next_step = _next_step_label(task, knowledge, reasoning, response_language)
     if next_step:
-        sections.append(CognitiveTaskSection("next_step", "Próximo passo", "high", text=next_step))
+        sections.append(
+            CognitiveTaskSection("next_step", localize("task.section.next_step", response_language), "high", text=next_step)
+        )
 
     view = CognitiveTaskViewModel(
         task_id=task.id,
@@ -402,25 +494,32 @@ def _view_model_to_dict(view: CognitiveTaskViewModel) -> dict[str, Any]:
     }
 
 
-def _overview_title(task) -> str:
+def _overview_title(task, response_language: str = "pt-PT") -> str:
     if task.task_type == "generic_comparison":
-        return "Comparação"
+        return localize("task.overview.comparison", response_language)
     if task.task_type == "plan_trip":
-        return "Planeamento"
-    return "Objetivo"
+        return localize("task.overview.planning", response_language)
+    return localize("task.overview.goal", response_language)
 
 
-def _overview_items(task, knowledge: list[KnowledgeEntry]) -> list[dict[str, Any]]:
+def _overview_items(task, knowledge: list[KnowledgeEntry], response_language: str = "pt-PT") -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     category = getattr(task, "parameters", {}).get("category", "")
     if category and task.task_type == "generic_comparison":
-        items.append({"label": f"Categoria: {category}", "details": []})
+        items.append({"label": f"{localize('task.card.category', response_language)} {category}", "details": []})
     if getattr(task, "goal", ""):
         items.append({"label": task.goal, "details": []})
     for predicate in ("destination", "origin", "date_range"):
         value = _latest_value(knowledge, "trip", predicate)
         if value:
-            items.append({"label": _entry_phrase(KnowledgeEntry("", "", "fact", "trip", predicate, value, KnowledgeSource())), "details": []})
+            items.append(
+                {
+                    "label": _entry_phrase(
+                        KnowledgeEntry("", "", "fact", "trip", predicate, value, KnowledgeSource()), response_language
+                    ),
+                    "details": [],
+                }
+            )
     return _dedupe_view_items(items)
 
 
@@ -464,7 +563,7 @@ def _knowledge_with_task_fields(task, knowledge: list[KnowledgeEntry]) -> list[K
     return projected
 
 
-def _option_view_items(knowledge: list[KnowledgeEntry]) -> list[dict[str, Any]]:
+def _option_view_items(knowledge: list[KnowledgeEntry], response_language: str = "pt-PT") -> list[dict[str, Any]]:
     options = _subjects_with_kind(knowledge, "option")
     items: list[dict[str, Any]] = []
     for option in options:
@@ -472,7 +571,7 @@ def _option_view_items(knowledge: list[KnowledgeEntry]) -> list[dict[str, Any]]:
         price = _latest_value(knowledge, option, "price")
         if price:
             details.append(f"{price} €")
-        details.extend(_quality_view_details(knowledge, option))
+        details.extend(_quality_view_details(knowledge, option, response_language))
         items.append({"label": option, "details": _dedupe(details)[:3]})
     return items
 
@@ -526,11 +625,13 @@ def _entries_for_roles(knowledge: list[KnowledgeEntry], roles: set[str]) -> list
     return [entry for entry in knowledge if entry.kind in roles]
 
 
-def _entry_view_items(entries: list[KnowledgeEntry]) -> list[dict[str, Any]]:
-    return _dedupe_view_items([{"label": _entry_phrase(entry), "details": []} for entry in entries])
+def _entry_view_items(entries: list[KnowledgeEntry], response_language: str = "pt-PT") -> list[dict[str, Any]]:
+    return _dedupe_view_items([{"label": _entry_phrase(entry, response_language), "details": []} for entry in entries])
 
 
-def _non_duplicated_fact_items(task, knowledge: list[KnowledgeEntry]) -> list[dict[str, Any]]:
+def _non_duplicated_fact_items(
+    task, knowledge: list[KnowledgeEntry], response_language: str = "pt-PT"
+) -> list[dict[str, Any]]:
     skipped_predicates = {
         "is_option",
         "price",
@@ -546,7 +647,7 @@ def _non_duplicated_fact_items(task, knowledge: list[KnowledgeEntry]) -> list[di
     if task.task_type == "generic_comparison":
         skipped_predicates |= {"battery", "camera_quality", "support_quality"}
     facts = [
-        {"label": _entry_phrase(entry), "details": []}
+        {"label": _entry_phrase(entry, response_language), "details": []}
         for entry in knowledge
         if entry.kind in {"fact", "claim", "opinion", "derived_insight"} and entry.predicate not in skipped_predicates
     ]
@@ -566,25 +667,46 @@ def _conflict_items(knowledge: list[KnowledgeEntry]) -> list[dict[str, Any]]:
     return items
 
 
-def _prioritized_unknowns(task, knowledge: list[KnowledgeEntry], reasoning: TaskReasoningState) -> list[str]:
-    unknowns = infer_unknowns(task, knowledge) or reasoning.uncertainties
+def _prioritized_unknowns(
+    task, knowledge: list[KnowledgeEntry], reasoning: TaskReasoningState, response_language: str = "pt-PT"
+) -> list[str]:
+    # Phase 7.7.2: the priority MARKERS below are matched by substring
+    # against the (now-localized) unknowns text via _priority_index, so
+    # they must be built in the SAME response_language or sorting silently
+    # degrades to an arbitrary order once infer_unknowns stopped always
+    # returning Portuguese text.
+    unknowns = infer_unknowns(task, knowledge, response_language) or reasoning.uncertainties
     if task.task_type == "generic_comparison":
         predicates = {entry.predicate: entry.value for entry in knowledge if entry.kind == "preference"}
-        ordered = ["critérios de decisão"]
+        camera_label = localize("task.quality.label.camera", response_language).lower()
+        battery_label = localize("task.quality.label.battery", response_language).lower()
+        support_label = localize("task.quality.label.support", response_language).lower()
+        price_label = localize("task.predicate_label.price_bare", response_language).lower()
+        ordered = [localize("task.unknown.decision_criteria", response_language)]
         if predicates.get("camera_priority") == "high":
-            ordered.append("câmara")
+            ordered.append(camera_label)
         if predicates.get("battery_priority") == "high":
-            ordered.append("autonomia")
+            ordered.append(battery_label)
         if predicates.get("support_priority") == "high":
-            ordered.append("suporte")
+            ordered.append(support_label)
         if predicates.get("price_priority") == "high":
-            ordered.append("preço")
-        ordered.extend(["preço", "câmara", "autonomia", "suporte"])
+            ordered.append(price_label)
+        ordered.extend([price_label, camera_label, battery_label, support_label])
         priority = tuple(_dedupe(ordered))
     elif task.task_type == "plan_trip":
-        priority = ("tipo de destino", "datas", "duração", "orçamento", "ritmo", "alojamento", "transportes")
+        priority = tuple(
+            localize(key, response_language)
+            for key in (
+                "task.unknown.destination_type",
+                "task.unknown.dates_or_duration",
+                "task.unknown.budget",
+                "task.unknown.travel_pace",
+                "task.unknown.accommodation",
+                "task.unknown.transport",
+            )
+        )
     else:
-        priority = ("próximo passo",)
+        priority = (localize("task.unknown.next_concrete_step", response_language),)
     return sorted(_dedupe(unknowns), key=lambda item: _priority_index(item, priority))
 
 
@@ -596,14 +718,16 @@ def _priority_index(item: str, priority: tuple[str, ...]) -> int:
     return len(priority)
 
 
-def _next_step_label(task, knowledge: list[KnowledgeEntry], reasoning: TaskReasoningState) -> str:
-    unknowns = _prioritized_unknowns(task, knowledge, reasoning)
+def _next_step_label(
+    task, knowledge: list[KnowledgeEntry], reasoning: TaskReasoningState, response_language: str = "pt-PT"
+) -> str:
+    unknowns = _prioritized_unknowns(task, knowledge, reasoning, response_language)
     if unknowns:
-        return "Fechar " + _join_pt(unknowns[:2])
+        return localize("task.next_step.close", response_language, gaps=_join_pt(unknowns[:2], response_language))
     if task.task_type == "plan_trip" and reasoning.stage == "plan":
-        return "Organizar alojamento, transportes, itinerário e custos"
+        return localize("task.next_step.organize_trip", response_language)
     if reasoning.current_recommendation:
-        return "Confirmar os pontos em aberto antes de decidir"
+        return localize("task.next_step.confirm_before_deciding", response_language)
     return ""
 
 
@@ -613,7 +737,13 @@ def _plan_travel_dialogue(
     reasoning: TaskReasoningState,
     delta: list[KnowledgeEntry],
     message: str,
+    response_language: str = "pt-PT",
 ) -> TaskDialoguePlan:
+    # Phase 7.7.1 (section 3/4): the SAME extracted semantic values
+    # (destination, date_range, budget, travel_style, flight_constraint --
+    # all canonical, never translated) now render through localize()
+    # instead of hardcoded Portuguese sentence templates. The branching
+    # logic itself (which state the dialogue is in) is completely unchanged.
     predicates = {entry.predicate for entry in knowledge}
     delta_predicates = {entry.predicate for entry in delta}
     stage = infer_task_stage(task, knowledge)
@@ -627,24 +757,28 @@ def _plan_travel_dialogue(
 
     if stage == "plan":
         if {"destination", "date_range"}.intersection(delta_predicates):
-            ack = f"Ótimo. Já temos {destination}"
+            ack = localize("task.travel.great_have_destination", response_language, destination=destination)
             if date_range:
-                ack += f" e as datas, {date_range}"
+                ack += localize("task.travel.and_dates", response_language, date_range=date_range)
             ack += "."
             return TaskDialoguePlan(
                 acknowledgement=ack,
-                implication="Agora faz sentido organizar alojamento, transportes, itinerário e orçamento.",
-                next_question="Por onde queres começar?",
+                implication=localize("task.travel.now_organize", response_language),
+                next_question=localize("task.travel.where_to_start", response_language),
             )
         if "budget_max" in delta_predicates:
-            scope = " para alojamento, transportes, alimentação e atividades, sem contar os voos" if contains_any_phrase(normalized, ("sem contar os voos", "sem voos")) else ""
+            scope = (
+                localize("task.travel.budget_scope_excl_flights", response_language)
+                if contains_any_phrase(normalized, ("sem contar os voos", "sem voos"))
+                else ""
+            )
             return TaskDialoguePlan(
-                acknowledgement=f"Ficamos então com até {budget} €{scope}.",
-                next_step="O próximo passo mais útil é perceber o tipo de alojamento e a zona onde faz sentido ficar.",
+                acknowledgement=localize("task.travel.budget_set", response_language, budget=budget, scope=scope),
+                next_step=localize("task.travel.next_step_accommodation_type", response_language),
             )
         return TaskDialoguePlan(
-            acknowledgement="Temos destino e datas definidos.",
-            next_step="Agora precisamos de organizar alojamento, transportes, itinerário e orçamento.",
+            acknowledgement=localize("task.travel.dest_dates_set", response_language),
+            next_step=localize("task.travel.now_organize_full", response_language),
         )
 
     if {"duration", "budget_max"}.intersection(delta_predicates):
@@ -652,36 +786,36 @@ def _plan_travel_dialogue(
         if duration:
             known.append(duration)
         if budget:
-            known.append(f"até {budget} €")
+            known.append(localize("task.travel.until_budget", response_language, budget=budget))
         return TaskDialoguePlan(
-            acknowledgement=f"Ótimo, já temos {_join_pt(known)}.",
-            implication="Falta-me perceber melhor o estilo da viagem." if "travel_style" not in predicates else "",
-            next_question=_travel_next_question(knowledge, reasoning),
+            acknowledgement=localize("task.travel.great_have", response_language, known=_join_pt(known, response_language)),
+            implication=localize("task.travel.missing_travel_style", response_language) if "travel_style" not in predicates else "",
+            next_question=_travel_next_question(knowledge, reasoning, response_language),
         )
     if "travel_style" in delta_predicates:
         return TaskDialoguePlan(
-            acknowledgement=f"Então procuramos {travel_style}.",
-            next_question=_travel_next_question(knowledge, reasoning),
+            acknowledgement=localize("task.travel.looking_for_style", response_language, travel_style=travel_style),
+            next_question=_travel_next_question(knowledge, reasoning, response_language),
         )
     if "flight_constraint" in delta_predicates:
-        summary = _travel_basis_summary(duration, budget, travel_style, flight_constraint)
+        summary = _travel_basis_summary(duration, budget, travel_style, flight_constraint, response_language)
         return TaskDialoguePlan(
-            acknowledgement=f"Perfeito. {summary}.",
-            next_step="Já consigo começar a procurar destinos adequados.",
+            acknowledgement=localize("task.travel.perfect_summary", response_language, summary=summary),
+            next_step=localize("task.travel.can_search_destinations", response_language),
         )
     if not delta:
         if destination and "travel_style" not in predicates:
             return TaskDialoguePlan(
-                acknowledgement="Acho que ainda me falta perceber como gostas de viajar.",
-                next_question=_travel_next_question(knowledge, reasoning),
+                acknowledgement=localize("task.travel.missing_travel_preference", response_language),
+                next_question=_travel_next_question(knowledge, reasoning, response_language),
             )
         return TaskDialoguePlan(
-            acknowledgement="Claro.",
-            next_question=_travel_next_question(knowledge, reasoning),
+            acknowledgement=localize("task.travel.sure", response_language),
+            next_question=_travel_next_question(knowledge, reasoning, response_language),
         )
     return TaskDialoguePlan(
-        acknowledgement="Certo, isso já ajuda.",
-        next_question=_travel_next_question(knowledge, reasoning),
+        acknowledgement=localize("task.travel.right_that_helps", response_language),
+        next_question=_travel_next_question(knowledge, reasoning, response_language),
     )
 
 
@@ -690,7 +824,11 @@ def _plan_comparison_dialogue(
     knowledge: list[KnowledgeEntry],
     reasoning: TaskReasoningState,
     delta: list[KnowledgeEntry],
+    response_language: str = "pt-PT",
 ) -> TaskDialoguePlan:
+    # Phase 7.7.2 (section 2/3): canonical values (option names, budget
+    # numbers) unchanged; only the Echo-authored sentence scaffolding
+    # localizes. Branching logic itself untouched.
     options = _subjects_with_kind(knowledge, "option")
     delta_predicates = {entry.predicate for entry in delta}
     budget = _latest_value(knowledge, "current_task", "budget_max")
@@ -698,46 +836,48 @@ def _plan_comparison_dialogue(
     if not delta:
         if options:
             return TaskDialoguePlan(
-                acknowledgement=f"Certo. Temos a comparação entre {_join_pt(options)} ativa.",
-                next_question=_comparison_next_question(task, knowledge, reasoning),
+                acknowledgement=localize(
+                    "task.comparison.active", response_language, options=_join_pt(options, response_language)
+                ),
+                next_question=_comparison_next_question(task, knowledge, reasoning, response_language),
             )
-        return TaskDialoguePlan(next_question="Certo. Que opções queres comparar?")
+        return TaskDialoguePlan(next_question=localize("task.comparison.which_options", response_language))
 
     if "budget_max" in delta_predicates and "battery_priority" in delta_predicates:
         return TaskDialoguePlan(
-            acknowledgement=f"Isso muda a comparação. O limite passa para {budget} € e a bateria passa a pesar menos.",
-            implication=_comparison_budget_implication(knowledge, budget),
-            recommendation=_comparison_recommendation_sentence(reasoning),
-            uncertainty=_comparison_uncertainty_sentence(reasoning),
+            acknowledgement=localize("task.comparison.budget_and_battery_change", response_language, budget=budget),
+            implication=_comparison_budget_implication(knowledge, budget, response_language),
+            recommendation=_comparison_recommendation_sentence(reasoning, response_language),
+            uncertainty=_comparison_uncertainty_sentence(reasoning, response_language),
         )
     if "budget_max" in delta_predicates:
         return TaskDialoguePlan(
-            acknowledgement=f"Perfeito. Fica definido um limite de {budget} €.",
-            implication=_comparison_budget_implication(knowledge, budget),
-            next_question=_comparison_next_question(task, knowledge, reasoning),
+            acknowledgement=localize("task.comparison.budget_set", response_language, budget=budget),
+            implication=_comparison_budget_implication(knowledge, budget, response_language),
+            next_question=_comparison_next_question(task, knowledge, reasoning, response_language),
         )
     if {"camera_priority", "battery_priority", "support_priority"}.intersection(delta_predicates):
         return TaskDialoguePlan(
-            acknowledgement=_comparison_preference_ack(delta),
-            implication=_comparison_current_implication(knowledge, reasoning),
-            next_question=_comparison_next_question(task, knowledge, reasoning),
+            acknowledgement=_comparison_preference_ack(delta, response_language),
+            implication=_comparison_current_implication(knowledge, reasoning, response_language),
+            next_question=_comparison_next_question(task, knowledge, reasoning, response_language),
         )
     if "price" in delta_predicates:
         return TaskDialoguePlan(
-            acknowledgement=_comparison_prices_ack(knowledge),
-            implication=_comparison_budget_implication(knowledge, budget),
-            next_question=_comparison_next_question(task, knowledge, reasoning),
+            acknowledgement=_comparison_prices_ack(knowledge, response_language),
+            implication=_comparison_budget_implication(knowledge, budget, response_language),
+            next_question=_comparison_next_question(task, knowledge, reasoning, response_language),
         )
     if {"camera_quality", "battery", "support_quality"}.intersection(delta_predicates):
         return TaskDialoguePlan(
-            acknowledgement=_comparison_tradeoff_ack(delta),
-            recommendation=_comparison_recommendation_sentence(reasoning),
-            uncertainty=_comparison_uncertainty_sentence(reasoning),
-            next_question=_comparison_next_question(task, knowledge, reasoning),
+            acknowledgement=_comparison_tradeoff_ack(delta, response_language),
+            recommendation=_comparison_recommendation_sentence(reasoning, response_language),
+            uncertainty=_comparison_uncertainty_sentence(reasoning, response_language),
+            next_question=_comparison_next_question(task, knowledge, reasoning, response_language),
         )
     return TaskDialoguePlan(
-        acknowledgement="Certo, isso fica como contexto da comparação.",
-        next_question=_comparison_next_question(task, knowledge, reasoning),
+        acknowledgement=localize("task.comparison.default_ack", response_language),
+        next_question=_comparison_next_question(task, knowledge, reasoning, response_language),
     )
 
 
@@ -746,75 +886,101 @@ def _plan_generic_dialogue(
     knowledge: list[KnowledgeEntry],
     reasoning: TaskReasoningState,
     delta: list[KnowledgeEntry],
+    response_language: str = "pt-PT",
 ) -> TaskDialoguePlan:
     if delta:
-        return TaskDialoguePlan(acknowledgement="Certo, isso já ajuda.", next_question=_generic_next_question(reasoning))
-    return TaskDialoguePlan(acknowledgement="Certo.", next_question=_generic_next_question(reasoning))
+        return TaskDialoguePlan(
+            acknowledgement=localize("task.generic.that_helps", response_language),
+            next_question=_generic_next_question(reasoning, response_language),
+        )
+    return TaskDialoguePlan(
+        acknowledgement=localize("task.generic.sure", response_language),
+        next_question=_generic_next_question(reasoning, response_language),
+    )
 
 
-def _fallback_task_dialogue(task, knowledge: list[KnowledgeEntry], reasoning: TaskReasoningState) -> str:
+def _fallback_task_dialogue(
+    task, knowledge: list[KnowledgeEntry], reasoning: TaskReasoningState, response_language: str = "pt-PT"
+) -> str:
     if task.task_type == "plan_trip":
-        return _travel_next_question(knowledge, reasoning)
+        return _travel_next_question(knowledge, reasoning, response_language)
     if task.task_type == "generic_comparison":
-        return _comparison_next_question(task, knowledge, reasoning) or "Certo. Continuamos a comparação por partes."
-    return _generic_next_question(reasoning) or "Certo. Continuamos por partes."
+        return _comparison_next_question(task, knowledge, reasoning) or localize(
+            "task.comparison.continue_parts", response_language
+        )
+    return _generic_next_question(reasoning, response_language) or localize(
+        "task.generic.continue_parts", response_language
+    )
 
 
-def _travel_next_question(knowledge: list[KnowledgeEntry], reasoning: TaskReasoningState) -> str:
+def _travel_next_question(
+    knowledge: list[KnowledgeEntry], reasoning: TaskReasoningState, response_language: str = "pt-PT"
+) -> str:
     predicates = {entry.predicate for entry in knowledge}
     stage = infer_task_stage(type("Task", (), {"task_type": "plan_trip"})(), knowledge)
     if stage == "plan":
-        return "Por onde queres começar?"
+        return localize("task.travel.where_to_start", response_language)
     if "travel_style" not in predicates:
-        return "Procuras mais descanso, conhecer sítios novos ou um equilíbrio para descansar e explorar?"
+        return localize("task.travel.q.style", response_language)
     if "duration" not in predicates and "date_range" not in predicates:
-        return "Quantos dias tens para a viagem?"
+        return localize("task.travel.q.days", response_language)
     if "budget_max" not in predicates:
-        return "Tens algum limite de orçamento?"
+        return localize("task.travel.q.budget", response_language)
     if "flight_constraint" not in predicates:
-        return "Tens alguma limitação importante em relação à duração dos voos?"
+        return localize("task.travel.q.flight_constraint", response_language)
     return ""
 
 
-def _travel_basis_summary(duration: str, budget: str, travel_style: str, flight_constraint: str) -> str:
+def _travel_basis_summary(
+    duration: str, budget: str, travel_style: str, flight_constraint: str, response_language: str = "pt-PT"
+) -> str:
     parts = []
     if duration:
         parts.append(duration)
     if budget:
-        parts.append(f"até {budget} €")
+        parts.append(localize("task.travel.until_budget", response_language, budget=budget))
     if travel_style:
         parts.append(travel_style)
     if flight_constraint:
-        parts.append("preferência por voos curtos")
-    return "Temos " + _join_pt(parts) if parts else "Temos uma base inicial"
+        parts.append(localize("task.travel.basis_flight_pref", response_language))
+    if parts:
+        return localize("task.travel.basis_have", response_language, parts=_join_pt(parts, response_language))
+    return localize("task.travel.basis_initial", response_language)
 
 
-def _comparison_next_question(task, knowledge: list[KnowledgeEntry], reasoning: TaskReasoningState) -> str:
-    unknowns = infer_unknowns(task, knowledge)
+def _comparison_next_question(
+    task, knowledge: list[KnowledgeEntry], reasoning: TaskReasoningState, response_language: str = "pt-PT"
+) -> str:
+    # Phase 7.7.2: infer_unknowns() now returns response_language-rendered
+    # text -- classification below checks BOTH the Portuguese AND English
+    # forms of each category, since matching only the Portuguese substring
+    # (as before) would silently stop recognizing the category once the
+    # text itself is English, falling through to the generic question.
+    unknowns = infer_unknowns(task, knowledge, response_language)
     if not unknowns:
         return ""
     first = unknowns[0]
     normalized = normalize_for_matching(first)
-    if "criterios" in normalized or "critérios" in normalized:
-        return "Que fator pesa mais para ti nesta escolha?"
-    if normalized.startswith("preco") or normalized.startswith("preço"):
-        return f"Sabes o {first}?"
-    if normalized.startswith("camara") or normalized.startswith("câmara"):
-        return f"Falta perceber a {first}. Tens alguma referência?"
-    if normalized.startswith("autonomia"):
-        return f"Falta perceber a {first}. Isso é decisivo para ti?"
-    if "suporte" in normalized:
-        return f"Falta comparar o {first}."
-    return f"Falta perceber {first}."
+    if any(marker in normalized for marker in ("criterios", "critérios", "criteria")):
+        return localize("task.comparison.q.criteria", response_language)
+    if normalized.startswith(("preco", "preço", "price")):
+        return localize("task.comparison.q.know_value", response_language, value=first)
+    if normalized.startswith(("camara", "câmara", "camera")):
+        return localize("task.comparison.q.missing_reference", response_language, value=first)
+    if normalized.startswith(("autonomia", "battery")):
+        return localize("task.comparison.q.missing_decisive", response_language, value=first)
+    if any(marker in normalized for marker in ("suporte", "support")):
+        return localize("task.comparison.q.missing_compare", response_language, value=first)
+    return localize("task.comparison.q.missing_generic", response_language, value=first)
 
 
-def _generic_next_question(reasoning: TaskReasoningState) -> str:
+def _generic_next_question(reasoning: TaskReasoningState, response_language: str = "pt-PT") -> str:
     if reasoning.uncertainties:
-        return "Diz-me o próximo passo concreto quando quiseres."
+        return localize("task.generic.next_step_prompt", response_language)
     return ""
 
 
-def _comparison_budget_implication(knowledge: list[KnowledgeEntry], budget: str) -> str:
+def _comparison_budget_implication(knowledge: list[KnowledgeEntry], budget: str, response_language: str = "pt-PT") -> str:
     if not budget:
         return ""
     try:
@@ -834,84 +1000,118 @@ def _comparison_budget_implication(knowledge: list[KnowledgeEntry], budget: str)
         if price_num <= budget_num:
             inside.append(option)
         else:
-            outside.append(f"{option} fica {int(price_num - budget_num)} € acima")
+            outside.append(
+                localize("task.comparison.budget_over", response_language, option=option, amount=int(price_num - budget_num))
+            )
+    inside_key = "task.comparison.budget_inside_plural" if len(inside) > 1 else "task.comparison.budget_inside_singular"
+    inside_phrase = (
+        localize(inside_key, response_language, options=_join_pt(inside, response_language), option=_join_pt(inside, response_language))
+        if inside
+        else ""
+    )
     if inside and outside:
-        verb = "ficam" if len(inside) > 1 else "fica"
-        return f"{_join_pt(inside)} {verb} dentro do limite; {_join_pt(outside)}."
+        return f"{inside_phrase}; {_join_pt(outside, response_language)}."
     if inside:
-        verb = "ficam" if len(inside) > 1 else "fica"
-        return f"{_join_pt(inside)} {verb} dentro do limite."
+        return f"{inside_phrase}."
     if outside:
-        return _join_pt(outside) + "."
+        return _join_pt(outside, response_language) + "."
     return ""
 
 
-def _comparison_preference_ack(delta: list[KnowledgeEntry]) -> str:
+def _comparison_preference_ack(delta: list[KnowledgeEntry], response_language: str = "pt-PT") -> str:
     predicates = {entry.predicate for entry in delta}
     if "camera_priority" in predicates and "battery_priority" in predicates:
-        return "Percebi: a câmara pesa mais, e a bateria fica como fator secundário."
+        return localize("task.comparison.preference_camera_and_battery", response_language)
     if "camera_priority" in predicates:
-        return "Percebi: a câmara passa a pesar mais na decisão."
+        return localize("task.comparison.preference_camera", response_language)
     if "battery_priority" in predicates:
         value = _latest_delta_value(delta, "battery_priority")
         if value == "low":
-            return "Percebi: a bateria passa a pesar menos na decisão."
-        return "Percebi: a bateria também conta na decisão."
+            return localize("task.comparison.preference_battery_low", response_language)
+        return localize("task.comparison.preference_battery_other", response_language)
     if "support_priority" in predicates:
-        return "Percebi: suporte passa a pesar mais do que escolher apenas pelo preço."
-    return "Percebi a prioridade."
+        return localize("task.comparison.preference_support", response_language)
+    return localize("task.comparison.preference_generic", response_language)
 
 
-def _comparison_current_implication(knowledge: list[KnowledgeEntry], reasoning: TaskReasoningState) -> str:
+def _comparison_current_implication(
+    knowledge: list[KnowledgeEntry], reasoning: TaskReasoningState, response_language: str = "pt-PT"
+) -> str:
     if reasoning.current_recommendation:
-        return f"Com os dados atuais, {reasoning.current_recommendation} começa a ganhar força."
+        return localize(
+            "task.comparison.gaining_ground", response_language, recommendation=reasoning.current_recommendation
+        )
     options = _subjects_with_kind(knowledge, "option")
     if options:
-        return "Agora precisamos de comparar essa prioridade nas opções."
+        return localize("task.comparison.need_compare_priority", response_language)
     return ""
 
 
-def _comparison_prices_ack(knowledge: list[KnowledgeEntry]) -> str:
+def _comparison_prices_ack(knowledge: list[KnowledgeEntry], response_language: str = "pt-PT") -> str:
     prices = []
     for option in _subjects_with_kind(knowledge, "option"):
         price = _latest_value(knowledge, option, "price")
         if price:
             prices.append((option, int(price) if price.isdigit() else price))
     if not prices:
-        return "Certo, já temos mais dados de preço."
+        return localize("task.comparison.more_price_data", response_language)
     numeric = [(option, price) for option, price in prices if isinstance(price, int)]
     if len(numeric) >= 2:
         ranked = sorted(numeric, key=lambda item: item[1])
-        return "Já temos os preços: " + ", ".join(f"{option} {price} €" for option, price in ranked) + "."
-    return "Já temos o preço: " + ", ".join(f"{option} {price} €" for option, price in prices) + "."
+        return localize(
+            "task.comparison.prices_known_plural",
+            response_language,
+            list=", ".join(f"{option} {price} €" for option, price in ranked),
+        )
+    return localize(
+        "task.comparison.prices_known_singular",
+        response_language,
+        list=", ".join(f"{option} {price} €" for option, price in prices),
+    )
 
 
-def _comparison_tradeoff_ack(delta: list[KnowledgeEntry]) -> str:
+def _comparison_tradeoff_ack(delta: list[KnowledgeEntry], response_language: str = "pt-PT") -> str:
     quality = [entry for entry in delta if entry.predicate in {"camera_quality", "battery", "support_quality"}]
     if len(quality) >= 2:
-        return "Boa, já temos um tradeoff mais claro: " + _join_pt([_quality_delta_phrase(entry) for entry in quality[:3]]) + "."
+        return localize(
+            "task.comparison.tradeoff_clearer",
+            response_language,
+            items=_join_pt([_quality_delta_phrase(entry, response_language) for entry in quality[:3]], response_language),
+        )
     if quality:
-        return "Certo. " + _entry_phrase(quality[0]).capitalize() + "."
-    return "Certo, isso ajuda a comparar melhor."
+        prefix = localize("task.generic.sure", response_language)
+        return f"{prefix} {_entry_phrase(quality[0], response_language).capitalize()}."
+    return localize("task.comparison.tradeoff_helps", response_language)
 
 
-def _quality_delta_phrase(entry: KnowledgeEntry) -> str:
+def _quality_delta_phrase(entry: KnowledgeEntry, response_language: str = "pt-PT") -> str:
     if entry.predicate == "support_quality" and entry.value == "limited":
-        return f"{entry.subject}: suporte limitado"
-    return _short_detail(entry).replace("+ ", f"{entry.subject}: ")
+        return f"{entry.subject}: {localize('task.quality.support_limited', response_language).lower()}"
+    return _short_detail(entry, response_language).replace("+ ", f"{entry.subject}: ")
 
 
-def _comparison_recommendation_sentence(reasoning: TaskReasoningState) -> str:
+def _comparison_recommendation_sentence(reasoning: TaskReasoningState, response_language: str = "pt-PT") -> str:
     if not reasoning.current_recommendation:
         return ""
-    reasons = "; ".join(reasoning.reasons[:2]) if reasoning.reasons else "encaixa melhor nos dados atuais"
-    return f"Neste momento, {reasoning.current_recommendation} parece mais forte, porque {reasons}."
+    reasons = (
+        "; ".join(reasoning.reasons[:2])
+        if reasoning.reasons
+        else localize("task.recommendation.default_reason", response_language)
+    )
+    return localize(
+        "task.comparison.recommendation_gaining",
+        response_language,
+        recommendation=reasoning.current_recommendation,
+        reasons=reasons,
+    )
 
 
-def _comparison_uncertainty_sentence(reasoning: TaskReasoningState) -> str:
+def _comparison_uncertainty_sentence(reasoning: TaskReasoningState, response_language: str = "pt-PT") -> str:
     if not reasoning.current_recommendation or not reasoning.uncertainties:
         return ""
-    return "Ainda é provisório: falta " + _join_pt(reasoning.uncertainties[:2]) + "."
+    return localize(
+        "task.comparison.still_provisional", response_language, gaps=_join_pt(reasoning.uncertainties[:2], response_language)
+    )
 
 
 def _latest_delta_value(delta: list[KnowledgeEntry], predicate: str) -> str:
@@ -921,28 +1121,36 @@ def _latest_delta_value(delta: list[KnowledgeEntry], predicate: str) -> str:
     return ""
 
 
-def _short_detail(entry: KnowledgeEntry) -> str:
+def _short_detail(entry: KnowledgeEntry, response_language: str = "pt-PT") -> str:
     if entry.predicate == "battery":
-        return "Vantagem de autonomia" if entry.value == "better" else f"Autonomia: {entry.value}"
+        return (
+            localize("task.quality.battery_advantage", response_language)
+            if entry.value == "better"
+            else localize("task.quality.battery_value", response_language, value=entry.value)
+        )
     if entry.predicate == "camera_quality":
         if entry.value == "better":
-            return "Parece ter vantagem na câmara"
+            return localize("task.quality.camera_better", response_language)
         if entry.value == "good":
-            return "Boa prestação de câmara"
+            return localize("task.quality.camera_good", response_language)
         if entry.value == "mixed":
-            return "Evidência mista sobre a câmara"
-        return "Ainda há pouca evidência sobre a câmara"
+            return localize("task.quality.camera_mixed", response_language)
+        return localize("task.quality.camera_little_evidence", response_language)
     if entry.predicate == "support_quality":
-        return "Melhor suporte" if entry.value == "better" else "Suporte limitado"
-    return _entry_phrase(entry)
+        return (
+            localize("task.quality.support_better", response_language)
+            if entry.value == "better"
+            else localize("task.quality.support_limited", response_language)
+        )
+    return _entry_phrase(entry, response_language)
 
 
-def _quality_view_details(knowledge: list[KnowledgeEntry], option: str) -> list[str]:
+def _quality_view_details(knowledge: list[KnowledgeEntry], option: str, response_language: str = "pt-PT") -> list[str]:
     details: list[str] = []
-    for predicate, label in (
-        ("camera_quality", "Câmara"),
-        ("battery", "Autonomia"),
-        ("support_quality", "Suporte"),
+    for predicate, label_key in (
+        ("camera_quality", "task.quality.label.camera"),
+        ("battery", "task.quality.label.battery"),
+        ("support_quality", "task.quality.label.support"),
     ):
         entries = [
             entry
@@ -951,31 +1159,33 @@ def _quality_view_details(knowledge: list[KnowledgeEntry], option: str) -> list[
             and entry.predicate == predicate
             and entry.status == "active"
         ]
-        summary = _quality_summary_label(entries, label)
+        summary = _quality_summary_label(entries, localize(label_key, response_language), response_language)
         if summary:
             details.append(summary)
     return details
 
 
-def _quality_summary_label(entries: list[KnowledgeEntry], label: str) -> str:
+def _quality_summary_label(entries: list[KnowledgeEntry], label: str, response_language: str = "pt-PT") -> str:
     if not entries:
         return ""
     values = {normalize_for_matching(entry.value) for entry in entries}
     strengths = {str((entry.metadata or {}).get("source_strength_for_claim") or "") for entry in entries}
     if "weak" in strengths and not {"strong", "useful"}.intersection(strengths):
-        return f"{label}: sinais positivos, ainda com evidência limitada."
+        return localize("task.quality.summary.weak_positive", response_language, label=label)
     if "better" in values:
-        return f"{label}: parece haver vantagem."
+        return localize("task.quality.summary.advantage", response_language, label=label)
     if "good" in values and "mixed" in values:
-        return f"{label}: resultados positivos, mas com alguma incerteza entre fontes."
+        return localize("task.quality.summary.good_mixed", response_language, label=label)
     if "good" in values:
-        return f"{label}: boa prestação."
+        return localize("task.quality.summary.good", response_language, label=label)
     if "mixed" in values:
-        return f"{label}: evidência mista."
+        return localize("task.quality.summary.mixed", response_language, label=label)
     return ""
 
 
-def _quality_score_and_reason(knowledge: list[KnowledgeEntry], option: str, predicate: str, label: str) -> tuple[float, str]:
+def _quality_score_and_reason(
+    knowledge: list[KnowledgeEntry], option: str, predicate: str, label: str, response_language: str = "pt-PT"
+) -> tuple[float, str]:
     entries = [
         entry
         for entry in knowledge
@@ -991,12 +1201,12 @@ def _quality_score_and_reason(knowledge: list[KnowledgeEntry], option: str, pred
     best_confidence = max(float(entry.confidence or 0.0) for entry in entries)
     strengths = {str((entry.metadata or {}).get("source_strength_for_claim") or "") for entry in entries}
     if "strong" in strengths:
-        return 1.0, f"tem vantagem de {label} em fonte técnica forte"
+        return 1.0, localize("task.quality.reason.strong", response_language, label=label)
     if "useful" in strengths:
-        return 0.7, f"tem sinais úteis de vantagem em {label}"
+        return 0.7, localize("task.quality.reason.useful", response_language, label=label)
     if "weak" in strengths or best_confidence < 0.55:
-        return 0.25, f"tem sinais fracos de vantagem em {label}"
-    return 0.5, f"tem sinais de vantagem em {label}"
+        return 0.25, localize("task.quality.reason.weak", response_language, label=label)
+    return 0.5, localize("task.quality.reason.some", response_language, label=label)
 
 
 def _dedupe_view_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1032,42 +1242,54 @@ def task_option_titles(work_session, task) -> list[str]:
     return _task_option_titles(work_session, task)
 
 
-def infer_unknowns(task, knowledge: list[KnowledgeEntry]) -> list[str]:
+def infer_unknowns(task, knowledge: list[KnowledgeEntry], response_language: str = "pt-PT") -> list[str]:
+    # Phase 7.7.2: found via a real mid-comparison scenario run -- this
+    # feeds EVERY travel/comparison/generic dialogue and query formatter
+    # above, so leaving it hardcoded silently reintroduced Portuguese
+    # fragments into sentences that were otherwise already localized.
+    # option (canonical, user-provided) is never translated.
     active = _active_entries(knowledge)
     predicates = {entry.predicate for entry in active}
     if task.task_type == "generic_comparison":
         options = _subjects_with_kind(active, "option")
         unknowns: list[str] = []
         if len(options) < 2:
-            unknowns.append("opções a comparar")
+            unknowns.append(localize("task.reason.options_to_compare", response_language))
         has_price = {entry.subject for entry in active if entry.predicate == "price"}
         has_battery = {entry.subject for entry in active if entry.predicate == "battery"}
         has_camera = {entry.subject for entry in active if entry.predicate == "camera_quality"}
         for option in options:
             if option not in has_price:
-                unknowns.append(f"preço de {option}")
+                unknowns.append(localize("task.unknown.price_of", response_language, option=option))
             if "camera_priority" in predicates and option not in has_camera:
-                unknowns.append(f"câmara de {option}")
+                unknowns.append(localize("task.unknown.camera_of", response_language, option=option))
             if "battery_priority" in predicates and option not in has_battery:
-                unknowns.append(f"autonomia de {option}")
+                unknowns.append(localize("task.unknown.battery_of", response_language, option=option))
         if not any(entry.kind == "criterion" for entry in active) and not any(entry.kind == "preference" for entry in active):
-            unknowns.append("critérios de decisão")
+            unknowns.append(localize("task.unknown.decision_criteria", response_language))
         return _dedupe(unknowns)
     if task.task_type == "plan_trip":
         unknowns = []
         stage = infer_task_stage(task, active)
         if stage == "explore" and "destination" not in predicates:
-            unknowns.append("tipo de destino")
+            unknowns.append(localize("task.unknown.destination_type", response_language))
         if "date_range" not in predicates and "duration" not in predicates:
-            unknowns.append("datas ou duração")
+            unknowns.append(localize("task.unknown.dates_or_duration", response_language))
         if "budget_max" not in predicates:
-            unknowns.append("orçamento")
+            unknowns.append(localize("task.unknown.budget", response_language))
         if "travel_style" not in predicates:
-            unknowns.append("ritmo da viagem")
+            unknowns.append(localize("task.unknown.travel_pace", response_language))
         if stage == "plan":
-            unknowns.extend(["alojamento", "transportes", "itinerário", "custos"])
+            unknowns.extend(
+                [
+                    localize("task.unknown.accommodation", response_language),
+                    localize("task.unknown.transport", response_language),
+                    localize("task.unknown.itinerary", response_language),
+                    localize("task.unknown.costs", response_language),
+                ]
+            )
         return _dedupe(unknowns)
-    return ["próximo passo concreto"]
+    return [localize("task.unknown.next_concrete_step", response_language)]
 
 
 def infer_task_stage(task, knowledge: list[KnowledgeEntry]) -> str:
@@ -1303,23 +1525,23 @@ def _upsert_entry(
     return entry
 
 
-def _refresh_reasoning(work_session, task) -> TaskReasoningState:
+def _refresh_reasoning(work_session, task, response_language: str = "pt-PT") -> TaskReasoningState:
     knowledge = _active_entries(task_knowledge(work_session, task.id))
     state = task_reasoning(work_session, task.id)
     state.stage = infer_task_stage(task, knowledge)
     state.updated_at = datetime.now().astimezone().isoformat(timespec="seconds")
     state.stale = False
     if task.task_type == "generic_comparison":
-        _reason_comparison(state, knowledge)
+        _reason_comparison(state, knowledge, response_language)
     else:
         state.current_recommendation = ""
         state.recommendation_confidence = 0.0
         state.reasons = []
-        state.uncertainties = infer_unknowns(task, knowledge)
+        state.uncertainties = infer_unknowns(task, knowledge, response_language)
     return state
 
 
-def _reason_comparison(state: TaskReasoningState, knowledge: list[KnowledgeEntry]) -> None:
+def _reason_comparison(state: TaskReasoningState, knowledge: list[KnowledgeEntry], response_language: str = "pt-PT") -> None:
     options = _subjects_with_kind(knowledge, "option")
     budget = _latest_value(knowledge, "current_task", "budget_max")
     priorities = {
@@ -1328,6 +1550,9 @@ def _reason_comparison(state: TaskReasoningState, knowledge: list[KnowledgeEntry
         "support_quality": _latest_value(knowledge, "user", "support_priority"),
         "price": _latest_value(knowledge, "user", "price_priority"),
     }
+    camera_label = localize("task.quality.label.camera", response_language)
+    battery_label = localize("task.quality.label.battery", response_language)
+    support_label = localize("task.quality.label.support", response_language)
     scores = {option: 0.0 for option in options}
     reasons = {option: [] for option in options}
     for option in options:
@@ -1338,35 +1563,49 @@ def _reason_comparison(state: TaskReasoningState, knowledge: list[KnowledgeEntry
                 budget_num = float(budget)
                 if price_num <= budget_num:
                     scores[option] += 2.0
-                    reasons[option].append(f"fica dentro do orçamento ({int(price_num)} <= {int(budget_num)})")
+                    reasons[option].append(
+                        localize(
+                            "task.reason.within_budget", response_language, price=int(price_num), budget=int(budget_num)
+                        )
+                    )
                 else:
                     scores[option] -= 2.0
-                    reasons[option].append(f"passa o orçamento ({int(price_num)} > {int(budget_num)})")
+                    reasons[option].append(
+                        localize(
+                            "task.reason.over_budget", response_language, price=int(price_num), budget=int(budget_num)
+                        )
+                    )
             except ValueError:
                 pass
-        camera_score, camera_reason = _quality_score_and_reason(knowledge, option, "camera_quality", "câmara")
+        camera_score, camera_reason = _quality_score_and_reason(
+            knowledge, option, "camera_quality", camera_label, response_language
+        )
         if camera_score > 0:
             weight = 2.0 if priorities.get("camera_quality") == "high" else 1.0
             scores[option] += camera_score * weight
             reasons[option].append(camera_reason)
-        battery_score, battery_reason = _quality_score_and_reason(knowledge, option, "battery", "bateria")
+        battery_score, battery_reason = _quality_score_and_reason(
+            knowledge, option, "battery", battery_label, response_language
+        )
         if battery_score > 0:
             weight = 2.0 if priorities.get("battery") == "high" else (0.4 if priorities.get("battery") == "low" else 1.0)
             scores[option] += battery_score * weight
             reasons[option].append(battery_reason)
         support_quality = _latest_value(knowledge, option, "support_quality")
-        support_score, support_reason = _quality_score_and_reason(knowledge, option, "support_quality", "suporte")
+        support_score, support_reason = _quality_score_and_reason(
+            knowledge, option, "support_quality", support_label, response_language
+        )
         if support_score > 0:
             weight = 2.0 if priorities.get("support_quality") == "high" else 1.0
             scores[option] += support_score * weight
             reasons[option].append(support_reason)
         elif support_quality == "limited":
             scores[option] -= 0.8
-            reasons[option].append("tem suporte mais limitado")
+            reasons[option].append(localize("task.reason.limited_support", response_language))
     if not scores:
         state.current_recommendation = ""
         state.reasons = []
-        state.uncertainties = ["opções a comparar"]
+        state.uncertainties = [localize("task.reason.options_to_compare", response_language)]
         return
     ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
     blocking_unknown = _blocking_comparison_unknown(options, knowledge, priorities)
@@ -1378,7 +1617,9 @@ def _reason_comparison(state: TaskReasoningState, knowledge: list[KnowledgeEntry
         state.current_recommendation = ranked[0][0]
         state.recommendation_confidence = min(0.85, 0.45 + (ranked[0][1] - ranked[1][1]) / 6)
         state.reasons = reasons[ranked[0][0]][:3]
-    state.uncertainties = infer_unknowns(type("Task", (), {"task_type": "generic_comparison"})(), knowledge)
+    state.uncertainties = infer_unknowns(
+        type("Task", (), {"task_type": "generic_comparison"})(), knowledge, response_language
+    )
 
 
 def _blocking_comparison_unknown(options: list[str], knowledge: list[KnowledgeEntry], priorities: dict[str, str]) -> str:
@@ -1403,41 +1644,48 @@ def _blocking_comparison_unknown(options: list[str], knowledge: list[KnowledgeEn
     return ""
 
 
-def _format_known(task, knowledge: list[KnowledgeEntry]) -> str:
+def _format_known(task, knowledge: list[KnowledgeEntry], response_language: str = "pt-PT") -> str:
     if not knowledge:
-        return "Ainda estamos no início. Para já só sei que estamos a trabalhar nesta tarefa."
+        return localize("task.known.empty", response_language)
     stage = infer_task_stage(task, knowledge)
     lines = []
     if task.task_type == "generic_comparison":
         options = _subjects_with_kind(knowledge, "option")
         if options:
-            lines.append(f"Estamos a comparar {_join_pt(options)}.")
+            lines.append(localize("task.known.comparing", response_language, options=_join_pt(options, response_language)))
     elif task.task_type == "plan_trip":
-        lines.append("Até agora, a viagem está em modo de " + ("planeamento" if stage == "plan" else "descoberta") + ".")
+        mode_key = "task.known.mode_planning" if stage == "plan" else "task.known.mode_discovery"
+        lines.append(localize("task.known.travel_mode", response_language, mode=localize(mode_key, response_language)))
     else:
-        lines.append("Até agora, temos este contexto principal.")
+        lines.append(localize("task.known.generic_context", response_language))
     for entry in [e for e in knowledge if e.kind != "option"][:6]:
-        lines.append(_entry_phrase(entry) + ".")
+        lines.append(_entry_phrase(entry, response_language) + ".")
     return " ".join(lines)
 
 
-def _format_important(task, knowledge: list[KnowledgeEntry], reasoning: TaskReasoningState) -> str:
+def _format_important(
+    task, knowledge: list[KnowledgeEntry], reasoning: TaskReasoningState, response_language: str = "pt-PT"
+) -> str:
     if not knowledge:
-        return "O essencial é simples: ainda não temos dados suficientes para decidir bem."
+        return localize("task.important.empty", response_language)
     if task.task_type == "generic_comparison":
         parts: list[str] = []
         budget = _latest_value(knowledge, "current_task", "budget_max")
         if budget:
-            parts.append(f"o limite é {budget} €")
+            parts.append(localize("task.important.budget_limit", response_language, budget=budget))
         if reasoning.current_recommendation:
-            parts.append(f"{reasoning.current_recommendation} parece melhor neste momento")
+            parts.append(
+                localize(
+                    "task.important.recommendation_now", response_language, recommendation=reasoning.current_recommendation
+                )
+            )
         priorities = [entry for entry in knowledge if entry.kind == "preference"]
         if priorities:
-            parts.append(_entry_phrase(priorities[-1]))
-        unknowns = infer_unknowns(task, knowledge)
+            parts.append(_entry_phrase(priorities[-1], response_language))
+        unknowns = infer_unknowns(task, knowledge, response_language)
         if unknowns:
-            parts.append("a maior lacuna é " + unknowns[0])
-        return "O mais importante: " + "; ".join(parts[:4]) + "."
+            parts.append(localize("task.important.biggest_gap", response_language, gap=unknowns[0]))
+        return localize("task.important.comparison_header", response_language, parts="; ".join(parts[:4]))
     if task.task_type == "plan_trip":
         essentials = []
         for subject, predicate in (
@@ -1450,85 +1698,123 @@ def _format_important(task, knowledge: list[KnowledgeEntry], reasoning: TaskReas
         ):
             value = _latest_value(knowledge, subject, predicate)
             if value:
-                essentials.append(_entry_phrase(KnowledgeEntry("", "", "fact", subject, predicate, value, KnowledgeSource())))
-        unknowns = infer_unknowns(task, knowledge)
+                essentials.append(
+                    _entry_phrase(
+                        KnowledgeEntry("", "", "fact", subject, predicate, value, KnowledgeSource()), response_language
+                    )
+                )
+        unknowns = infer_unknowns(task, knowledge, response_language)
         if unknowns:
-            essentials.append("falta " + unknowns[0])
-        return "O essencial: " + "; ".join(essentials[:4]) + "."
-    return "O essencial: " + "; ".join(_entry_phrase(entry) for entry in knowledge[:3]) + "."
+            essentials.append(localize("task.important.travel_missing", response_language, gap=unknowns[0]))
+        return localize("task.important.header", response_language, parts="; ".join(essentials[:4]))
+    return localize(
+        "task.important.header",
+        response_language,
+        parts="; ".join(_entry_phrase(entry, response_language) for entry in knowledge[:3]),
+    )
 
 
-def _format_unknowns(task, knowledge: list[KnowledgeEntry]) -> str:
-    unknowns = infer_unknowns(task, knowledge)
+def _format_unknowns(task, knowledge: list[KnowledgeEntry], response_language: str = "pt-PT") -> str:
+    unknowns = infer_unknowns(task, knowledge, response_language)
     if not unknowns:
-        return "Neste momento não vejo nenhuma lacuna essencial. Podemos começar a decidir ou aprofundar um ponto específico."
-    return "Ainda falta perceber sobretudo " + _join_pt(unknowns[:4]) + "."
+        return localize("task.unknowns.none", response_language)
+    return localize("task.unknowns.missing", response_language, gaps=_join_pt(unknowns[:4], response_language))
 
 
-def _format_decisions(task, knowledge: list[KnowledgeEntry]) -> str:
+def _format_decisions(task, knowledge: list[KnowledgeEntry], response_language: str = "pt-PT") -> str:
     decisions = [entry for entry in knowledge if entry.kind == "decision"]
     if decisions:
-        return "Já há uma decisão registada: " + _join_pt([_entry_phrase(entry) for entry in decisions[:3]]) + "."
+        return localize(
+            "task.decisions.registered",
+            response_language,
+            decisions=_join_pt([_entry_phrase(entry, response_language) for entry in decisions[:3]], response_language),
+        )
     if task.task_type == "generic_comparison":
-        unknowns = infer_unknowns(task, knowledge)
+        unknowns = infer_unknowns(task, knowledge, response_language)
         if unknowns:
-            return "Ainda falta decidir a opção final. Antes disso, convém fechar " + _join_pt(unknowns[:2]) + "."
-        return "Falta decidir qual opção escolhes."
+            return localize(
+                "task.decisions.comparison_missing", response_language, gaps=_join_pt(unknowns[:2], response_language)
+            )
+        return localize("task.decisions.comparison_pending", response_language)
     if task.task_type == "plan_trip":
         stage = infer_task_stage(task, knowledge)
         if stage == "plan":
-            return "Ainda falta decidir alojamento, transportes, itinerário e custos."
-        return "Ainda falta decidir o destino ou o tipo de destino."
-    return "Ainda falta transformar isto numa decisão concreta."
+            return localize("task.decisions.travel_plan", response_language)
+        return localize("task.decisions.travel_destination", response_language)
+    return localize("task.decisions.generic", response_language)
 
 
-def _format_recommendation(reasoning: TaskReasoningState) -> str:
+def _format_recommendation(reasoning: TaskReasoningState, response_language: str = "pt-PT") -> str:
     if not reasoning.current_recommendation:
-        gaps = _join_pt(reasoning.uncertainties[:3]) if reasoning.uncertainties else "mais alguns dados"
-        return f"Ainda não escolheria uma opção com confiança. Falta-nos sobretudo {gaps}."
-    reasons = "; ".join(reasoning.reasons) if reasoning.reasons else "encaixa melhor nos dados atuais"
-    return f"Neste momento, escolheria {reasoning.current_recommendation}, de forma provisória, porque {reasons}. Isto pode mudar se mudares prioridades ou aparecerem dados novos."
+        gaps = (
+            _join_pt(reasoning.uncertainties[:3], response_language)
+            if reasoning.uncertainties
+            else localize("task.recommendation.more_data", response_language)
+        )
+        return localize("task.recommendation.no_confidence", response_language, gaps=gaps)
+    reasons = "; ".join(reasoning.reasons) if reasoning.reasons else localize("task.recommendation.default_reason", response_language)
+    return localize(
+        "task.recommendation.provisional",
+        response_language,
+        recommendation=reasoning.current_recommendation,
+        reasons=reasons,
+    )
 
 
-def _format_travel_recommendation(task, knowledge: list[KnowledgeEntry]) -> str:
-    unknowns = infer_unknowns(task, knowledge)
+def _format_travel_recommendation(task, knowledge: list[KnowledgeEntry], response_language: str = "pt-PT") -> str:
+    unknowns = infer_unknowns(task, knowledge, response_language)
     stage = infer_task_stage(task, knowledge)
     if stage == "explore" and unknowns:
-        return "Ainda não sugeria destinos com confiança. Falta perceber sobretudo " + _join_pt(unknowns[:2]) + "."
+        return localize("task.travel_rec.no_confidence", response_language, gaps=_join_pt(unknowns[:2], response_language))
     if unknowns:
-        return "Já dá para começar a planear, mas antes fechava " + _join_pt(unknowns[:2]) + "."
-    return "Já temos base para começar. Eu compararia alojamento, transportes, itinerário e custos antes de fechar o plano."
+        return localize(
+            "task.travel_rec.can_start_planning", response_language, gaps=_join_pt(unknowns[:2], response_language)
+        )
+    return localize("task.travel_rec.ready", response_language)
 
 
-def _format_why(reasoning: TaskReasoningState) -> str:
+def _format_why(reasoning: TaskReasoningState, response_language: str = "pt-PT") -> str:
     if not reasoning.current_recommendation:
-        return "Porque ainda não há dados suficientes para justificar uma escolha com segurança."
-    reasons = "; ".join(reasoning.reasons) if reasoning.reasons else "é a opção com melhor equilíbrio nos dados atuais"
-    return f"Porque {reasons}. A conclusão continua provisória."
+        return localize("task.why.no_data", response_language)
+    reasons = "; ".join(reasoning.reasons) if reasoning.reasons else localize("task.why.default_reason", response_language)
+    return localize("task.why.because", response_language, reasons=reasons)
 
 
-def _format_sources(knowledge: list[KnowledgeEntry], message: str) -> str:
+def _format_sources(knowledge: list[KnowledgeEntry], message: str, response_language: str = "pt-PT") -> str:
+    # Phase 7.7.2 (section 5/6): "Veio de.../It came from..." is Echo-
+    # authored and localizes; title/evidence/original_text are source-
+    # derived content and are NEVER translated -- only the fallback label
+    # ("web source") used when a fetched entry has no title at all is
+    # Echo-authored and localizes too.
     normalized = normalize_for_matching(message)
     matching = [entry for entry in knowledge if normalize_for_matching(entry.subject) in normalized or normalize_for_matching(entry.predicate) in normalized]
     if not matching:
         matching = knowledge[-3:]
     if not matching:
-        return "Ainda não tenho uma fonte concreta para isso."
+        return localize("task.sources.none", response_language)
     entry = matching[-1]
     if entry.source.source_type == "web":
-        title = str(entry.metadata.get("source_title") or entry.source.reference or "fonte web")
+        title = str(entry.metadata.get("source_title") or entry.source.reference or localize("task.sources.default_web_label", response_language))
         evidence = entry.source.original_text or entry.value
-        return f"Veio de {title}: “{evidence}”" + (f" ({entry.source.reference})." if entry.source.reference else ".")
-    return f"Veio do que me disseste: “{entry.source.original_text}”."
+        suffix = (
+            localize("task.sources.web_reference_suffix", response_language, reference=entry.source.reference)
+            if entry.source.reference
+            else "."
+        )
+        return localize("task.sources.from_web", response_language, title=title, evidence=evidence) + suffix
+    return localize("task.sources.from_user", response_language, text=entry.source.original_text)
 
 
-def _format_evidence_answer(task, knowledge: list[KnowledgeEntry], message: str) -> str:
+def _format_evidence_answer(task, knowledge: list[KnowledgeEntry], message: str, response_language: str = "pt-PT") -> str:
+    # Phase 7.7.2 (section 5/6): connective sentences/confidence phrasing
+    # localize; subject/option names (canonical, user-provided) are never
+    # translated.
     web_entries = [
         entry for entry in knowledge
         if entry.source.source_type == "web" and entry.status == "active"
     ]
     if not web_entries:
-        return "Ainda não tenho fontes suficientes para responder a isso com segurança."
+        return localize("task.evidence.no_sources", response_language)
 
     predicate = _predicate_from_evidence_question(message)
     options = _subjects_with_kind(knowledge, "option")
@@ -1546,22 +1832,32 @@ def _format_evidence_answer(task, knowledge: list[KnowledgeEntry], message: str)
         }
         missing = [option for option in options if option not in subjects_with_evidence]
         if missing:
-            known = _join_pt(sorted(subjects_with_evidence)) if subjects_with_evidence else "uma das opções"
-            return (
-                f"Não. Estas fontes ajudam a avaliar {known}, mas ainda não provam que seja melhor "
-                f"do que {_join_pt(missing[:2])}."
+            known = (
+                _join_pt(sorted(subjects_with_evidence), response_language)
+                if subjects_with_evidence
+                else localize("task.evidence.one_of_the_options", response_language)
+            )
+            return localize(
+                "task.evidence.comparative_no_proof",
+                response_language,
+                known=known,
+                missing=_join_pt(missing[:2], response_language),
             )
     if not scoped_entries:
-        target = _join_pt(subjects) if subjects else "esse ponto"
-        return f"Ainda não tenho evidência direta suficiente sobre {target}."
+        target = _join_pt(subjects, response_language) if subjects else localize("task.evidence.that_point", response_language)
+        return localize("task.evidence.no_direct_evidence", response_language, target=target)
 
     strong = [entry for entry in scoped_entries if _entry_evidence_strength(entry) == "strong"]
     useful = [entry for entry in scoped_entries if _entry_evidence_strength(entry) == "useful"]
     weak = [entry for entry in scoped_entries if _entry_evidence_strength(entry) == "weak"]
     positive = [entry for entry in scoped_entries if normalize_for_matching(entry.value) in {"good", "better", "boa", "bom", "superior", "melhor"}]
     mixed = [entry for entry in scoped_entries if normalize_for_matching(entry.value) == "mixed"]
-    target = _join_pt(subjects) if subjects else _join_pt(_dedupe([entry.subject for entry in scoped_entries])[:2])
-    criterion = _predicate_natural_label(predicate or scoped_entries[-1].predicate)
+    target = (
+        _join_pt(subjects, response_language)
+        if subjects
+        else _join_pt(_dedupe([entry.subject for entry in scoped_entries])[:2], response_language)
+    )
+    criterion = _predicate_natural_label(predicate or scoped_entries[-1].predicate, response_language)
 
     if _asks_sufficiency(message):
         if len(options) >= 2:
@@ -1571,23 +1867,25 @@ def _format_evidence_answer(task, knowledge: list[KnowledgeEntry], message: str)
             }
             missing = [option for option in options if option not in subjects_with_evidence]
             if missing:
-                return (
-                    f"Chega para ter uma primeira leitura sobre {target}, mas ainda não para fechar a comparação. "
-                    f"Falta evidência equivalente sobre {_join_pt(missing[:2])}."
+                return localize(
+                    "task.evidence.sufficiency_missing",
+                    response_language,
+                    target=target,
+                    missing=_join_pt(missing[:2], response_language),
                 )
         if strong or useful:
-            return "Sim, já chega para uma conclusão provisória. Eu ainda a trataria como provisória, porque podemos reforçar com mais uma fonte independente."
-        return "Ainda não. As fontes que temos são demasiado fracas para decidir com segurança."
+            return localize("task.evidence.sufficiency_yes", response_language)
+        return localize("task.evidence.sufficiency_no", response_language)
 
     if strong or useful:
         if positive and not mixed:
-            return f"Sim. Com estas fontes, já há boa evidência de que {target} tem {criterion}."
+            return localize("task.evidence.strong_positive", response_language, target=target, criterion=criterion)
         if mixed:
-            return f"As fontes sugerem que {target} tem pontos fortes em {criterion}, mas a conclusão ainda é mista."
-        return f"Estas fontes já dão uma base útil sobre {target}, mas eu manteria a conclusão como provisória."
+            return localize("task.evidence.strong_mixed", response_language, target=target, criterion=criterion)
+        return localize("task.evidence.strong_useful_base", response_language, target=target)
     if weak:
-        return f"Há sinais sobre {target}, mas a evidência ainda é fraca. Eu não fecharia uma decisão só com isto."
-    return "Ainda não tenho evidência suficiente para concluir isso com segurança."
+        return localize("task.evidence.weak_signals", response_language, target=target)
+    return localize("task.evidence.not_enough", response_language)
 
 
 def _predicate_from_evidence_question(message: str) -> str:
@@ -1642,17 +1940,20 @@ def _asks_sufficiency(message: str) -> bool:
     return contains_any_phrase(normalized, ("ja chega", "já chega", "chegam", "suficiente", "decidir", "comparar"))
 
 
-def _predicate_natural_label(predicate: str) -> str:
-    labels = {
-        "camera_quality": "boa câmara",
-        "battery": "boa autonomia",
-        "price": "um preço definido",
-        "support_quality": "bom suporte",
+def _predicate_natural_label(predicate: str, response_language: str = "pt-PT") -> str:
+    keys = {
+        "camera_quality": "task.predicate_label.camera_quality",
+        "battery": "task.predicate_label.battery",
+        "price": "task.predicate_label.price",
+        "support_quality": "task.predicate_label.support_quality",
     }
-    return labels.get(predicate, predicate.replace("_", " "))
+    key = keys.get(predicate)
+    return localize(key, response_language) if key else predicate.replace("_", " ")
 
 
-def _format_conflicts(knowledge: list[KnowledgeEntry]) -> str:
+def _format_conflicts(knowledge: list[KnowledgeEntry], response_language: str = "pt-PT") -> str:
+    # subject/predicate/value below are canonical extracted data (never
+    # translated); only the wrapper sentences localize (section 5/6).
     conflicts = []
     grouped: dict[tuple[str, str], set[str]] = {}
     for entry in knowledge:
@@ -1661,10 +1962,10 @@ def _format_conflicts(knowledge: list[KnowledgeEntry]) -> str:
         grouped.setdefault((entry.subject, entry.predicate), set()).add(entry.value)
     for (subject, predicate), values in grouped.items():
         if _values_are_semantically_conflicting(values, predicate):
-            conflicts.append(f"{subject} / {predicate}: {_join_pt(sorted(values))}")
+            conflicts.append(f"{subject} / {predicate}: {_join_pt(sorted(values), response_language)}")
     if not conflicts:
-        return "Não vejo informação contraditória ativa neste momento."
-    return "Há valores diferentes nestes pontos: " + "; ".join(conflicts[:3]) + "."
+        return localize("task.conflicts.none", response_language)
+    return localize("task.conflicts.found", response_language, items="; ".join(conflicts[:3]))
 
 
 def _entry_can_conflict(entry: KnowledgeEntry) -> bool:
@@ -1702,14 +2003,14 @@ def _values_are_semantically_conflicting(values: set[str], predicate: str) -> bo
     return False
 
 
-def _format_next_step(task, knowledge: list[KnowledgeEntry]) -> str:
+def _format_next_step(task, knowledge: list[KnowledgeEntry], response_language: str = "pt-PT") -> str:
     stage = infer_task_stage(task, knowledge)
     if task.task_type == "plan_trip" and stage == "plan":
-        return "Agora temos de organizar alojamento, transportes, itinerário e custos."
-    unknowns = infer_unknowns(task, knowledge)
+        return localize("task.next_step.travel_organize", response_language)
+    unknowns = infer_unknowns(task, knowledge, response_language)
     if unknowns:
-        return "O próximo passo é fechar " + _join_pt(unknowns[:2]) + "."
-    return "O próximo passo é escolher uma direção e transformar isto em plano."
+        return localize("task.next_step.close_gaps", response_language, gaps=_join_pt(unknowns[:2], response_language))
+    return localize("task.next_step.choose_direction", response_language)
 
 
 def _active_entries(entries: list[KnowledgeEntry]) -> list[KnowledgeEntry]:
@@ -1864,64 +2165,67 @@ def _is_correction(normalized: str) -> bool:
     return contains_any_phrase(normalized, ("afinal", "corrige", "nao,", "não,", "enganei me", "enganei-me"))
 
 
-def _entry_phrase(entry: KnowledgeEntry) -> str:
+def _entry_phrase(entry: KnowledgeEntry, response_language: str = "pt-PT") -> str:
+    # Phase 7.7.1 (section 4/18): the LABEL per predicate localizes; entry.
+    # subject/value (destinations, prices, option names, free-text values)
+    # are canonical extracted data and are never translated.
     pred = entry.predicate
     if pred == "budget_max":
-        return f"limite de orçamento: {entry.value} euros"
+        return localize("task.entry.budget_max", response_language, value=entry.value)
     if pred == "price":
-        return f"{entry.subject} custa {entry.value} euros"
+        return localize("task.entry.price", response_language, subject=entry.subject, value=entry.value)
     if pred == "camera_priority":
-        return "a câmara pesa mais na decisão"
+        return localize("task.entry.camera_priority", response_language)
     if pred == "battery_priority":
         if entry.value == "low":
-            return "a bateria pesa menos na decisão"
+            return localize("task.entry.battery_priority.low", response_language)
         if entry.value == "medium":
-            return "a bateria fica como fator secundário"
-        return "a bateria pesa bastante na decisão"
+            return localize("task.entry.battery_priority.medium", response_language)
+        return localize("task.entry.battery_priority.high", response_language)
     if pred == "camera_quality":
-        return f"{entry.subject} parece melhor em câmara"
+        return localize("task.entry.camera_quality", response_language, subject=entry.subject)
     if pred == "battery":
-        return f"{entry.subject} parece melhor em bateria"
+        return localize("task.entry.battery", response_language, subject=entry.subject)
     if pred == "support_priority":
-        return "o suporte pesa bastante na decisão"
+        return localize("task.entry.support_priority", response_language)
     if pred == "price_priority":
         if entry.value == "low":
-            return "o preço pesa menos na decisão"
-        return "o preço pesa bastante na decisão"
+            return localize("task.entry.price_priority.low", response_language)
+        return localize("task.entry.price_priority.high", response_language)
     if pred == "location_priority":
-        return "a localização pesa bastante na decisão"
+        return localize("task.entry.location_priority", response_language)
     if pred == "support_quality":
         if entry.value == "better":
-            return f"{entry.subject} tem melhor suporte"
+            return localize("task.entry.support_quality.better", response_language, subject=entry.subject)
         if entry.value == "limited":
-            return f"{entry.subject} tem suporte limitado"
-        return f"{entry.subject}: suporte {entry.value}"
+            return localize("task.entry.support_quality.limited", response_language, subject=entry.subject)
+        return localize("task.entry.support_quality.other", response_language, subject=entry.subject, value=entry.value)
     if pred == "destination":
-        return f"destino: {entry.value}"
+        return localize("task.entry.destination", response_language, value=entry.value)
     if pred == "origin":
-        return f"partida: {entry.value}"
+        return localize("task.entry.origin", response_language, value=entry.value)
     if pred == "date_range":
-        return f"datas: {entry.value}"
+        return localize("task.entry.date_range", response_language, value=entry.value)
     if pred == "duration":
-        return f"duração: {entry.value}"
+        return localize("task.entry.duration", response_language, value=entry.value)
     if pred == "travel_style":
-        return f"preferência: {entry.value}"
+        return localize("task.entry.travel_style", response_language, value=entry.value)
     if pred == "flight_constraint":
         return entry.value
     if pred == "destination_candidate":
         return f"{entry.subject}: {entry.value}"
     if pred == "activities":
-        return f"{entry.value} em {entry.subject}"
+        return localize("task.entry.activities", response_language, value=entry.value, subject=entry.subject)
     return f"{entry.subject}: {entry.value}"
 
 
-def _join_pt(items: list[str]) -> str:
+def _join_pt(items: list[str], response_language: str = "pt-PT") -> str:
     clean = [item for item in items if item]
     if not clean:
         return ""
     if len(clean) == 1:
         return clean[0]
-    return ", ".join(clean[:-1]) + " e " + clean[-1]
+    return ", ".join(clean[:-1]) + f" {localize('task.join.and', response_language)} " + clean[-1]
 
 
 def _dedupe(items: list[str]) -> list[str]:

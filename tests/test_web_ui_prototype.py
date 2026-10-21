@@ -947,6 +947,10 @@ class _FakeEngine:
         self.cancelled = False
         self._progress_listener = None
         self.capacity_reports: list[dict] = []
+        # Phase 7.6.5 (section 16 D/E/F): lets tests assert a sleep command
+        # never reached the LLM -- respond() is the ONLY thing that stands
+        # in for an actual model/task call in this fake.
+        self.calls: list[str] = []
 
     def set_progress_listener(self, listener) -> None:
         self._progress_listener = listener
@@ -956,6 +960,7 @@ class _FakeEngine:
         return True
 
     def respond(self, message: str) -> str:
+        self.calls.append(message)
         for event in self.progress_events:
             if self._progress_listener is not None:
                 self._progress_listener(event)
@@ -963,6 +968,23 @@ class _FakeEngine:
 
     def report_workspace_capacity(self, payload: dict) -> None:
         self.capacity_reports.append(payload)
+
+
+class _SlowFakeEngine(_FakeEngine):
+    """Phase 7.4: adds a real, short sleep before responding -- gives tests
+    a reliable window to observe/act on the controller while it is
+    genuinely "thinking" (a plain _FakeEngine can resolve faster than the
+    test's own polling notices it started)."""
+
+    def __init__(self, *, delay_seconds: float = 0.25, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.delay_seconds = delay_seconds
+
+    def respond(self, message: str) -> str:
+        import time
+
+        time.sleep(self.delay_seconds)
+        return super().respond(message)
 
 
 class _FailingTelemetryRuntime:
@@ -1007,6 +1029,80 @@ class _NoSpeechVoiceTranscriber(_FakeVoiceTranscriber):
             status_callback("A ouvir...")
         stop_event.set()
         raise VoiceNoSpeechDetected("Nao detetei fala.")
+
+
+class _SequentialVoiceTranscriber:
+    """Phase 7.4: a different scripted result/error on each successive
+    call -- used to test multi-cycle conversation-loop behavior (listening
+    restarts, TTS-manager reuse across turns) without needing a real
+    microphone. The LAST step repeats if record_and_transcribe is called
+    more times than there are steps."""
+
+    def __init__(self, steps: list[tuple[str | None, Exception | None]]) -> None:
+        self.steps = list(steps)
+        self.call_count = 0
+
+    def record_and_transcribe(self, stop_event, status_callback=None) -> str:
+        index = min(self.call_count, len(self.steps) - 1)
+        self.call_count += 1
+        result, error = self.steps[index]
+        if status_callback is not None:
+            status_callback("A ouvir...")
+        stop_event.set()
+        if error is not None:
+            raise error
+        return result or ""
+
+
+class _BlockingVoiceTranscriber:
+    """Phase 7.4: blocks until stop_event is externally set (simulating a
+    still-open listening cycle), then raises VoiceNoSpeechDetected -- for
+    tests that need to observe/act on the controller WHILE a listening
+    cycle is genuinely in flight (stop-during-listening, typed-turn-during-
+    listening)."""
+
+    def record_and_transcribe(self, stop_event, status_callback=None) -> str:
+        import time
+
+        from assistant.voice_input import VoiceNoSpeechDetected
+
+        if status_callback is not None:
+            status_callback("A ouvir...")
+        while not stop_event.is_set():
+            time.sleep(0.01)
+        raise VoiceNoSpeechDetected("cancelled")
+
+
+def _run_until(predicate, timeout_ms: int = 3000) -> bool:
+    """Phase 7.4: pumps the Qt event loop until `predicate()` is true or the
+    timeout elapses -- used instead of nested QEventLoop/QTimer pairs for
+    the multi-hop voice-conversation-loop tests (listen -> transcript ->
+    submit -> respond -> speak -> finished -> rearm -> listen again)."""
+    import time
+
+    from PySide6.QtCore import QCoreApplication
+
+    app = QCoreApplication.instance()
+    deadline = time.perf_counter() + (timeout_ms / 1000)
+    while time.perf_counter() < deadline:
+        app.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.005)
+    return False
+
+
+def _stop_and_drain(controller, timeout_ms: int = 3000) -> None:
+    """Phase 7.4: MUST be called at the end of every voice-conversation-loop
+    test. Without it, a still-active listening/rearm/speaking cycle leaves
+    a live QThread behind that nothing will ever pump again once the test
+    function returns -- pytest's own process/session teardown then hangs
+    waiting for that thread to finish, which it never will."""
+    controller.stopVoiceConversation()
+    _run_until(
+        lambda: controller._voice_worker is None and controller._tts_worker is None and controller._worker is None,
+        timeout_ms=timeout_ms,
+    )
 
 
 def _qt_app():
@@ -1413,6 +1509,102 @@ def test_echo_os_tts_speaks_current_response_manually_off_ui_thread() -> None:
     assert finished and "playback_ms" in finished[0]
     assert controller._tts_thread is None
     assert controller._tts_worker is None
+
+
+def test_speak_text_requires_interruptible_playback_during_voice_conversation_mode() -> None:
+    """Phase 7.6.4 (section 7): Voice Conversation Mode must ask
+    play_audio_file() for interruptible-only playback (allow_winsound_
+    fallback=False) -- a manual (non-voice-mode) SPEAK must not."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Spoken reply.")
+    transcriber = _FakeVoiceTranscriber(result="ola echo")
+    tts = _FakeTTSManager()
+    player_calls: list[bool] = []
+
+    def recording_player(_path, _stop_checker=None, *, on_playback_event=None, allow_winsound_fallback=True) -> float:
+        player_calls.append(allow_winsound_fallback)
+        return 0.01
+
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=recording_player,
+        thinking_min_ms=0,
+    )
+
+    controller.startVoiceConversation()
+
+    assert _run_until(lambda: player_calls, timeout_ms=3000)
+    assert player_calls == [False]
+    _stop_and_drain(controller)
+
+
+def test_speak_text_allows_winsound_fallback_outside_voice_conversation_mode() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Typed reply.")
+    tts = _FakeTTSManager()
+    player_calls: list[bool] = []
+
+    def recording_player(_path, _stop_checker=None, *, on_playback_event=None, allow_winsound_fallback=True) -> float:
+        player_calls.append(allow_winsound_fallback)
+        return 0.01
+
+    controller = EchoUIController(engine.respond, tts_manager=tts, tts_player=recording_player, thinking_min_ms=0)
+
+    controller.speakText("Typed reply.")
+
+    assert _run_until(lambda: player_calls, timeout_ms=3000)
+    assert player_calls == [True]
+
+
+def test_voice_mode_playback_backend_failure_keeps_text_visible_and_recovers_loop() -> None:
+    """Phase 7.6.4 (section 7): if the interruptible sounddevice backend
+    genuinely cannot be opened while voice mode is active, play_audio_file
+    raises TTSError instead of silently degrading to winsound. This must
+    surface as a bounded ttsError while the ALREADY-SHOWN text response
+    stays visible, and the conversation loop must recover (listen again)
+    rather than getting stuck."""
+    from assistant.tts import TTSError
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Spoken reply.")
+    transcriber = _SequentialVoiceTranscriber([("ola echo", None), ("outra vez", None)])
+    tts = _FakeTTSManager()
+
+    def failing_when_interruptible_required(
+        _path, _stop_checker=None, *, on_playback_event=None, allow_winsound_fallback=True
+    ) -> float:
+        if not allow_winsound_fallback:
+            raise TTSError("Reprodução interrompível indisponível (RuntimeError: no output device)")
+        return 0.01
+
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=failing_when_interruptible_required,
+        thinking_min_ms=0,
+    )
+    errors: list[str] = []
+    controller.ttsError.connect(errors.append)
+    responses: list[str] = []
+    controller.responseReady.connect(responses.append)
+
+    controller.startVoiceConversation()
+
+    assert _run_until(lambda: errors, timeout_ms=3000)
+    assert "indisponível" in errors[0]
+    assert responses == ["Spoken reply."]  # text response never retracted
+    assert _run_until(lambda: transcriber.call_count >= 2, timeout_ms=5000)  # loop recovered, listened again
+    _stop_and_drain(controller)
 
 
 def test_echo_os_tts_telemetry_reports_pocket_anna_correctly() -> None:
@@ -4865,3 +5057,2535 @@ def test_phase45_minimized_task_uses_rail_not_open_slot() -> None:
     assert result["minimizedTaskCount"] == "1"
     assert result["openSlots"] == ["artifact-task-1"]
     assert result["rail"] == ["artifact-task-2"]
+
+
+# --- Phase 7.4: explicit Voice Conversation Mode -----------------------
+# LISTENING -> TRANSCRIBING -> THINKING -> SYNTHESIZING -> SPEAKING ->
+# LISTENING, all driven from ONE backend state (EchoUIController.
+# _voice_conversation_active + _voice_session_id), reusing submitMessage()/
+# speakText() exactly as manual turns do (section 4) -- never a separate
+# "voice answer" path. Letters below match the task's own lettered list.
+
+
+def test_voice_conversation_a_start_begins_listening() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=_FakeVoiceTranscriber())
+    states: list[str] = []
+    conversation_events: list[bool] = []
+    controller.stateChanged.connect(states.append)
+    controller.voiceConversationChanged.connect(conversation_events.append)
+
+    result = controller.startVoiceConversation()
+
+    assert result is True
+    assert controller.isVoiceConversationActive() is True
+    assert conversation_events == [True]
+    assert states[-1] == "listening"
+    assert controller._voice_worker is not None
+    _stop_and_drain(controller)
+
+
+def test_voice_conversation_b_accepted_transcript_auto_submits_only_in_mode() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Auto reply.")
+    transcriber = _FakeVoiceTranscriber(result="ola echo")
+    controller = EchoUIController(engine.respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+    responses: list[str] = []
+    controller.responseReady.connect(responses.append)
+
+    controller.startVoiceConversation()
+
+    assert _run_until(lambda: responses, timeout_ms=3000)
+    assert responses == ["Auto reply."]
+    _stop_and_drain(controller)
+
+
+def test_voice_conversation_c_manual_mic_does_not_auto_submit_outside_mode() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Should not appear.")
+    transcriber = _FakeVoiceTranscriber(result="ola echo")
+    controller = EchoUIController(engine.respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+    responses: list[str] = []
+    transcripts: list[str] = []
+    controller.responseReady.connect(responses.append)
+    controller.voiceTranscriptionReady.connect(transcripts.append)
+
+    controller.startVoiceInput()
+
+    assert _run_until(lambda: transcripts, timeout_ms=3000)
+    _run_until(lambda: False, timeout_ms=300)  # grace window: prove nothing auto-submits afterwards
+    assert transcripts == ["ola echo"]
+    assert responses == []
+    assert controller.isVoiceConversationActive() is False
+
+
+def test_voice_conversation_d_response_auto_speaks_only_in_mode() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Spoken reply.")
+    transcriber = _FakeVoiceTranscriber(result="ola echo")
+    tts = _FakeTTSManager()
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=lambda *_a, **_k: 0.01,
+        thinking_min_ms=0,
+    )
+
+    controller.startVoiceConversation()
+
+    assert _run_until(lambda: tts.calls, timeout_ms=3000)
+    assert tts.calls == ["Spoken reply."]
+    _stop_and_drain(controller)
+
+
+def test_typed_turn_does_not_auto_speak_outside_conversation_mode() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Typed reply.")
+    tts = _FakeTTSManager()
+    controller = EchoUIController(engine.respond, tts_manager=tts, tts_player=lambda *_a, **_k: 0.01, thinking_min_ms=0)
+    responses: list[str] = []
+    controller.responseReady.connect(responses.append)
+
+    controller.submitMessage("Hello")
+
+    assert _run_until(lambda: responses, timeout_ms=3000)
+    _run_until(lambda: False, timeout_ms=300)
+    assert responses == ["Typed reply."]
+    assert tts.calls == []
+
+
+def test_voice_conversation_e_tts_finished_restarts_listening() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Spoken reply.")
+    transcriber = _SequentialVoiceTranscriber([("ola echo", None), ("outra vez", None)])
+    tts = _FakeTTSManager()
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=lambda *_a, **_k: 0.01,
+        thinking_min_ms=0,
+    )
+
+    controller.startVoiceConversation()
+
+    assert _run_until(lambda: transcriber.call_count >= 2, timeout_ms=5000)
+    assert tts.calls == ["Spoken reply."]
+    _stop_and_drain(controller)
+
+
+def test_voice_conversation_f_mic_not_active_while_speaking() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Spoken reply.")
+    transcriber = _FakeVoiceTranscriber(result="ola echo")
+    tts = _FakeTTSManager()
+
+    def slow_player(_path, stop_checker=None) -> float:
+        import time
+
+        deadline = time.perf_counter() + 0.3
+        while time.perf_counter() < deadline:
+            if stop_checker and stop_checker():
+                break
+            time.sleep(0.01)
+        return 0.0
+
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=slow_player,
+        thinking_min_ms=0,
+    )
+
+    controller.startVoiceConversation()
+
+    assert _run_until(lambda: controller._tts_worker is not None, timeout_ms=3000)
+    assert controller._voice_worker is None
+    assert _run_until(lambda: controller._voice_worker is not None, timeout_ms=3000)
+    _stop_and_drain(controller)
+
+
+def test_voice_conversation_g_no_speech_rearms_without_submitting() -> None:
+    from assistant.voice_input import VoiceNoSpeechDetected
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Only the second cycle should reach this.")
+    transcriber = _SequentialVoiceTranscriber([(None, VoiceNoSpeechDetected("Nao detetei fala.")), ("ola echo", None)])
+    controller = EchoUIController(engine.respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+    responses: list[str] = []
+    controller.responseReady.connect(responses.append)
+
+    controller.startVoiceConversation()
+
+    assert _run_until(lambda: responses, timeout_ms=5000)
+    assert responses == ["Only the second cycle should reach this."]
+    assert transcriber.call_count == 2
+    _stop_and_drain(controller)
+
+
+def test_voice_conversation_h_too_short_capture_rearms_without_fatal_error() -> None:
+    from assistant.voice_input import VoiceInputError
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Second reply.")
+    transcriber = _SequentialVoiceTranscriber(
+        [
+            (None, VoiceInputError("A gravacao foi demasiado curta. Gravaste 0.30s; o minimo configurado e 1.20s.")),
+            ("ola echo", None),
+        ]
+    )
+    controller = EchoUIController(engine.respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+    errors: list[str] = []
+    responses: list[str] = []
+    controller.voiceInputError.connect(errors.append)
+    controller.responseReady.connect(responses.append)
+
+    controller.startVoiceConversation()
+
+    assert _run_until(lambda: responses, timeout_ms=5000)
+    assert errors == []
+    assert responses == ["Second reply."]
+    assert transcriber.call_count == 2
+    _stop_and_drain(controller)
+
+
+def test_voice_conversation_i_stop_during_listening() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=_BlockingVoiceTranscriber())
+    conversation_events: list[bool] = []
+    controller.voiceConversationChanged.connect(conversation_events.append)
+
+    controller.startVoiceConversation()
+    assert _run_until(lambda: controller._voice_worker is not None, timeout_ms=2000)
+
+    controller.stopVoiceConversation()
+
+    assert _run_until(lambda: controller._voice_worker is None, timeout_ms=3000)
+    assert controller.isVoiceConversationActive() is False
+    assert conversation_events == [True, False]
+
+
+def test_voice_conversation_j_stop_during_transcribing() -> None:
+    """From the controller's perspective "transcribing" is the SAME
+    EchoVoiceWorker lifecycle as "listening" -- record_and_transcribe is one
+    blocking call with no separate sub-state exposed. This exercises
+    stopping once the worker's status has already advanced past the
+    initial "A ouvir..." point."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=_BlockingVoiceTranscriber())
+
+    controller.startVoiceConversation()
+    assert _run_until(lambda: controller._voice_worker is not None, timeout_ms=2000)
+
+    controller.stopVoiceConversation()
+
+    assert _run_until(lambda: controller._voice_worker is None, timeout_ms=3000)
+    assert controller.isVoiceConversationActive() is False
+
+
+def test_voice_conversation_k_stop_during_thinking_does_not_auto_speak_or_rearm() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _SlowFakeEngine(reply="Late reply.", delay_seconds=0.25)
+    transcriber = _FakeVoiceTranscriber(result="ola echo")
+    tts = _FakeTTSManager()
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=lambda *_a, **_k: 0.01,
+        thinking_min_ms=0,
+    )
+    responses: list[str] = []
+    controller.responseReady.connect(responses.append)
+
+    controller.startVoiceConversation()
+    assert _run_until(lambda: controller._active, timeout_ms=3000)
+
+    controller.stopVoiceConversation()
+
+    assert _run_until(lambda: responses, timeout_ms=3000)
+    _run_until(lambda: False, timeout_ms=400)
+    assert responses == ["Late reply."]
+    assert tts.calls == []
+    assert controller._voice_worker is None
+    _stop_and_drain(controller)
+
+
+def test_voice_conversation_l_stop_during_synthesis() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Reply.")
+    transcriber = _FakeVoiceTranscriber(result="ola echo")
+    tts = _FakeTTSManager(delay_seconds=0.3)
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=lambda *_a, **_k: 0.0,
+        thinking_min_ms=0,
+    )
+
+    controller.startVoiceConversation()
+    assert _run_until(lambda: controller._tts_worker is not None, timeout_ms=3000)
+
+    controller.stopVoiceConversation()
+
+    assert controller.isVoiceConversationActive() is False
+    assert _run_until(lambda: controller._tts_worker is None, timeout_ms=3000)
+    _stop_and_drain(controller)
+
+
+def test_voice_conversation_m_stop_during_speaking_returns_to_listening() -> None:
+    """M. Preferred v1 behavior (section 14): STOP pressed while actively
+    speaking interrupts playback only -- voice conversation mode stays ON
+    and rearms listening. A separate stopVoiceConversation() call is the
+    only action that exits the loop."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Reply.")
+    transcriber = _FakeVoiceTranscriber(result="ola echo")
+    tts = _FakeTTSManager()
+
+    def slow_player(_path, stop_checker=None) -> float:
+        import time
+
+        for _ in range(50):
+            if stop_checker and stop_checker():
+                return 0.0
+            time.sleep(0.01)
+        return 0.0
+
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=slow_player,
+        thinking_min_ms=0,
+    )
+    states: list[str] = []
+    controller.stateChanged.connect(states.append)
+
+    controller.startVoiceConversation()
+    assert _run_until(lambda: "speaking" in states, timeout_ms=3000)
+
+    controller.stopSpeaking()
+
+    assert controller.isVoiceConversationActive() is True
+    assert _run_until(lambda: controller._voice_worker is not None, timeout_ms=3000)
+    _stop_and_drain(controller)
+
+
+def test_voice_conversation_n_stale_stt_callback_ignored_after_stop() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+
+    class _StopControlledTranscriber:
+        def __init__(self) -> None:
+            import threading
+
+            self.release_event = threading.Event()
+
+        def record_and_transcribe(self, stop_event, status_callback=None) -> str:
+            self.release_event.wait(timeout=5)
+            return "late transcript"
+
+    engine = _FakeEngine(reply="Should not be used.")
+    transcriber = _StopControlledTranscriber()
+    controller = EchoUIController(engine.respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+    responses: list[str] = []
+    controller.responseReady.connect(responses.append)
+
+    controller.startVoiceConversation()
+    assert _run_until(lambda: controller._voice_worker is not None, timeout_ms=2000)
+    controller.stopVoiceConversation()
+    transcriber.release_event.set()
+
+    _run_until(lambda: False, timeout_ms=800)
+    assert responses == []
+
+
+def test_voice_conversation_o_stale_rearm_and_auto_speak_ignored_after_new_session() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    tts = _FakeTTSManager()
+    controller = EchoUIController(_FakeEngine().respond, tts_manager=tts, voice_available=True, voice_transcriber=_FakeVoiceTranscriber())
+
+    controller._voice_conversation_active = True
+    controller._voice_session_id = 1
+    stale_session = controller._voice_session_id
+    # Mode stopped, then restarted -- a NEW session, distinct from the one
+    # any in-flight callback captured.
+    controller._voice_session_id = 2
+
+    controller._rearm_voice_listening(stale_session)
+    assert controller._voice_worker is None  # stale rearm must not start listening
+
+    controller._auto_speak_response("stale response", stale_session)
+    assert tts.calls == []  # stale auto-speak must not fire
+
+
+def test_voice_conversation_p_duplicate_listening_cycles_cannot_start() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=_BlockingVoiceTranscriber())
+
+    controller.startVoiceConversation()
+    first_worker = controller._voice_worker
+    assert first_worker is not None
+
+    controller._rearm_voice_listening(controller._voice_session_id)
+
+    assert controller._voice_worker is first_worker
+    controller.stopVoiceConversation()
+    _run_until(lambda: controller._voice_worker is None, timeout_ms=2000)
+
+
+def test_voice_conversation_q_typed_turn_during_mode_stops_listening_and_rearms() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Typed while listening.")
+    tts = _FakeTTSManager()
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=_BlockingVoiceTranscriber(),
+        tts_manager=tts,
+        tts_player=lambda *_a, **_k: 0.01,
+        thinking_min_ms=0,
+    )
+
+    controller.startVoiceConversation()
+    assert _run_until(lambda: controller._voice_worker is not None, timeout_ms=2000)
+
+    controller.submitMessage("typed message")
+
+    assert _run_until(lambda: tts.calls, timeout_ms=5000)
+    assert tts.calls == ["Typed while listening."]
+    assert controller.isVoiceConversationActive() is True
+    assert _run_until(lambda: controller._voice_worker is not None, timeout_ms=3000)
+    _stop_and_drain(controller)
+
+
+def test_voice_conversation_r_ptpt_unavailable_tts_preserves_text_and_survives() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Resposta em português.")
+    transcriber = _FakeVoiceTranscriber(result="ola echo")
+    tts = _FakeTTSManager(available=True, pt_available=False)
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=lambda *_a, **_k: 0.01,
+        get_response_language=lambda: "pt-PT",
+        thinking_min_ms=0,
+    )
+    responses: list[str] = []
+    tts_errors: list[str] = []
+    controller.responseReady.connect(responses.append)
+    controller.ttsError.connect(tts_errors.append)
+
+    controller.startVoiceConversation()
+
+    assert _run_until(lambda: responses, timeout_ms=3000)
+    assert _run_until(lambda: tts_errors, timeout_ms=3000)
+    assert responses == ["Resposta em português."]
+    assert tts.calls == []
+    assert controller.isVoiceConversationActive() is True
+    assert _run_until(lambda: controller._voice_worker is not None, timeout_ms=3000)
+    _stop_and_drain(controller)
+
+
+def test_voice_conversation_s_tts_provider_failure_recovers_loop() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Reply despite TTS failure.")
+    transcriber = _FakeVoiceTranscriber(result="ola echo")
+    tts = _FakeTTSManager(error=RuntimeError("pocket crashed"))
+    controller = EchoUIController(engine.respond, voice_available=True, voice_transcriber=transcriber, tts_manager=tts, thinking_min_ms=0)
+    tts_errors: list[str] = []
+    controller.ttsError.connect(tts_errors.append)
+
+    controller.startVoiceConversation()
+
+    assert _run_until(lambda: tts_errors, timeout_ms=3000)
+    assert controller.isVoiceConversationActive() is True
+    assert _run_until(lambda: controller._voice_worker is not None, timeout_ms=3000)
+    _stop_and_drain(controller)
+
+
+def test_voice_conversation_t_tts_manager_reused_across_multiple_voice_turns() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Reply.")
+    transcriber = _SequentialVoiceTranscriber([("turno um", None), ("turno dois", None)])
+    tts = _FakeTTSManager()
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=lambda *_a, **_k: 0.01,
+        thinking_min_ms=0,
+    )
+
+    controller.startVoiceConversation()
+
+    assert _run_until(lambda: len(tts.calls) >= 2, timeout_ms=6000)
+    assert tts.calls == ["Reply.", "Reply."]
+    assert tts.stopped is False
+    _stop_and_drain(controller)
+
+
+def test_voice_conversation_stop_from_idle_is_a_safe_noop() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=_FakeVoiceTranscriber())
+
+    controller.stopVoiceConversation()
+
+    assert controller.isVoiceConversationActive() is False
+
+
+def test_voice_conversation_start_refuses_while_busy() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=_FakeVoiceTranscriber())
+    controller._active = True
+    errors: list[str] = []
+    controller.voiceInputError.connect(errors.append)
+
+    result = controller.startVoiceConversation()
+
+    assert result is False
+    assert controller.isVoiceConversationActive() is False
+    assert errors
+
+
+# --- Phase 7.4.1: real-use UX/lifecycle polish ------------------------------
+# A corrective pass after real manual use of the Phase 7.4 voice-conversation
+# loop surfaced problems automated tests hadn't caught: an accepted voice
+# transcript stayed visible in the composer after being auto-submitted; a
+# late benign STT result from an already-stopped session rendered as the
+# main Echo response; and no backoff existed for repeated no-content voice
+# cycles. See controller.py's _is_voice_worker_stale/_voice_rearm_delay and
+# echo_ui.js's voiceTranscriptionReady handler for the fixes.
+
+
+def test_voice_ux_polish_ab_composer_fill_gated_by_conversation_mode() -> None:
+    """A+B (structural -- pytest has no DOM): echo_ui.js must only fill the
+    composer from an accepted transcript when Voice Conversation Mode is
+    OFF (manual MIC's existing fill-but-don't-send behavior, section 1
+    "outside mode" case); it must skip the fill entirely when the mode is
+    ON, since the controller already auto-submitted that transcript through
+    a path that never clears the composer itself."""
+    ui = (WEB / "echo_ui.js").read_text(encoding="utf-8")
+    start = ui.index("activeController.voiceTranscriptionReady.connect")
+    end = ui.index("if (activeController.voiceInputError)")
+    handler = ui[start:end]
+
+    assert "insertVoiceTranscription(text)" in handler
+    assert "if (!voiceConversationActive)" in handler
+    assert handler.index("if (!voiceConversationActive)") < handler.index("insertVoiceTranscription(text)")
+
+
+def test_voice_ux_polish_a_accepted_transcript_auto_submits_in_mode() -> None:
+    """A (behavioral): inside Voice Conversation Mode an accepted transcript
+    still auto-submits and the loop still produces a spoken response --
+    unchanged Phase 7.4 contract, re-verified alongside the composer fix."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Resposta falada.")
+    transcriber = _FakeVoiceTranscriber(result="ola echo")
+    tts = _FakeTTSManager()
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=lambda *_a, **_k: 0.0,
+        thinking_min_ms=0,
+    )
+    responses: list[str] = []
+    controller.responseReady.connect(responses.append)
+
+    controller.startVoiceConversation()
+
+    assert _run_until(lambda: responses, timeout_ms=3000)
+    assert responses == ["Resposta falada."]
+    _stop_and_drain(controller)
+
+
+def test_voice_ux_polish_b_manual_mic_still_fills_composer_path() -> None:
+    """B (behavioral half): outside Voice Conversation Mode, manual MIC
+    still emits the transcript (which the JS side -- verified structurally
+    above -- fills into the composer) and never auto-submits. Same
+    contract as Phase 7.4's test_voice_conversation_c, re-asserted here
+    under this phase's naming for section 7 traceability."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Should not appear.")
+    transcriber = _FakeVoiceTranscriber(result="ola echo")
+    controller = EchoUIController(engine.respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+    responses: list[str] = []
+    transcripts: list[str] = []
+    controller.responseReady.connect(responses.append)
+    controller.voiceTranscriptionReady.connect(transcripts.append)
+
+    controller.startVoiceInput()
+
+    assert _run_until(lambda: transcripts, timeout_ms=3000)
+    _run_until(lambda: False, timeout_ms=300)
+    assert transcripts == ["ola echo"]
+    assert responses == []
+    assert controller.isVoiceConversationActive() is False
+
+
+def test_voice_ux_polish_c_stop_during_recording_then_late_too_short_does_not_alter_response() -> None:
+    """C (regression for the exact reported bug): Voice Mode is turned OFF
+    while the mic worker is still open; it later finishes with the benign
+    "recording too short" VoiceInputError. That must never replace the
+    main Echo response, never flip to the error state, and never restart
+    the loop."""
+    import threading
+
+    from assistant.voice_input import VoiceInputError
+    from prototype_web_ui.controller import EchoUIController
+
+    class _StopControlledTooShortTranscriber:
+        def __init__(self) -> None:
+            self.release_event = threading.Event()
+
+        def record_and_transcribe(self, stop_event, status_callback=None) -> str:
+            self.release_event.wait(timeout=5)
+            raise VoiceInputError("A gravacao foi demasiado curta. Gravaste 0.96s; o minimo configurado e 2.00s.")
+
+    _qt_app()
+    engine = _FakeEngine(reply="Should not be used.")
+    transcriber = _StopControlledTooShortTranscriber()
+    controller = EchoUIController(engine.respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+    responses: list[str] = []
+    errors: list[str] = []
+    states: list[str] = []
+    controller.responseReady.connect(responses.append)
+    controller.errorOccurred.connect(errors.append)
+    controller.stateChanged.connect(states.append)
+
+    controller.startVoiceConversation()
+    assert _run_until(lambda: controller._voice_worker is not None, timeout_ms=2000)
+
+    controller.stopVoiceConversation()
+    transcriber.release_event.set()
+
+    _run_until(lambda: False, timeout_ms=800)  # grace window for the late callback to actually arrive
+    assert responses == []
+    assert errors == []
+    assert "error" not in states
+    assert states[-1] == "idle"  # settles cleanly instead of staying stuck on "thinking" (cancelVoiceInput's flash)
+    assert controller.isVoiceConversationActive() is False
+    _stop_and_drain(controller)
+
+
+def test_voice_ux_polish_d_stale_genuine_voice_error_ignored_after_stop() -> None:
+    """D: a GENUINE (non-benign) STT error from a worker whose session was
+    already stopped must be dropped exactly like a benign one -- the
+    staleness check runs before the benign/genuine branch."""
+    import threading
+
+    from assistant.voice_input import VoiceInputError
+    from prototype_web_ui.controller import EchoUIController
+
+    class _StopControlledFailingTranscriber:
+        def __init__(self) -> None:
+            self.release_event = threading.Event()
+
+        def record_and_transcribe(self, stop_event, status_callback=None) -> str:
+            self.release_event.wait(timeout=5)
+            raise VoiceInputError("Falha real do microfone durante a gravacao.")
+
+    _qt_app()
+    engine = _FakeEngine(reply="Should not be used.")
+    transcriber = _StopControlledFailingTranscriber()
+    controller = EchoUIController(engine.respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+    errors: list[str] = []
+    states: list[str] = []
+    controller.voiceInputError.connect(errors.append)
+    controller.stateChanged.connect(states.append)
+
+    controller.startVoiceConversation()
+    assert _run_until(lambda: controller._voice_worker is not None, timeout_ms=2000)
+
+    controller.stopVoiceConversation()
+    transcriber.release_event.set()
+
+    _run_until(lambda: False, timeout_ms=800)
+    assert errors == []
+    assert "error" not in states
+    assert states[-1] == "idle"
+    assert controller._voice_conversation_failures == 0
+    assert controller.isVoiceConversationActive() is False
+    _stop_and_drain(controller)
+
+
+def test_voice_ux_polish_e_stale_transcription_ready_signal_suppressed() -> None:
+    """E: a late but otherwise VALID transcript from a stopped session's
+    worker must not even reach the voiceTranscriptionReady signal -- not
+    just "not auto-submitted" (already covered by Phase 7.4's test n), but
+    genuinely suppressed so it cannot linger anywhere in the UI either."""
+    import threading
+
+    from prototype_web_ui.controller import EchoUIController
+
+    class _StopControlledTranscriber:
+        def __init__(self) -> None:
+            self.release_event = threading.Event()
+
+        def record_and_transcribe(self, stop_event, status_callback=None) -> str:
+            self.release_event.wait(timeout=5)
+            return "late transcript"
+
+    _qt_app()
+    engine = _FakeEngine(reply="Should not be used.")
+    transcriber = _StopControlledTranscriber()
+    controller = EchoUIController(engine.respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+    transcripts: list[str] = []
+    responses: list[str] = []
+    controller.voiceTranscriptionReady.connect(transcripts.append)
+    controller.responseReady.connect(responses.append)
+
+    controller.startVoiceConversation()
+    assert _run_until(lambda: controller._voice_worker is not None, timeout_ms=2000)
+
+    controller.stopVoiceConversation()
+    transcriber.release_event.set()
+
+    _run_until(lambda: False, timeout_ms=800)
+    assert transcripts == []
+    assert responses == []
+    _stop_and_drain(controller)
+
+
+def test_voice_ux_polish_f_stale_voice_input_finished_does_not_restart_listening() -> None:
+    """F: voiceInputFinished (thread-cleanup) still fires for a stale
+    worker -- its own QThread must still be released -- but that cleanup
+    must never resurrect the loop: mode stays off and no new listening
+    cycle begins afterward."""
+    import threading
+
+    from prototype_web_ui.controller import EchoUIController
+
+    class _StopControlledTranscriber:
+        def __init__(self) -> None:
+            self.release_event = threading.Event()
+
+        def record_and_transcribe(self, stop_event, status_callback=None) -> str:
+            self.release_event.wait(timeout=5)
+            return "late transcript"
+
+    _qt_app()
+    transcriber = _StopControlledTranscriber()
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+    finished_events: list[bool] = []
+    controller.voiceInputFinished.connect(lambda: finished_events.append(True))
+
+    controller.startVoiceConversation()
+    assert _run_until(lambda: controller._voice_worker is not None, timeout_ms=2000)
+
+    controller.stopVoiceConversation()
+    transcriber.release_event.set()
+
+    assert _run_until(lambda: finished_events, timeout_ms=2000)  # cleanup still runs
+    _run_until(lambda: False, timeout_ms=500)  # grace window: no restart afterwards
+    assert controller.isVoiceConversationActive() is False
+    assert controller._voice_worker is None
+
+
+def test_voice_ux_polish_i_genuine_microphone_failure_still_surfaces_error() -> None:
+    """I: a real, non-benign, NON-stale microphone/dependency failure must
+    still surface a concise error (section 4 explicitly preserves this) and
+    still count toward the existing 3-strikes stop-the-mode limit."""
+    from assistant.voice_input import MicrophoneCheckError
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Should not be reached.")
+    transcriber = _FakeVoiceTranscriber(error=MicrophoneCheckError("Nao consegui abrir o microfone: dispositivo ocupado."))
+    controller = EchoUIController(engine.respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+    errors: list[str] = []
+    controller.voiceInputError.connect(errors.append)
+
+    controller.startVoiceConversation()
+
+    assert _run_until(lambda: controller.isVoiceConversationActive() is False, timeout_ms=5000)
+    assert len(errors) == 3  # one per consecutive genuine failure before the 3-strikes stop
+    assert all("microfone" in message.lower() for message in errors)
+
+
+def test_voice_ux_polish_j_portuguese_transcript_with_english_response_language_unaffected() -> None:
+    """J: input language (whatever the user actually spoke) and
+    response_language (Echo's reply language) are independent -- the
+    controller passes the raw transcript through unchanged and speaks
+    whatever get_response_language_callback reports, regardless of what
+    language the transcript happens to be in."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Sure, here is the answer in English.")
+    transcriber = _FakeVoiceTranscriber(result="Hoje fui almoçar com a minha família.")
+    tts = _FakeTTSManager()
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=lambda *_a, **_k: 0.0,
+        get_response_language=lambda: "en-GB",
+        thinking_min_ms=0,
+    )
+    responses: list[str] = []
+    controller.responseReady.connect(responses.append)
+
+    controller.startVoiceConversation()
+
+    assert _run_until(lambda: tts.calls, timeout_ms=3000)
+    assert responses == ["Sure, here is the answer in English."]
+    assert tts.response_languages == ["en-GB"]
+    _stop_and_drain(controller)
+
+
+def test_voice_ux_polish_k_input_language_not_coupled_to_response_language() -> None:
+    """K: the voice-transcription/listening path must never read or branch
+    on response_language -- STT input language is a separate, pre-
+    configured concern (assistant/voice_input.py's VoiceTranscriber.language),
+    untouched by this phase and not coupled to Echo's reply language."""
+    import inspect
+
+    from prototype_web_ui.controller import EchoUIController
+
+    source = inspect.getsource(EchoUIController._handle_voice_transcription) + inspect.getsource(
+        EchoUIController._begin_listening
+    )
+    assert "response_language" not in source
+    assert "get_response_language_callback" not in source
+
+
+def test_voice_conversation_mode_retires_phase_741_idle_backoff() -> None:
+    """Phase 7.5 (section 9): the Phase 7.4.1 no-content-cycle backoff
+    (_voice_idle_cycles/_VOICE_IDLE_BACKOFF_*) is retired -- VAD now bounds
+    listening-cycle length structurally (trailing-silence window below,
+    max-utterance ceiling above), so the artificial widening backoff that
+    guarded against rapid repeated Whisper calls is redundant. Benign
+    cycles rearm at the plain fixed cadence again."""
+    from prototype_web_ui.controller import EchoUIController
+
+    controller_attrs = dir(EchoUIController)
+    assert "_voice_idle_cycles" not in controller_attrs or not hasattr(EchoUIController, "_voice_idle_cycles")
+    assert not hasattr(EchoUIController, "_VOICE_IDLE_BACKOFF_THRESHOLD")
+    assert not hasattr(EchoUIController, "_VOICE_IDLE_BACKOFF_DELAY_MS")
+    assert not hasattr(EchoUIController, "_voice_rearm_delay")
+
+
+# --- Phase 7.5: VAD routing at the controller level --------------------------
+# The VAD mechanism itself (state machine, thresholds, Whisper-avoidance) is
+# unit-tested in tests/test_voice_input.py. These tests cover the piece that
+# lives in the controller: EchoVoiceWorker(use_vad=...) must route Voice
+# Conversation Mode to record_and_transcribe_vad and manual MIC to the
+# unchanged record_and_transcribe -- and every existing session/staleness
+# guarantee must keep holding regardless of which path was used.
+
+
+class _DualPathVoiceTranscriber:
+    """Implements BOTH the legacy manual-mode method and the new VAD
+    method, each independently counted -- lets a test assert which one
+    EchoVoiceWorker actually called instead of inferring it from side
+    effects."""
+
+    def __init__(self, result: str = "ola echo") -> None:
+        self.result = result
+        self.vad_calls = 0
+        self.manual_calls = 0
+
+    def record_and_transcribe_vad(self, stop_event, status_callback=None) -> str:
+        self.vad_calls += 1
+        if status_callback is not None:
+            status_callback("A ouvir...")
+        stop_event.set()
+        return self.result
+
+    def record_and_transcribe(self, stop_event, status_callback=None) -> str:
+        self.manual_calls += 1
+        if status_callback is not None:
+            status_callback("A ouvir...")
+        stop_event.set()
+        return self.result
+
+
+def test_voice_vad_conversation_mode_routes_to_vad_path() -> None:
+    """E/F (controller level): Voice Conversation Mode calls
+    record_and_transcribe_vad exactly once per turn, never the legacy
+    method -- and never needs an external stop_event.set() from the test
+    itself (the fake sets it only because a real transcriber's VAD path
+    would have already stopped capture by the time it returns)."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Resposta.")
+    transcriber = _DualPathVoiceTranscriber(result="ola echo")
+    tts = _FakeTTSManager()
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=lambda *_a, **_k: 0.0,
+        thinking_min_ms=0,
+    )
+    responses: list[str] = []
+    controller.responseReady.connect(responses.append)
+
+    controller.startVoiceConversation()
+
+    assert _run_until(lambda: responses, timeout_ms=3000)
+    assert transcriber.vad_calls == 1
+    assert transcriber.manual_calls == 0
+    _stop_and_drain(controller)
+
+
+def test_voice_vad_r_manual_mic_uses_legacy_path_not_vad() -> None:
+    """R: manual MIC (outside Voice Conversation Mode) is untouched by
+    Phase 7.5 -- it must still call the plain record_and_transcribe(),
+    never record_and_transcribe_vad."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    transcriber = _DualPathVoiceTranscriber()
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+    transcripts: list[str] = []
+    controller.voiceTranscriptionReady.connect(transcripts.append)
+
+    controller.startVoiceInput()
+
+    assert _run_until(lambda: transcripts, timeout_ms=3000)
+    assert transcriber.manual_calls == 1
+    assert transcriber.vad_calls == 0
+
+
+def test_voice_vad_j_stale_callback_ignored_with_vad_transcriber() -> None:
+    """J: the Phase 7.4.1 session-staleness guard works identically
+    whether the worker used the legacy or the new VAD capture path -- a
+    late benign error from a VAD-based worker whose session was already
+    stopped must still be dropped, not surfaced as the main response."""
+    import threading
+
+    from assistant.voice_input import VoiceInputError
+    from prototype_web_ui.controller import EchoUIController
+
+    class _StopControlledVadTranscriber:
+        def __init__(self) -> None:
+            self.release_event = threading.Event()
+
+        def record_and_transcribe_vad(self, stop_event, status_callback=None) -> str:
+            self.release_event.wait(timeout=5)
+            raise VoiceInputError("A fala detetada foi demasiado curta. Fala detetada: 40ms; o minimo e 300ms.")
+
+    _qt_app()
+    transcriber = _StopControlledVadTranscriber()
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+    errors: list[str] = []
+    states: list[str] = []
+    controller.voiceInputError.connect(errors.append)
+    controller.stateChanged.connect(states.append)
+
+    controller.startVoiceConversation()
+    assert _run_until(lambda: controller._voice_worker is not None, timeout_ms=2000)
+
+    controller.stopVoiceConversation()
+    transcriber.release_event.set()
+
+    _run_until(lambda: False, timeout_ms=800)
+    assert errors == []
+    assert "error" not in states
+    assert states[-1] == "idle"
+
+
+def test_voice_vad_q_english_speech_with_portuguese_response_supported() -> None:
+    """Q: the reverse direction of Phase 7.4.1's Portuguese-in/English-out
+    test -- English speech transcribed, response_language=pt-PT -- proving
+    the architecture genuinely doesn't care about direction."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Resposta em português.")
+    transcriber = _FakeVoiceTranscriber(result="I went to lunch with my family today.")
+    tts = _FakeTTSManager()
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=lambda *_a, **_k: 0.0,
+        get_response_language=lambda: "pt-PT",
+        thinking_min_ms=0,
+    )
+    responses: list[str] = []
+    controller.responseReady.connect(responses.append)
+
+    controller.startVoiceConversation()
+
+    assert _run_until(lambda: tts.calls, timeout_ms=3000)
+    assert responses == ["Resposta em português."]
+    assert tts.response_languages == ["pt-PT"]
+    _stop_and_drain(controller)
+
+
+# --- Phase 7.6: Voice Standby Mode (wake/sleep) ------------------------------
+# Wake/sleep phrase PARSING is unit-tested in tests/test_voice_wake.py
+# (covers C/D from section 19 directly). These tests cover the controller-
+# level state machine: standby is a genuinely separate mode from active
+# (never both True), a captured standby transcript is a wake/ignore
+# decision rather than conversational content, and a sleep command during
+# active mode exits cleanly back to standby rather than being routed as a
+# task/query.
+
+
+def test_voice_standby_a_state_distinct_from_active() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=_BlockingVoiceTranscriber())
+
+    result = controller.startVoiceStandby()
+
+    assert result is True
+    assert controller.isVoiceStandbyActive() is True
+    assert controller.isVoiceConversationActive() is False
+    assert controller.voiceMode() == "standby"
+    controller.stopVoiceStandby()
+    _run_until(lambda: controller._voice_worker is None, timeout_ms=2000)
+
+
+def test_voice_standby_b_wake_intent_enters_active_mode() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Normal reply.")
+    transcriber = _SequentialVoiceTranscriber([("Echo", None), ("ola echo", None)])
+    tts = _FakeTTSManager()
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=lambda *_a, **_k: 0.0,
+        get_response_language=lambda: "en-GB",
+        thinking_min_ms=0,
+    )
+    responses: list[str] = []
+    controller.responseReady.connect(responses.append)
+
+    controller.startVoiceStandby()
+
+    assert _run_until(lambda: controller.isVoiceConversationActive(), timeout_ms=3000)
+    assert controller.isVoiceStandbyActive() is False
+    # Section 6: a deterministic acknowledgement is spoken + shown -- not an
+    # LLM-composed reply -- before the mic ever reopens.
+    assert _run_until(lambda: "I'm listening." in responses, timeout_ms=3000)
+    # A normal turn afterward still works fully hands-free.
+    assert _run_until(lambda: "Normal reply." in responses, timeout_ms=5000)
+    _stop_and_drain(controller)
+
+
+def test_voice_standby_e_non_wake_speech_does_not_enter_pipeline() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Should not be used.")
+    transcriber = _SequentialVoiceTranscriber([("que horas sao", None), ("outra coisa qualquer", None)])
+    controller = EchoUIController(engine.respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+    responses: list[str] = []
+    controller.responseReady.connect(responses.append)
+
+    controller.startVoiceStandby()
+
+    assert _run_until(lambda: transcriber.call_count >= 2, timeout_ms=5000)
+    assert responses == []
+    assert controller.isVoiceStandbyActive() is True
+    controller.stopVoiceStandby()
+    _run_until(lambda: controller._voice_worker is None, timeout_ms=2000)
+
+
+def test_voice_standby_fg_sleep_intent_exits_active_without_routing_as_content() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Should not be used for the sleep phrase.")
+    transcriber = _SequentialVoiceTranscriber([("vai dormir", None)])
+    controller = EchoUIController(engine.respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+    responses: list[str] = []
+    controller.responseReady.connect(responses.append)
+
+    controller.startVoiceConversation()
+
+    assert _run_until(lambda: controller.isVoiceStandbyActive(), timeout_ms=5000)
+    assert controller.isVoiceConversationActive() is False
+    assert responses == []  # the sleep phrase never reached the engine/response pipeline
+    controller.stopVoiceStandby()
+    _run_until(lambda: controller._voice_worker is None, timeout_ms=2000)
+
+
+def test_voice_conversation_sleep_a_vai_dormir_enters_standby() -> None:
+    """Phase 7.6.5 (section 16.A): the baseline supported phrase must still
+    work end to end -- ACTIVE -> STANDBY, no LLM call."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Should not be used.")
+    transcriber = _SequentialVoiceTranscriber([("vai dormir", None)])
+    controller = EchoUIController(engine.respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+    responses: list[str] = []
+    standby_states: list[bool] = []
+    active_states: list[bool] = []
+    controller.responseReady.connect(responses.append)
+    controller.voiceStandbyChanged.connect(standby_states.append)
+    controller.voiceConversationChanged.connect(active_states.append)
+
+    controller.startVoiceConversation()
+
+    assert _run_until(lambda: controller.isVoiceStandbyActive(), timeout_ms=5000)
+    assert controller.isVoiceConversationActive() is False
+    assert responses == []
+    assert engine.calls == []
+    assert True in active_states and False in active_states  # entered ACTIVE, then left it
+    assert True in standby_states
+    controller.stopVoiceStandby()
+    _run_until(lambda: controller._voice_worker is None, timeout_ms=2000)
+
+
+def test_voice_conversation_sleep_b_real_reported_phrase_nao_pode_ir_dormir() -> None:
+    """Phase 7.6.5 (section 16.B): the EXACT real failure -- "Não, pode ir
+    dormir." reached the normal conversation pipeline instead of being
+    intercepted before this phase's parser fix."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Should not be used.")
+    transcriber = _SequentialVoiceTranscriber([("Não, pode ir dormir.", None)])
+    controller = EchoUIController(engine.respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+    responses: list[str] = []
+    controller.responseReady.connect(responses.append)
+
+    controller.startVoiceConversation()
+
+    assert _run_until(lambda: controller.isVoiceStandbyActive(), timeout_ms=5000)
+    assert controller.isVoiceConversationActive() is False
+    assert responses == []
+    assert engine.calls == []
+    controller.stopVoiceStandby()
+    _run_until(lambda: controller._voice_worker is None, timeout_ms=2000)
+
+
+def test_voice_conversation_sleep_c_go_to_sleep_enters_standby() -> None:
+    """Phase 7.6.5 (section 16.C): the English form must work identically."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Should not be used.")
+    transcriber = _SequentialVoiceTranscriber([("go to sleep", None)])
+    controller = EchoUIController(engine.respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+    responses: list[str] = []
+    controller.responseReady.connect(responses.append)
+
+    controller.startVoiceConversation()
+
+    assert _run_until(lambda: controller.isVoiceStandbyActive(), timeout_ms=5000)
+    assert controller.isVoiceConversationActive() is False
+    assert responses == []
+    assert engine.calls == []
+    controller.stopVoiceStandby()
+    _run_until(lambda: controller._voice_worker is None, timeout_ms=2000)
+
+
+def test_voice_conversation_sleep_defg_short_stt_variant_and_false_positive() -> None:
+    """Phase 7.6.5 (sections 16.D/E/F/G, combined): the short truncated STT
+    variant ("Dorm.") is intercepted (no LLM call, no task/response
+    content) exactly like the full phrase, while a genuine mention of sleep
+    in ordinary conversation ("ontem fui dormir tarde") is left completely
+    alone -- still reaches the engine and is spoken back as a normal turn."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Normal reply about yesterday.")
+    transcriber = _SequentialVoiceTranscriber(
+        [("Dorm.", None), ("ontem fui dormir tarde", None)]
+    )
+    tts = _FakeTTSManager()
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=lambda *_a, **_k: 0.0,
+        thinking_min_ms=0,
+    )
+    responses: list[str] = []
+    controller.responseReady.connect(responses.append)
+
+    controller.startVoiceConversation()
+
+    # D/E/F: "Dorm." intercepted before reaching the engine -- ACTIVE exits
+    # to STANDBY without any LLM call and without a task/response turn.
+    assert _run_until(lambda: controller.isVoiceStandbyActive(), timeout_ms=5000)
+    assert controller.isVoiceConversationActive() is False
+    assert responses == []
+    assert engine.calls == []
+
+    # G: the false-positive sentence, said next, wakes Echo (it contains no
+    # wake word though, so it must NOT wake by itself) -- re-enter ACTIVE
+    # manually to verify the sentence itself still routes as normal
+    # conversation when Echo IS listening for turns, i.e. it is not treated
+    # as a sleep command.
+    controller.stopVoiceStandby()
+    _run_until(lambda: controller._voice_worker is None, timeout_ms=2000)
+    controller.startVoiceConversation()
+    assert _run_until(lambda: "Normal reply about yesterday." in responses, timeout_ms=5000)
+    assert engine.calls == ["ontem fui dormir tarde"]
+    _stop_and_drain(controller)
+
+
+# --- Phase 7.6.5 Part B: reduce wake latency (section 17) -------------------
+
+
+def test_voice_wake_j_wake_word_itself_never_reaches_the_engine() -> None:
+    """J: no unnecessary conversation routing on wake -- the wake word
+    transcript ("Echo") must never be treated as conversational content; a
+    real turn spoken right after wake is what reaches the engine."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Real reply.")
+    transcriber = _SequentialVoiceTranscriber([("Echo", None), ("uma pergunta real", None)])
+    tts = _FakeTTSManager()
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=lambda *_a, **_k: 0.0,
+        thinking_min_ms=0,
+    )
+
+    controller.startVoiceStandby()
+
+    assert _run_until(lambda: engine.calls == ["uma pergunta real"], timeout_ms=5000)
+    _stop_and_drain(controller)
+
+
+def test_voice_wake_ik_timing_diagnostic_reports_small_classification_and_transition_ms(capsys) -> None:
+    """I/K: [VOICE_WAKE_TIMING] must show classification (deterministic
+    text matching, not an LLM call) and the ACTIVE-flip itself both taking
+    a negligible, bounded amount of time -- no redundant sleep/timer sits
+    between STT finishing and ACTIVE becoming true."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Reply.")
+    transcriber = _SequentialVoiceTranscriber([("Echo", None)])
+    tts = _FakeTTSManager()
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=lambda *_a, **_k: 0.0,
+        thinking_min_ms=0,
+    )
+
+    captured = ""
+
+    def _seen() -> bool:
+        nonlocal captured
+        captured += capsys.readouterr().out
+        return "[VOICE_WAKE_TIMING]" in captured
+
+    controller.startVoiceStandby()
+
+    assert _run_until(_seen, timeout_ms=5000)
+    line = next(line for line in captured.splitlines() if "[VOICE_WAKE_TIMING]" in line)
+    fields = dict(part.split("=", 1) for part in line.split(" ")[1:])
+    assert float(fields["classification_ms"]) < 50.0
+    assert float(fields["wake_to_active_ms"]) < 50.0
+    _stop_and_drain(controller)
+
+
+def test_voice_wake_l_acknowledgement_does_not_block_active_transition() -> None:
+    """L: ACTIVE must flip to True as soon as the wake intent is matched --
+    even while the acknowledgement TTS call is still in flight (a slow
+    player standing in for real synthesis+playback time)."""
+    import time as _time
+
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Reply.")
+    transcriber = _SequentialVoiceTranscriber([("Echo", None)])
+    tts = _FakeTTSManager()
+    active_when_player_called: list[bool] = []
+
+    def slow_player(_path, stop_checker=None, **_kwargs) -> float:
+        active_when_player_called.append(controller.isVoiceConversationActive())
+        deadline = _time.perf_counter() + 0.2
+        while _time.perf_counter() < deadline:
+            if stop_checker and stop_checker():
+                break
+            _time.sleep(0.01)
+        return 0.2
+
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=slow_player,
+        thinking_min_ms=0,
+    )
+
+    controller.startVoiceStandby()
+
+    assert _run_until(lambda: active_when_player_called, timeout_ms=5000)
+    # ACTIVE was ALREADY true by the time the (slow) acknowledgement
+    # playback started -- the transition never waited on it.
+    assert active_when_player_called == [True]
+    _stop_and_drain(controller)
+
+
+def test_voice_wake_m_ignored_standby_wake_rearms_faster_than_active(capsys) -> None:
+    """M: an ignored/non-wake utterance heard during STANDBY must rearm
+    listening with the faster 150ms standby-only delay, not ACTIVE's
+    350ms -- confirmed here by reading the actual [VOICE_LOOP]
+    event=rearm_listening delay_ms=... diagnostic line."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Should not be used.")
+    transcriber = _SequentialVoiceTranscriber([("que horas sao", None), ("outra coisa qualquer", None)])
+    controller = EchoUIController(engine.respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+
+    captured = ""
+
+    def _seen() -> bool:
+        nonlocal captured
+        captured += capsys.readouterr().out
+        return "event=rearm_listening" in captured
+
+    controller.startVoiceStandby()
+
+    assert _run_until(_seen, timeout_ms=5000)
+    line = next(line for line in captured.splitlines() if "event=rearm_listening" in line)
+    assert "delay_ms=150" in line
+    controller.stopVoiceStandby()
+    _run_until(lambda: controller._voice_worker is None, timeout_ms=2000)
+
+
+def test_voice_wake_m_active_rearm_delay_remains_unchanged(capsys) -> None:
+    """M (counterpart): the SAME rearm path during ACTIVE conversation must
+    still use the original 350ms delay -- only STANDBY got faster."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Reply.")
+    transcriber = _SequentialVoiceTranscriber([("", None), ("outra coisa qualquer", None)])
+    controller = EchoUIController(engine.respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+
+    captured = ""
+
+    def _seen() -> bool:
+        nonlocal captured
+        captured += capsys.readouterr().out
+        return "event=rearm_listening" in captured
+
+    controller.startVoiceConversation()
+
+    assert _run_until(_seen, timeout_ms=5000)
+    line = next(line for line in captured.splitlines() if "event=rearm_listening" in line)
+    assert "delay_ms=350" in line
+    _stop_and_drain(controller)
+
+
+def test_voice_standby_h_wake_sleep_does_not_touch_tts_manager_teardown() -> None:
+    """H: transitioning standby<->active must never call the TTS manager's
+    own teardown/stop -- only a worker's own per-request stop_event, which
+    never touches the shared persistent Pocket process."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Reply.")
+    transcriber = _SequentialVoiceTranscriber([("Echo", None)])
+    tts = _FakeTTSManager()
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=lambda *_a, **_k: 0.0,
+        thinking_min_ms=0,
+    )
+
+    controller.startVoiceStandby()
+
+    assert _run_until(lambda: controller.isVoiceConversationActive(), timeout_ms=3000)
+    assert tts.stopped is False
+    _stop_and_drain(controller)
+    assert tts.stopped is False
+
+
+def test_voice_standby_i_stale_callback_after_sleep_cannot_restart_active() -> None:
+    import threading
+
+    from prototype_web_ui.controller import EchoUIController
+
+    class _StopControlledTranscriber:
+        def __init__(self) -> None:
+            self.release_event = threading.Event()
+            self.first_call = True
+
+        def record_and_transcribe(self, stop_event, status_callback=None) -> str:
+            if self.first_call:
+                self.first_call = False
+                return "vai dormir"
+            self.release_event.wait(timeout=5)
+            return "late transcript"
+
+    _qt_app()
+    engine = _FakeEngine(reply="Should not be used.")
+    transcriber = _StopControlledTranscriber()
+    controller = EchoUIController(engine.respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+    responses: list[str] = []
+    controller.responseReady.connect(responses.append)
+
+    controller.startVoiceConversation()
+    assert _run_until(lambda: controller.isVoiceStandbyActive(), timeout_ms=5000)
+    # The standby loop already opened a second, now-blocked listening cycle.
+    assert _run_until(lambda: controller._voice_worker is not None, timeout_ms=2000)
+
+    controller.stopVoiceStandby()
+    transcriber.release_event.set()
+
+    _run_until(lambda: False, timeout_ms=800)
+    assert responses == []
+    assert controller.isVoiceConversationActive() is False
+    assert controller.isVoiceStandbyActive() is False
+
+
+def test_voice_standby_j_off_stays_off_without_manual_action() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=_FakeVoiceTranscriber())
+
+    assert controller.voiceMode() == "off"
+    assert controller.isVoiceConversationActive() is False
+    assert controller.isVoiceStandbyActive() is False
+
+
+# --- Phase 7.6.1: fix short wake commands in standby -------------------------
+# Real-mic validation showed standby was reusing ACTIVE's vad_config
+# (min_speech_ms~300ms), so a short wake word like "Echo" (measured at
+# 200-280ms) was routinely rejected as a benign "too short" retry before
+# Whisper ever ran. The VAD-level fix (a separate, more permissive
+# standby_vad_config) is unit-tested in tests/test_voice_input.py; these
+# tests cover the controller-level wiring: standby actually requests its
+# own config, short wake words still correctly enter ACTIVE, and short
+# non-wake noise still doesn't.
+
+
+class _VadConfigCapturingTranscriber:
+    """Records which vad_config was actually passed to
+    record_and_transcribe_vad on each call -- proves standby requests its
+    OWN, more permissive config while active does not request one at all
+    (falling back to the transcriber's normal default)."""
+
+    def __init__(self, result: str = "Echo") -> None:
+        self.result = result
+        self.received_vad_configs: list[object] = []
+        # Sentinels distinct from any real VadConfig instance, so the test
+        # can assert exactly which one (if any) was passed through.
+        self.standby_vad_config = object()
+        self.vad_config = object()
+
+    def record_and_transcribe_vad(
+        self,
+        stop_event,
+        status_callback=None,
+        *,
+        input_language=None,
+        vad_config=None,
+        on_speech_confirmed=None,
+        require_confirmation_before_recording=False,
+    ) -> str:
+        self.received_vad_configs.append(vad_config)
+        stop_event.set()
+        return self.result
+
+    def record_and_transcribe(self, stop_event, status_callback=None) -> str:
+        raise AssertionError("manual (legacy) path must not be used for standby/active workers")
+
+
+def test_voice_standby_f_standby_requests_its_own_vad_config() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    transcriber = _VadConfigCapturingTranscriber(result="Echo")
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+
+    controller.startVoiceStandby()
+
+    assert _run_until(lambda: transcriber.received_vad_configs, timeout_ms=3000)
+    assert transcriber.received_vad_configs[0] is transcriber.standby_vad_config
+    _stop_and_drain(controller)
+
+
+# --- Phase 7.6.6: STANDBY wake fast path (section 16 A/B/J/M + prewarm/logging) --
+# EchoVoiceWorker.run() duck-types record_and_transcribe_wake the same way
+# it already duck-types record_and_transcribe_vad -- a transcriber double
+# without it (every OLDER fake, including _VadConfigCapturingTranscriber
+# above) safely falls through to the pre-7.6.6 standby path, which is why
+# none of those existing tests needed updating for this phase.
+
+
+class _WakeMethodCapturingTranscriber:
+    """Records which method EchoVoiceWorker actually invoked for each mode
+    -- proves STANDBY uses the new fast wake path (record_and_transcribe_
+    wake) while ACTIVE keeps using the Medium-backed vad path
+    (record_and_transcribe_vad), never the other way around."""
+
+    def __init__(self, wake_result: str = "Echo", active_result: str = "reply") -> None:
+        self.wake_result = wake_result
+        self.active_result = active_result
+        self.wake_calls = 0
+        self.vad_calls: list[object] = []
+        self.standby_vad_config = object()
+        self.vad_config = object()
+        self.model_name = "medium"
+
+    def record_and_transcribe_wake(self, stop_event, status_callback=None, *, on_speech_confirmed=None) -> str:
+        self.wake_calls += 1
+        stop_event.set()
+        return self.wake_result
+
+    def record_and_transcribe_vad(
+        self,
+        stop_event,
+        status_callback=None,
+        *,
+        input_language=None,
+        vad_config=None,
+        on_speech_confirmed=None,
+        require_confirmation_before_recording=False,
+    ) -> str:
+        self.vad_calls.append(vad_config)
+        stop_event.set()
+        return self.active_result
+
+    def record_and_transcribe(self, stop_event, status_callback=None) -> str:
+        raise AssertionError("manual (legacy) path must not be used for standby/active workers")
+
+
+def test_wake_fast_path_a_standby_uses_wake_recognizer_not_medium_vad_path() -> None:
+    """A: STANDBY must call the new record_and_transcribe_wake method --
+    never the old Medium-backed record_and_transcribe_vad path."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    transcriber = _WakeMethodCapturingTranscriber(wake_result="Echo")
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+
+    controller.startVoiceStandby()
+
+    assert _run_until(lambda: controller.isVoiceConversationActive(), timeout_ms=3000)
+    assert transcriber.wake_calls == 1
+    assert transcriber.vad_calls == []
+    _stop_and_drain(controller)
+
+
+def test_wake_fast_path_b_active_still_uses_medium_vad_path_not_wake_recognizer() -> None:
+    """B: ACTIVE conversation transcription must keep using the Medium-
+    backed record_and_transcribe_vad path -- the fast wake recognizer must
+    never be touched for a real conversational turn."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Reply.")
+    transcriber = _WakeMethodCapturingTranscriber(active_result="uma pergunta real")
+    tts = _FakeTTSManager()
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=lambda *_a, **_k: 0.0,
+        thinking_min_ms=0,
+    )
+
+    controller.startVoiceConversation()
+
+    assert _run_until(lambda: engine.calls == ["uma pergunta real"], timeout_ms=5000)
+    assert transcriber.wake_calls == 0
+    _stop_and_drain(controller)
+
+
+def test_wake_fast_path_j_single_wake_transcript_triggers_active_transition_exactly_once() -> None:
+    """J: one wake transcript must flip ACTIVE exactly once -- no duplicate
+    transition."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    transcriber = _WakeMethodCapturingTranscriber(wake_result="Echo")
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+    active_true_count = 0
+
+    def _on_active_changed(active: bool) -> None:
+        nonlocal active_true_count
+        if active:
+            active_true_count += 1
+
+    controller.voiceConversationChanged.connect(_on_active_changed)
+
+    controller.startVoiceStandby()
+
+    assert _run_until(lambda: controller.isVoiceConversationActive(), timeout_ms=3000)
+    assert active_true_count == 1
+    _stop_and_drain(controller)
+
+
+def test_wake_fast_path_m_unrelated_wake_recognizer_result_does_not_activate() -> None:
+    """M: the deterministic wake parser remains the sole authority --
+    whatever text the fast recognizer produces, it still must classify as
+    "wake" before ACTIVE is entered."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    transcriber = _WakeMethodCapturingTranscriber(wake_result="ola, tudo bem")
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+
+    controller.startVoiceStandby()
+
+    assert _run_until(lambda: transcriber.wake_calls >= 1, timeout_ms=3000)
+    _run_until(lambda: False, timeout_ms=300)
+    assert controller.isVoiceConversationActive() is False
+    assert controller.isVoiceStandbyActive() is True
+    controller.stopVoiceStandby()
+    _run_until(lambda: controller._voice_worker is None, timeout_ms=2000)
+
+
+class _PrewarmCapturingWakeRecognizer:
+    def __init__(self) -> None:
+        import threading
+
+        self.prewarm_calls = 0
+        self._lock = threading.Lock()
+
+    def prewarm(self) -> None:
+        with self._lock:
+            self.prewarm_calls += 1
+
+
+def test_wake_fast_path_prewarm_triggered_asynchronously_on_standby_entry() -> None:
+    """Section 6: entering STANDBY must kick off the wake recognizer's
+    prewarm() -- without blocking the Slot/UI thread."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    transcriber = _WakeMethodCapturingTranscriber(wake_result="Echo")
+    fake_wake_recognizer = _PrewarmCapturingWakeRecognizer()
+    transcriber.wake_recognizer = fake_wake_recognizer
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+
+    controller.startVoiceStandby()
+
+    assert _run_until(lambda: fake_wake_recognizer.prewarm_calls >= 1, timeout_ms=3000)
+    # The prewarm QThread must be genuinely finished (not just its side
+    # effect observed) before this test returns -- letting a still-running
+    # QThread's Python wrapper go out of scope and get garbage collected is
+    # a real PySide6 crash risk (the same class of bug _stop_and_drain's
+    # own docstring warns about for the other worker threads).
+    prewarm_thread = getattr(controller, "_wake_prewarm_thread", None)
+    if prewarm_thread is not None:
+        prewarm_thread.wait(2000)
+    _stop_and_drain(controller)
+
+
+def test_wake_fast_path_timing_log_includes_recognizer_and_model_fields(capsys) -> None:
+    """Section 13: [VOICE_WAKE_TIMING] must include recognizer=/model=/
+    model_load_ms=/fallback_to_medium= so a real log makes it obvious which
+    recognizer actually produced the transcript."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    transcriber = _WakeMethodCapturingTranscriber(wake_result="Echo")
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+
+    captured = ""
+
+    def _seen() -> bool:
+        nonlocal captured
+        captured += capsys.readouterr().out
+        return "[VOICE_WAKE_TIMING]" in captured
+
+    controller.startVoiceStandby()
+
+    assert _run_until(_seen, timeout_ms=3000)
+    line = next(line for line in captured.splitlines() if "[VOICE_WAKE_TIMING]" in line)
+    assert "recognizer=" in line
+    assert "model=" in line
+    assert "model_load_ms=" in line
+    assert "fallback_to_medium=" in line
+    _stop_and_drain(controller)
+
+
+# --- Phase 7.6.6.1: wake prewarm QThread shutdown lifetime ------------------
+# Real runtime crash: `RuntimeError: libshiboken: Internal C++ object
+# (_WakeRecognizerPrewarmThread) already deleted` inside shutdown()'s
+# `.wait()` call, plus a `QThread: Destroyed while thread '' is still
+# running` warning. Root cause: the prewarm thread's `finished` signal was
+# connected straight to `thread.deleteLater()`, but nothing ever cleared the
+# controller's own `self._wake_prewarm_thread` reference -- so once Qt
+# actually deleted the C++ object (asynchronously, on a later event-loop
+# turn), that attribute became a dangling wrapper. shutdown() calling
+# `.wait()` on it was a genuine use-after-delete. The fix: the controller
+# owns the reference for the thread's entire valid lifetime and nowhere
+# else -- `_on_wake_prewarm_finished` clears it FIRST, before requesting
+# deletion -- with `shiboken6.isValid()` as a secondary, defensive guard in
+# `_shutdown_wake_prewarm_thread`, never the primary fix.
+
+
+class _SlowPrewarmWakeRecognizer:
+    """A fake whose prewarm() genuinely blocks for a bit -- lets a test
+    observe/act on the controller WHILE the QThread is still running,
+    instead of racing a near-instantaneous fake."""
+
+    def __init__(self, delay_seconds: float = 0.3) -> None:
+        self.delay_seconds = delay_seconds
+        self.prewarm_calls = 0
+
+    def prewarm(self) -> None:
+        import time
+
+        time.sleep(self.delay_seconds)
+        self.prewarm_calls += 1
+
+
+def test_wake_prewarm_a_shutdown_while_prewarm_still_running_waits_safely() -> None:
+    """A: closing the app WHILE the prewarm thread is still mid-flight must
+    wait for it (bounded) and never raise/crash."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    transcriber = _WakeMethodCapturingTranscriber(wake_result="Echo")
+    fake_wake_recognizer = _SlowPrewarmWakeRecognizer(delay_seconds=0.3)
+    transcriber.wake_recognizer = fake_wake_recognizer
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+
+    controller.startVoiceStandby()
+    thread = controller._wake_prewarm_thread
+    assert thread is not None
+    assert thread.isRunning() is True
+
+    controller.shutdown()  # must block until prewarm finishes, never raise
+
+    assert fake_wake_recognizer.prewarm_calls == 1
+    assert controller._wake_prewarm_thread is None
+    assert thread.isRunning() is False
+
+
+def test_wake_prewarm_b_shutdown_after_prewarm_already_finished_is_a_noop() -> None:
+    """B: closing the app AFTER the prewarm thread already finished (and
+    its finished->clear->deleteLater flow already ran) must be a safe
+    no-op -- nothing left to wait on or delete."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    transcriber = _WakeMethodCapturingTranscriber(wake_result="Echo")
+    fake_wake_recognizer = _PrewarmCapturingWakeRecognizer()
+    transcriber.wake_recognizer = fake_wake_recognizer
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+
+    controller.startVoiceStandby()
+    assert _run_until(lambda: controller._wake_prewarm_thread is None, timeout_ms=3000)
+
+    controller.shutdown()  # nothing to do -- must not raise
+
+    assert fake_wake_recognizer.prewarm_calls == 1
+
+
+def test_wake_prewarm_c_shutdown_after_qt_object_already_deleted_does_not_crash() -> None:
+    """C/E/F (the exact real bug): a stale Python wrapper whose underlying
+    C++ object was ALREADY deleted must never reach .wait() -- this
+    reproduces the real crash's precondition directly (a dangling
+    _WakeRecognizerPrewarmThread reference), which the fixed code detects
+    via shiboken6.isValid() and handles gracefully instead of raising
+    `RuntimeError: libshiboken: ... already deleted`."""
+    import shiboken6
+
+    from prototype_web_ui.controller import EchoUIController, _WakeRecognizerPrewarmThread
+
+    _qt_app()
+    transcriber = _WakeMethodCapturingTranscriber(wake_result="Echo")
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+
+    dangling = _WakeRecognizerPrewarmThread(lambda: None, controller)
+    dangling.start()
+    dangling.wait(2000)
+    # Force the C++ object gone deterministically (deleteLater()'s actual
+    # deferred-delete timing isn't guaranteed to have run after a bounded
+    # number of processEvents() calls in a script, not a real exec() loop)
+    # -- shiboken6.delete() is the direct, synchronous equivalent for
+    # reproducing "the underlying object is already gone" precisely.
+    shiboken6.delete(dangling)
+    assert not shiboken6.isValid(dangling)
+
+    # Simulate the real bug's exact precondition: the controller's own
+    # attribute still points at the now-deleted wrapper.
+    controller._wake_prewarm_thread = dangling
+
+    controller.shutdown()  # must NOT raise RuntimeError
+
+    assert controller._wake_prewarm_thread is None
+
+
+def test_wake_prewarm_d_shutdown_called_twice_is_safe() -> None:
+    """D: calling shutdown() twice must never double-wait or double-delete."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    transcriber = _WakeMethodCapturingTranscriber(wake_result="Echo")
+    fake_wake_recognizer = _PrewarmCapturingWakeRecognizer()
+    transcriber.wake_recognizer = fake_wake_recognizer
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+
+    controller.startVoiceStandby()
+    controller.shutdown()
+    controller.shutdown()  # must be a safe no-op the second time
+
+    assert controller._wake_prewarm_thread is None
+
+
+def test_wake_prewarm_g_normal_wake_fast_path_still_works() -> None:
+    """G: none of the shutdown/ownership fixes changed normal wake
+    recognition behavior -- a clear "Echo" still activates."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    transcriber = _WakeMethodCapturingTranscriber(wake_result="Echo")
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+
+    controller.startVoiceStandby()
+
+    assert _run_until(lambda: controller.isVoiceConversationActive(), timeout_ms=3000)
+    _stop_and_drain(controller)
+
+
+def test_wake_prewarm_h_never_starts_a_second_prewarm_while_one_in_flight() -> None:
+    """H: re-entering standby-prewarm logic while a prewarm is already
+    running must never spawn a second QThread -- the existing one already
+    warms the SAME shared WakeRecognizer, and starting a second (or
+    reloading the model twice) is exactly what section 5 forbids."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    transcriber = _WakeMethodCapturingTranscriber(wake_result="Echo")
+    fake_wake_recognizer = _SlowPrewarmWakeRecognizer(delay_seconds=0.3)
+    transcriber.wake_recognizer = fake_wake_recognizer
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+
+    controller._begin_voice_standby(reason="user_request")
+    first_thread = controller._wake_prewarm_thread
+    controller._prewarm_wake_recognizer()
+    second_thread = controller._wake_prewarm_thread
+
+    assert first_thread is second_thread
+    controller.shutdown()
+    assert fake_wake_recognizer.prewarm_calls == 1
+
+
+def test_wake_prewarm_real_lifecycle_all_three_close_timings_are_safe() -> None:
+    """Reproduces the real reported sequence as closely as an automated
+    test reasonably can: a REAL _WakeRecognizerPrewarmThread driving a REAL
+    WakeRecognizer (only the underlying `whisper` module is faked, to avoid
+    a real model load/download), closed at the three real manual-
+    validation timings from the task -- immediately, mid-flight, and after
+    the prewarm has already finished. None may raise or crash."""
+    import sys
+    import time
+
+    from assistant.wake_recognizer import WakeRecognizer
+    from prototype_web_ui.controller import EchoUIController
+
+    class _FakeModel:
+        def transcribe(self, *_args: object, **_kwargs: object) -> dict[str, str]:
+            return {"text": "Echo"}
+
+    class _FakeWhisperModuleForPrewarm:
+        def __init__(self, load_delay_seconds: float) -> None:
+            self.load_delay_seconds = load_delay_seconds
+
+        def load_model(self, _model_name: str) -> _FakeModel:
+            time.sleep(self.load_delay_seconds)
+            return _FakeModel()
+
+    for close_timing, load_delay_seconds in (
+        ("immediately", 0.3),
+        ("mid_flight", 0.3),
+        ("after_finished", 0.0),
+    ):
+        original_whisper = sys.modules.get("whisper")
+        sys.modules["whisper"] = _FakeWhisperModuleForPrewarm(load_delay_seconds)
+        try:
+            app = _qt_app()
+            transcriber = _WakeMethodCapturingTranscriber(wake_result="Echo")
+            transcriber.wake_recognizer = WakeRecognizer(model_name="tiny")
+            controller = EchoUIController(
+                _FakeEngine().respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0
+            )
+
+            controller._begin_voice_standby(reason="user_request")
+            if close_timing == "after_finished":
+                for _ in range(50):
+                    app.processEvents()
+                    if controller._wake_prewarm_thread is None:
+                        break
+                    time.sleep(0.01)
+
+            controller.shutdown()  # must never raise, regardless of timing
+        finally:
+            if original_whisper is not None:
+                sys.modules["whisper"] = original_whisper
+            else:
+                sys.modules.pop("whisper", None)
+
+
+def test_voice_standby_d_short_wake_word_never_submitted_as_turn() -> None:
+    """D: a short wake-like transcript ("Echo") is never routed through
+    submitMessage()/the engine as conversational content -- only the
+    deterministic wake acknowledgement appears."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Should not be a reply to Echo itself.")
+    transcriber = _SequentialVoiceTranscriber([("Echo", None)])
+    controller = EchoUIController(engine.respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+    responses: list[str] = []
+    controller.responseReady.connect(responses.append)
+
+    controller.startVoiceStandby()
+
+    assert _run_until(lambda: controller.isVoiceConversationActive(), timeout_ms=3000)
+    assert responses == ["I'm listening."]
+    _stop_and_drain(controller)
+
+
+def test_voice_standby_g_short_echo_enters_active() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    transcriber = _SequentialVoiceTranscriber([("Echo", None)])
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+
+    controller.startVoiceStandby()
+
+    assert _run_until(lambda: controller.isVoiceConversationActive(), timeout_ms=3000)
+    _stop_and_drain(controller)
+
+
+def test_voice_standby_h_short_acorda_enters_active() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    transcriber = _SequentialVoiceTranscriber([("acorda", None)])
+    controller = EchoUIController(
+        _FakeEngine().respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        get_response_language=lambda: "pt-PT",
+        thinking_min_ms=0,
+    )
+
+    controller.startVoiceStandby()
+
+    assert _run_until(lambda: controller.isVoiceConversationActive(), timeout_ms=3000)
+    _stop_and_drain(controller)
+
+
+def test_voice_standby_i_non_wake_short_noise_does_not_enter_active() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Should not be used.")
+    transcriber = _SequentialVoiceTranscriber([("uh", None), ("Echo", None)])
+    controller = EchoUIController(engine.respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+    responses: list[str] = []
+    controller.responseReady.connect(responses.append)
+
+    controller.startVoiceStandby()
+
+    assert _run_until(lambda: controller.isVoiceConversationActive(), timeout_ms=5000)
+    assert responses == ["I'm listening."]  # "uh" never reached the engine as content
+    _stop_and_drain(controller)
+
+
+def test_voice_standby_j_no_duplicate_rearm() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=_BlockingVoiceTranscriber())
+
+    controller.startVoiceStandby()
+    first_worker = controller._voice_worker
+    assert first_worker is not None
+
+    controller._rearm_voice_listening(controller._voice_session_id)
+
+    assert controller._voice_worker is first_worker
+    controller.stopVoiceStandby()
+    _run_until(lambda: controller._voice_worker is None, timeout_ms=2000)
+
+
+# --- Phase 7.6: barge-in -----------------------------------------------------
+# The low-level VAD mechanics (discard-until-confirmed, short noise spikes,
+# sustained speech) are unit-tested in tests/test_voice_input.py. These
+# tests cover the controller-level wiring: the detector only runs while
+# genuinely speaking in ACTIVE mode, a confirmed interruption stops
+# playback and hands off into a normal capture that becomes the next turn,
+# races with STOP/sleep/a stale ttsFinished are all handled safely, and no
+# duplicate stop/rearm ever happens.
+
+
+class _BargeInCapableTranscriber:
+    """Implements the FULL record_and_transcribe_vad signature (vad_config/
+    on_speech_confirmed/require_confirmation_before_recording) so
+    controller-level tests can exercise _begin_barge_in_monitor's duck-
+    typed capability check and the resulting stop-TTS/capture-handoff flow
+    without real audio hardware. Confirms speech exactly once ever (real
+    interruption), unless cancelled (stop_event set) before that point --
+    mirroring how a real cancelled barge-in monitor never confirms."""
+
+    def __init__(self, active_result: str = "ola echo", barge_in_result: str = "espera nao era isso") -> None:
+        self.active_result = active_result
+        self.barge_in_result = barge_in_result
+        self.active_calls = 0
+        self.barge_in_calls = 0
+        self.confirmed_count = 0
+        self._confirmed_once = False
+
+    def record_and_transcribe_vad(
+        self,
+        stop_event,
+        status_callback=None,
+        *,
+        input_language=None,
+        vad_config=None,
+        on_speech_confirmed=None,
+        require_confirmation_before_recording=False,
+    ) -> str:
+        import time
+
+        from assistant.voice_input import VoiceNoSpeechDetected
+
+        if require_confirmation_before_recording:
+            self.barge_in_calls += 1
+            if not self._confirmed_once:
+                for step in range(50):
+                    if stop_event.is_set():
+                        raise VoiceNoSpeechDetected("Nao detetei fala.")
+                    if step == 4:  # confirm at ~50ms if not cancelled first
+                        self._confirmed_once = True
+                        self.confirmed_count += 1
+                        if on_speech_confirmed is not None:
+                            on_speech_confirmed()
+                        stop_event.set()
+                        return self.barge_in_result
+                    time.sleep(0.01)
+                raise VoiceNoSpeechDetected("Nao detetei fala.")
+            while not stop_event.is_set():
+                time.sleep(0.01)
+            raise VoiceNoSpeechDetected("Nao detetei fala.")
+        self.active_calls += 1
+        stop_event.set()
+        return self.active_result
+
+    def record_and_transcribe(self, stop_event, status_callback=None) -> str:
+        raise AssertionError("manual (legacy) path must not be used for active/barge-in workers")
+
+
+def _slow_player(_path, stop_checker=None) -> float:
+    import time
+
+    for _ in range(50):
+        if stop_checker and stop_checker():
+            return 0.0
+        time.sleep(0.01)
+    return 0.0
+
+
+def test_barge_in_k_detector_only_runs_while_active() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    transcriber = _BargeInCapableTranscriber()
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+
+    controller._begin_barge_in_monitor()  # not in active mode -- must no-op
+    assert controller._voice_worker is None
+
+    controller._voice_conversation_active = True
+    controller._begin_barge_in_monitor()
+    assert controller._voice_worker is not None
+    assert controller._voice_worker_is_barge_in is True
+    _stop_and_drain(controller)
+
+
+def test_barge_in_nrstu_confirmed_interruption_becomes_next_turn() -> None:
+    """N/R/S/T/U (and implicitly O/Q): sustained speech during playback
+    stops TTS, hands off into a normal VAD capture, trailing silence
+    completes the interrupted utterance, it transcribes/submits exactly
+    once, and the resulting response is the NEXT turn."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Reply.")
+    transcriber = _BargeInCapableTranscriber(active_result="ola echo", barge_in_result="espera nao era isso")
+    tts = _FakeTTSManager()
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=_slow_player,
+        thinking_min_ms=0,
+    )
+    states: list[str] = []
+    responses: list[str] = []
+    controller.stateChanged.connect(states.append)
+    controller.responseReady.connect(responses.append)
+
+    controller.startVoiceConversation()
+
+    assert _run_until(lambda: "speaking" in states, timeout_ms=3000)
+    assert _run_until(lambda: transcriber.confirmed_count >= 1, timeout_ms=3000)
+    assert _run_until(lambda: responses.count("Reply.") >= 2, timeout_ms=8000)
+    assert transcriber.confirmed_count == 1  # confirmed exactly once (P/S)
+    assert transcriber.active_calls >= 1
+    _stop_and_drain(controller)
+
+
+def test_barge_in_t_stale_tts_finished_after_confirmed_does_not_duplicate_listener() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    transcriber = _BargeInCapableTranscriber()
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=transcriber, thinking_min_ms=0)
+    controller._voice_conversation_active = True
+    controller._voice_session_id = 1
+
+    # Simulate: a barge-in worker already confirmed and is now capturing.
+    sentinel_worker = object()
+    controller._voice_worker = sentinel_worker
+    controller._voice_worker_is_barge_in = True
+    controller._voice_worker_barge_in_confirmed = True
+    controller._voice_worker_session_id = 1
+    controller._voice_worker_mode = "active"
+
+    # The (now redundant) ttsFinished for the interrupted playback arrives.
+    controller._handle_tts_finished('{"playback_ms": 120, "voice_id": "x"}')
+
+    # Must not have touched/replaced the still-capturing worker.
+    assert controller._voice_worker is sentinel_worker
+    controller._voice_conversation_active = False
+
+
+def test_barge_in_v_interrupted_response_text_stays_visible() -> None:
+    """V: nothing in the barge-in confirmation/interruption path clears or
+    touches the already-shown response text."""
+    import inspect
+
+    from prototype_web_ui.controller import EchoUIController
+
+    source = inspect.getsource(EchoUIController._handle_barge_in_confirmed)
+    assert "responseReady" not in source
+    assert "_emit_response_ready" not in source
+
+
+def test_barge_in_w_no_resume_mechanism_exists() -> None:
+    """W: abandoned/interrupted audio is never resumed -- there is no
+    resume-style method anywhere on the TTS worker to even call."""
+    from prototype_web_ui.controller import EchoTTSWorker
+
+    assert not hasattr(EchoTTSWorker, "resume")
+
+
+def test_barge_in_x_manual_stop_cancels_unconfirmed_monitor_too() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Reply.")
+    transcriber = _BargeInCapableTranscriber()
+    tts = _FakeTTSManager()
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=_slow_player,
+        thinking_min_ms=0,
+    )
+    states: list[str] = []
+    controller.stateChanged.connect(states.append)
+
+    controller.startVoiceConversation()
+    assert _run_until(lambda: "speaking" in states, timeout_ms=3000)
+    assert _run_until(lambda: transcriber.barge_in_calls >= 1, timeout_ms=2000)
+
+    controller.stopSpeaking()  # STOP pressed before the monitor ever confirms
+
+    assert controller.isVoiceConversationActive() is True
+    assert _run_until(lambda: controller._voice_worker is not None, timeout_ms=3000)  # rearmed to a fresh listening cycle
+    assert transcriber.confirmed_count == 0
+    _stop_and_drain(controller)
+
+
+def test_barge_in_y_sleep_said_as_interruption_exits_to_standby() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Reply.")
+    transcriber = _BargeInCapableTranscriber(barge_in_result="vai dormir")
+    tts = _FakeTTSManager()
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=_slow_player,
+        thinking_min_ms=0,
+    )
+
+    controller.startVoiceConversation()
+
+    assert _run_until(lambda: controller.isVoiceStandbyActive(), timeout_ms=8000)
+    assert controller.isVoiceConversationActive() is False
+    controller.stopVoiceStandby()
+    # Drain fully -- including the interrupted TTS worker's OWN eventual
+    # finished signal, which the earlier assert's _run_until stopped
+    # pumping for the instant isVoiceStandbyActive() went true. Without
+    # this, the TTS QThread never gets a chance to actually quit and
+    # orphans, hanging pytest's own teardown.
+    assert _run_until(lambda: controller._voice_worker is None and controller._tts_worker is None, timeout_ms=3000)
+
+
+# --- Phase 7.6.2: STOP-during-speaking -----------------------------------
+# Real-mic validation showed STOP appeared to have no effect during a long
+# Pocket/Anna playback -- the controller ROUTING here was already correct
+# (stopSpeaking() always called _tts_worker.stop()); the actual root cause
+# was assistant/tts.py's play_audio_file() ignoring the stop signal mid-
+# playback (fixed + unit-tested separately in tests/test_tts.py). These
+# tests re-confirm the controller-level state machine around STOP: it
+# reaches the TTS worker, cancels an unconfirmed barge-in monitor, never
+# exits ACTIVE mode, and rearms exactly once. B/C/D/E from section 9 are
+# already covered by the existing test_barge_in_x_manual_stop_cancels_
+# unconfirmed_monitor_too, test_barge_in_w_no_resume_mechanism_exists, and
+# test_barge_in_t_stale_tts_finished_after_confirmed_does_not_duplicate_listener.
+
+
+def test_voice_stop_a_stop_while_speaking_calls_tts_stop() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Reply.")
+    transcriber = _FakeVoiceTranscriber(result="ola echo")
+    tts = _FakeTTSManager()
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=_slow_player,
+        thinking_min_ms=0,
+    )
+    states: list[str] = []
+    controller.stateChanged.connect(states.append)
+
+    controller.startVoiceConversation()
+    assert _run_until(lambda: "speaking" in states, timeout_ms=3000)
+    tts_worker = controller._tts_worker
+    assert tts_worker is not None
+
+    controller.stopSpeaking()
+
+    assert tts_worker.stop_event.is_set()
+    _stop_and_drain(controller)
+
+
+def test_voice_stop_f_stop_while_listening_leaves_capture_untouched() -> None:
+    """F: STOP called while merely LISTENING (no TTS active, no barge-in
+    monitor) has no effect on the ongoing capture -- preserves existing
+    semantics."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    controller = EchoUIController(_FakeEngine().respond, voice_available=True, voice_transcriber=_BlockingVoiceTranscriber())
+
+    controller.startVoiceConversation()
+    assert _run_until(lambda: controller._voice_worker is not None, timeout_ms=2000)
+    listening_worker = controller._voice_worker
+
+    controller.stopSpeaking()
+
+    assert controller._voice_worker is listening_worker
+    assert controller.isVoiceConversationActive() is True
+    _stop_and_drain(controller)
+
+
+def test_voice_stop_g_pocket_manager_not_torn_down() -> None:
+    """G: stopSpeaking() must never call the TTS MANAGER's own teardown/
+    stop -- only the per-request worker's stop_event."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Reply.")
+    transcriber = _FakeVoiceTranscriber(result="ola echo")
+    tts = _FakeTTSManager()
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=_slow_player,
+        thinking_min_ms=0,
+    )
+    states: list[str] = []
+    controller.stateChanged.connect(states.append)
+
+    controller.startVoiceConversation()
+    assert _run_until(lambda: "speaking" in states, timeout_ms=3000)
+
+    controller.stopSpeaking()
+
+    assert tts.stopped is False
+    _stop_and_drain(controller)
+
+
+def test_voice_stop_logs_bounded_state_aware_events(capsys) -> None:
+    """Section 3: [VOICE_STOP] requested/tts_stop_requested/
+    returned_to_listening all fire for a STOP-during-speaking sequence."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Reply.")
+    transcriber = _FakeVoiceTranscriber(result="ola echo")
+    tts = _FakeTTSManager()
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=_slow_player,
+        thinking_min_ms=0,
+    )
+    states: list[str] = []
+    controller.stateChanged.connect(states.append)
+
+    controller.startVoiceConversation()
+    assert _run_until(lambda: "speaking" in states, timeout_ms=3000)
+    capsys.readouterr()  # discard startup noise
+
+    controller.stopSpeaking()
+
+    assert _run_until(lambda: controller._voice_worker is not None, timeout_ms=3000)
+    captured = capsys.readouterr().out
+    assert "[VOICE_STOP] event=requested" in captured and "state=speaking" in captured
+    assert "[VOICE_STOP] event=tts_stop_requested" in captured
+    assert "[VOICE_STOP] event=returned_to_listening" in captured
+    _stop_and_drain(controller)
+
+
+def test_voice_stop_h_shutdown_stops_playback_and_tears_down_manager() -> None:
+    """H (section 15): shutdown() must stop in-progress playback AND
+    (unlike a normal STOP) tear down the TTS manager -- teardown_manager=True
+    is reserved for genuine session-ending shutdown, unlike stopSpeaking()."""
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    engine = _FakeEngine(reply="Reply.")
+    transcriber = _FakeVoiceTranscriber(result="ola echo")
+    tts = _FakeTTSManager()
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        tts_manager=tts,
+        tts_player=_slow_player,
+        thinking_min_ms=0,
+    )
+    states: list[str] = []
+    controller.stateChanged.connect(states.append)
+
+    controller.startVoiceConversation()
+    assert _run_until(lambda: "speaking" in states, timeout_ms=3000)
+    tts_worker = controller._tts_worker
+    assert tts_worker is not None
+
+    controller.shutdown()
+
+    assert tts_worker.stop_event.is_set()
+    assert tts.stopped is True
+
+
+def test_tts_playback_stop_latency_bounded_end_to_end(monkeypatch, capsys) -> None:
+    """C (section 15): end-to-end through the REAL play_audio_file (with a
+    mocked sounddevice backend) -- [TTS_PLAYBACK] event=stopped reports a
+    small stop_latency_ms, proving the sounddevice-based backend
+    interrupts promptly rather than running to the file's full nominal
+    (here: 30s) duration."""
+    import dataclasses
+    import re
+    import sys
+    import threading as _threading
+    import time as _time
+    import wave
+
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+
+    class _FakeCallbackStop(Exception):
+        pass
+
+    class _FakeOutputStream:
+        def __init__(self, **kwargs) -> None:
+            self.channels = kwargs["channels"]
+            self.dtype = kwargs["dtype"]
+            self.callback = kwargs["callback"]
+            self.finished_callback = kwargs.get("finished_callback")
+            self.aborted = False
+
+        def start(self) -> None:
+            def feed() -> None:
+                import numpy as np
+
+                chunk_frames = 64
+                while not self.aborted:
+                    outdata = np.zeros((chunk_frames, self.channels), dtype=self.dtype)
+                    try:
+                        self.callback(outdata, chunk_frames, None, None)
+                    except _FakeCallbackStop:
+                        break
+                    _time.sleep(0.01)
+                if self.finished_callback is not None:
+                    self.finished_callback()
+
+            self._thread = _threading.Thread(target=feed, daemon=True)
+            self._thread.start()
+
+        def abort(self) -> None:
+            self.aborted = True
+
+        def close(self) -> None:
+            pass
+
+        def __enter__(self) -> "_FakeOutputStream":
+            self.start()
+            return self
+
+        def __exit__(self, *exc_info: object) -> None:
+            self.close()
+
+    class _FakeSd:
+        CallbackStop = _FakeCallbackStop
+
+        def OutputStream(self, **kwargs) -> _FakeOutputStream:
+            return _FakeOutputStream(**kwargs)
+
+    monkeypatch.setitem(sys.modules, "sounddevice", _FakeSd())
+
+    import tempfile
+
+    wav_path = Path(tempfile.NamedTemporaryFile(prefix="echo_test_playback_", suffix=".wav", delete=False).name)
+    with wave.open(str(wav_path), "wb") as f:
+        f.setnchannels(1)
+        f.setsampwidth(2)
+        f.setframerate(8000)
+        f.writeframes(b"\x00\x00" * (8000 * 30))  # 30s nominal duration
+
+    engine = _FakeEngine(reply="Reply.")
+    transcriber = _FakeVoiceTranscriber(result="ola echo")
+    tts = _FakeTTSManager()
+    tts.result = dataclasses.replace(tts.result, audio_path=wav_path)
+    controller = EchoUIController(
+        engine.respond,
+        voice_available=True,
+        voice_transcriber=transcriber,
+        voice_missing_dependencies=[],  # avoid check_voice_runtime() probing the faked sounddevice module
+        tts_manager=tts,
+        thinking_min_ms=0,
+    )
+    states: list[str] = []
+    controller.stateChanged.connect(states.append)
+
+    try:
+        controller.startVoiceConversation()
+        assert _run_until(lambda: "speaking" in states, timeout_ms=3000)
+        capsys.readouterr()
+
+        controller.stopSpeaking()
+
+        assert _run_until(lambda: controller._voice_worker is not None, timeout_ms=3000)
+        captured = capsys.readouterr().out
+        match = re.search(r"\[TTS_PLAYBACK\] event=stopped.*stop_latency_ms=(\d+)", captured)
+        assert match is not None, captured
+        assert int(match.group(1)) < 500
+        _stop_and_drain(controller)
+    finally:
+        wav_path.unlink(missing_ok=True)

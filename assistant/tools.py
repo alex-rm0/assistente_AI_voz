@@ -20,6 +20,7 @@ from assistant.desktop_actions import (
     validate_url,
 )
 from assistant.live_web_research import LiveWebResearchProvider
+from assistant.response_language import localize
 from assistant.secret_storage import WindowsCredentialManagerSecretStorage, resolve_tavily_api_key
 from assistant.tavily_research import LiveResearchProviderChain, TavilyResearchProvider
 from assistant.tool_registry import tool_registry
@@ -308,8 +309,8 @@ def open_project(
     return result.message
 
 
-def _missing_task_manager_message() -> str:
-    return "Não consegui alterar a tarefa. Ela continua pendente."
+def _missing_task_manager_message(response_language: str = "") -> str:
+    return localize("task.action.missing_manager", response_language)
 
 
 def _task_action_query_is_ambiguous(query: str) -> bool:
@@ -356,13 +357,16 @@ def _record_task_timeline(long_term_memory: Any | None, summary: str) -> None:
     permissions=("read:tasks",),
     remember_result=False,
 )
-def list_pending_tasks(long_term_memory: Any | None = None, show_details: bool = False) -> str:
+def list_pending_tasks(long_term_memory: Any | None = None, show_details: bool = False, response_language: str = "") -> str:
     if long_term_memory is None:
-        return "Não consegui consultar as tarefas pendentes."
+        return localize("task.action.cannot_query", response_language)
     pending_tasks = getattr(long_term_memory, "pending_tasks", None)
     if pending_tasks is None:
-        return "Não consegui consultar as tarefas pendentes."
-    return pending_tasks(show_details=show_details)
+        return localize("task.action.cannot_query", response_language)
+    try:
+        return pending_tasks(show_details=show_details, response_language=response_language)
+    except TypeError:
+        return pending_tasks(show_details=show_details)
 
 
 @tool_registry.register(
@@ -371,22 +375,22 @@ def list_pending_tasks(long_term_memory: Any | None = None, show_details: bool =
     permissions=("write:tasks",),
     remember_result=False,
 )
-def complete_task(long_term_memory: Any | None = None, query: str = "") -> str:
+def complete_task(long_term_memory: Any | None = None, query: str = "", response_language: str = "") -> str:
     if long_term_memory is None:
-        return _missing_task_manager_message()
+        return _missing_task_manager_message(response_language)
     count = _pending_task_count(long_term_memory)
     if count > 1 and _task_action_query_is_ambiguous(query):
-        return "Tenho várias tarefas pendentes. Diz-me qual queres marcar como concluída."
+        return localize("task.action.ambiguous_complete", response_language)
 
     updater = getattr(long_term_memory, "complete_task", None)
     if updater is None:
-        return _missing_task_manager_message()
+        return _missing_task_manager_message(response_language)
     result = updater(query)
     if "Nao encontrei" in result or "Não encontrei" in result:
-        return _missing_task_manager_message()
+        return _missing_task_manager_message(response_language)
 
     _record_task_timeline(long_term_memory, f"Tarefa concluida: {query or 'tarefa pendente unica'}.")
-    return "Está feito. Marquei essa tarefa como concluída e já não aparece nas pendentes."
+    return localize("task.action.completed", response_language)
 
 
 @tool_registry.register(
@@ -395,22 +399,22 @@ def complete_task(long_term_memory: Any | None = None, query: str = "") -> str:
     permissions=("write:tasks",),
     remember_result=False,
 )
-def cancel_task(long_term_memory: Any | None = None, query: str = "") -> str:
+def cancel_task(long_term_memory: Any | None = None, query: str = "", response_language: str = "") -> str:
     if long_term_memory is None:
-        return _missing_task_manager_message()
+        return _missing_task_manager_message(response_language)
     count = _pending_task_count(long_term_memory)
     if count > 1 and _task_action_query_is_ambiguous(query):
-        return "Tenho várias tarefas pendentes. Diz-me qual queres cancelar."
+        return localize("task.action.ambiguous_cancel", response_language)
 
     updater = getattr(long_term_memory, "cancel_task", None)
     if updater is None:
-        return _missing_task_manager_message()
+        return _missing_task_manager_message(response_language)
     result = updater(query)
     if "Nao encontrei" in result or "Não encontrei" in result:
-        return _missing_task_manager_message()
+        return _missing_task_manager_message(response_language)
 
     _record_task_timeline(long_term_memory, f"Tarefa cancelada: {query or 'tarefa pendente unica'}.")
-    return "Está feito. Cancelei essa tarefa e já não aparece nas pendentes."
+    return localize("task.action.cancelled", response_language)
 
 
 @tool_registry.register(
@@ -419,19 +423,22 @@ def cancel_task(long_term_memory: Any | None = None, query: str = "") -> str:
     permissions=("write:tasks",),
     remember_result=False,
 )
-def postpone_task(long_term_memory: Any | None = None, query: str = "") -> str:
+def postpone_task(long_term_memory: Any | None = None, query: str = "", response_language: str = "") -> str:
     if long_term_memory is None:
-        return _missing_task_manager_message()
+        return _missing_task_manager_message(response_language)
     count = _pending_task_count(long_term_memory)
     if count > 1 and _task_action_query_is_ambiguous(query):
-        return "Tenho várias tarefas pendentes. Diz-me qual queres adiar."
+        return localize("task.action.ambiguous_postpone", response_language)
 
     updater = getattr(long_term_memory, "postpone_task", None)
     if updater is None:
-        return _missing_task_manager_message()
-    result = updater(query)
+        return _missing_task_manager_message(response_language)
+    try:
+        result = updater(query, response_language=response_language)
+    except TypeError:
+        result = updater(query)
     if "Nao encontrei" in result or "Não encontrei" in result:
-        return _missing_task_manager_message()
+        return _missing_task_manager_message(response_language)
 
     _record_task_timeline(long_term_memory, f"Tarefa adiada: {query or 'tarefa pendente unica'}.")
     return result
@@ -480,12 +487,16 @@ def list_workspace_files(workspace_path: Path | None = None) -> str:
     permissions=("read:context_observer",),
     remember_result=False,
 )
-def get_active_window(context_observer: Any | None = None) -> str:
+def get_active_window(context_observer: Any | None = None, response_language: str = "") -> str:
     snapshot = _fresh_context_snapshot(context_observer)
     if snapshot is None or not snapshot.active_window:
         return NO_SYSTEM_CONTEXT_MESSAGE
 
-    return f"Janela ativa detetada: {snapshot.active_window}"
+    # Phase 7.7 (section 5): the LABEL ("Active window detected:") is
+    # Echo-authored presentation text and must localize; the window title
+    # itself (snapshot.active_window) is user/system data and is never
+    # translated (section 18).
+    return localize("tool.active_window", response_language, name=snapshot.active_window)
 
 
 @tool_registry.register(
@@ -497,12 +508,12 @@ def get_active_window(context_observer: Any | None = None) -> str:
     permissions=("read:context_observer",),
     remember_result=False,
 )
-def get_active_application(context_observer: Any | None = None) -> str:
+def get_active_application(context_observer: Any | None = None, response_language: str = "") -> str:
     snapshot = _fresh_context_snapshot(context_observer)
     if snapshot is None or not snapshot.active_app:
         return NO_SYSTEM_CONTEXT_MESSAGE
 
-    return f"Aplicacao ativa detetada: {snapshot.active_app}"
+    return localize("tool.active_application", response_language, name=snapshot.active_app)
 
 
 @tool_registry.register(
@@ -514,27 +525,34 @@ def get_active_application(context_observer: Any | None = None) -> str:
     permissions=("read:context_observer",),
     remember_result=False,
 )
-def get_open_windows(context_observer: Any | None = None) -> str:
+def get_open_windows(context_observer: Any | None = None, response_language: str = "") -> str:
+    # Phase 7.7 (section 5, the reported real bug): the header and the
+    # "(active)" marker are Echo-authored presentation text and must
+    # localize; window titles/process names are user/system data and are
+    # never translated (section 18).
     snapshot = _fresh_context_snapshot(context_observer)
     if snapshot is None:
         return NO_SYSTEM_CONTEXT_MESSAGE
 
+    header = localize("tool.windows_detected_header", response_language)
+    active_marker = localize("tool.active_marker", response_language)
+
     if not snapshot.open_windows and snapshot.active_window:
         app_label = f" [{snapshot.active_app}]" if snapshot.active_app else ""
-        return f"Janelas detetadas:\n- {snapshot.active_window}{app_label} (ativa)"
+        return f"{header}\n- {snapshot.active_window}{app_label}{active_marker}"
 
     if not snapshot.open_windows:
         return NO_SYSTEM_CONTEXT_MESSAGE
 
-    lines = ["Janelas detetadas:"]
+    lines = [header]
     for window in snapshot.open_windows:
-        active_marker = " (ativa)" if getattr(window, "is_active", False) else ""
+        marker = active_marker if getattr(window, "is_active", False) else ""
         process_name = getattr(window, "process_name", "")
         title = getattr(window, "title", "")
         if process_name:
-            lines.append(f"- {title} [{process_name}]{active_marker}")
+            lines.append(f"- {title} [{process_name}]{marker}")
         else:
-            lines.append(f"- {title}{active_marker}")
+            lines.append(f"- {title}{marker}")
     return "\n".join(lines)
 
 
@@ -547,24 +565,28 @@ def get_open_windows(context_observer: Any | None = None) -> str:
     permissions=("read:context_observer",),
     remember_result=False,
 )
-def get_recent_activity(context_observer: Any | None = None) -> str:
+def get_recent_activity(context_observer: Any | None = None, response_language: str = "") -> str:
     if context_observer is None:
         return NO_SYSTEM_CONTEXT_MESSAGE
 
     latest_summary = context_observer.latest_summary()
     if latest_summary is not None and latest_summary.summary:
-        return f"Atividade recente: {latest_summary.summary}"
+        # latest_summary.summary itself is context_observer's own free-text
+        # output (out of scope here -- see the Phase 7.7 report's "known
+        # remaining issue"); only the "Recent activity:" label localizes.
+        return localize("tool.recent_activity_header_with_summary", response_language, summary=latest_summary.summary)
 
     summary = context_observer.activity_summary(limit=5)
     if not summary:
         return NO_SYSTEM_CONTEXT_MESSAGE
 
-    lines = ["Atividade recente detetada:"]
+    lines = [localize("tool.recent_activity_header", response_language)]
     for active_app, active_window, current_project, total_seconds in summary:
         minutes = max(1, round(total_seconds / 60))
         project = f" no projeto {current_project}" if current_project else ""
         window = f" ({active_window})" if active_window else ""
-        lines.append(f"- {active_app}{window}{project}: cerca de {minutes} min")
+        minutes_text = localize("tool.recent_activity_minutes", response_language, minutes=minutes)
+        lines.append(f"- {active_app}{window}{project}: {minutes_text}")
     return "\n".join(lines)
 
 
