@@ -169,10 +169,21 @@ class TaskRecord:
 class LongTermMemory:
     """Permanent SQLite memory, separate from transient conversation history."""
 
-    def __init__(self, data_path: Path, db_file: str = DEFAULT_MEMORY_DB, embedder: Embedder | None = None) -> None:
+    def __init__(
+        self,
+        data_path: Path,
+        db_file: str = DEFAULT_MEMORY_DB,
+        embedder: Embedder | None = None,
+        embeddings_enabled: bool = True,
+    ) -> None:
         self.data_path = data_path.resolve()
         self.db_path = (self.data_path / db_file).resolve()
         self.embedder = embedder
+        # KNOWN_ISSUES §4: the app's embedder is the chat model, which
+        # Ollama rejects on /api/embeddings (HTTP 500, ~22 s cold). The app
+        # turns this off via config memory.embeddings_enabled; search then
+        # uses the text fallback it was already getting.
+        self.embeddings_enabled = embeddings_enabled
         self._ensure_inside_data()
         self.data_path.mkdir(parents=True, exist_ok=True)
         self._init_db()
@@ -1086,7 +1097,7 @@ class LongTermMemory:
         return f"Marquei a tarefa '{task.title}' como {label}."
 
     def _embed(self, text: str) -> list[float] | None:
-        if self.embedder is None:
+        if self.embedder is None or not self.embeddings_enabled:
             return None
         return self.embedder.embed(text)
 

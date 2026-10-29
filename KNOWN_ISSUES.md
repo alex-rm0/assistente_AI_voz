@@ -56,7 +56,17 @@ foram corrigidos**. Cada entrada tem o sintoma, a evidência e o estado.
   - Uma destas chamadas corre no fecho da app (resumo de sessão). Desde a
     Phase 7.6.7 corre com a janela já escondida, mas continua a atrasar o
     fim do processo.
-- **Estado:** aberto.
+  - Bateria de 2026-10-29: o "Olá" demorou 22 s, todos gastos em
+    `POST /api/embeddings` → 500 em 21,9 s.
+- **Estado:** mitigado: desligado. Em `config/settings.json`, `memory` tem
+  `"embeddings_enabled": false`, e a chave em falta também conta como
+  desligado. `LongTermMemory._embed` devolve `None` sem fazer o pedido; o
+  código dos embeddings mantém-se. A pesquisa continua a usar o fallback
+  de texto, com resultados idênticos (12 consultas sobre uma cópia da
+  base real). Na bateria seguinte houve 0 pedidos a `/api/embeddings` e o
+  "Olá" passou a 104 ms. Falta, se um dia se quiser pesquisa semântica,
+  usar um modelo próprio de embeddings (ex.: `nomic-embed-text`) e
+  preencher as memórias existentes.
 
 ## 5. Memória poluída com resumos de sessão
 

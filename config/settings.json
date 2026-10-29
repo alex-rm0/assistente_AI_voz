@@ -69,6 +69,7 @@
     "long_term_db": "long_term_memory.sqlite",
     "personal_model_db": "personal_model.sqlite",
     "session_db": "session_manager.sqlite",
-    "max_messages": 20
+    "max_messages": 20,
+    "embeddings_enabled": false
   }
 }

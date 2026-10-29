@@ -44,6 +44,17 @@ def load_settings() -> dict[str, Any]:
         return json.load(file)
 
 
+def build_long_term_memory(data_path: Path, memory_config: dict[str, Any], embedder: Any) -> LongTermMemory:
+    # KNOWN_ISSUES §4: embeddings default to OFF (also when the key is
+    # missing) -- the chat model can't serve /api/embeddings.
+    return LongTermMemory(
+        data_path=data_path,
+        db_file=memory_config.get("long_term_db", "long_term_memory.sqlite"),
+        embedder=embedder,
+        embeddings_enabled=bool(memory_config.get("embeddings_enabled", False)),
+    )
+
+
 def build_local_semantic_extractor(ollama_provider, system_prompt: str):
     return OllamaSemanticExtractor(
         ProviderBackedLLM(
@@ -277,11 +288,7 @@ def main() -> int:
         automatic_claude_enabled_source=automatic_claude_enabled_source,
         context_observer_state="enabled" if observer_enabled else "disabled",
     )
-    long_term_memory = LongTermMemory(
-        data_path=data_path,
-        db_file=memory_config.get("long_term_db", "long_term_memory.sqlite"),
-        embedder=llm,
-    )
+    long_term_memory = build_long_term_memory(data_path, memory_config, llm)
     personal_model = PersonalModel(
         data_path=data_path,
         db_file=memory_config.get("personal_model_db", "personal_model.sqlite"),
