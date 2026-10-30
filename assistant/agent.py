@@ -1097,8 +1097,27 @@ _ACTIVITY_SUMMARY_MARKERS = (
     "qual parece ser a minha atividade principal",
     "atividade principal",
 )
-_ACTIVE_WINDOW_MARKERS = ("janela ativa", "qual e a janela", "qual janela")
-_ACTIVE_APPLICATION_MARKERS = ("aplicacao ativa", "programa ativo", "app ativa")
+# "que janela" (question framing) instead of a singular "aberta" state word:
+# adding "aberta" to _OPEN_WINDOWS_STATES would also catch statements like
+# "a janela do quarto está aberta".
+_ACTIVE_WINDOW_MARKERS = (
+    "janela ativa",
+    "qual e a janela",
+    "qual janela",
+    "que janela",
+    "what window",
+    "which window",
+    "what am i looking at",
+)
+_ACTIVE_APPLICATION_MARKERS = (
+    "aplicacao ativa",
+    "programa ativo",
+    "app ativa",
+    "what app am i using",
+    "which app am i using",
+    "what application am i using",
+    "which application am i using",
+)
 _RECENT_ACTIVITY_MARKERS = (
     "o que estive a fazer",
     "atividade recente",

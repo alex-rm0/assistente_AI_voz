@@ -802,12 +802,10 @@ def _git_repositories(root: Path) -> list[GitRepoContext]:
         return repositories
 
     candidates: list[Path] = []
-    if (root / ".git").exists():
-        candidates.append(root)
-    try:
-        candidates.extend(path.parent for path in root.rglob(".git") if path.exists())
-    except OSError:
-        return repositories
+    for dirpath, dirnames, _filenames in _walk_project(root):
+        if ".git" in dirnames:
+            candidates.append(Path(dirpath))
+        dirnames[:] = [name for name in dirnames if name != ".git"]
 
     seen: set[Path] = set()
     for repo in candidates:
@@ -839,21 +837,36 @@ def _git_branch(repo: Path) -> str:
 
 def _git_modified_files(repo: Path, limit: int = 20) -> list[str]:
     files: list[str] = []
-    try:
-        for path in repo.rglob("*"):
+    for dirpath, dirnames, filenames in _walk_project(repo):
+        dirnames[:] = [name for name in dirnames if name != ".git"]
+        for filename in filenames:
             if len(files) >= limit:
-                break
-            if not path.is_file() or ".git" in path.parts:
-                continue
+                return files
+            path = Path(dirpath) / filename
             try:
                 stat = path.stat()
             except OSError:
                 continue
             if time.time() - stat.st_mtime <= 24 * 60 * 60:
                 files.append(path.relative_to(repo).as_posix())
-    except OSError:
-        return []
     return files
+
+
+# Virtualenvs and caches are ~99% of the entries under the project root
+# (~199k); walking them made every Context Observer tool call take ~27 s.
+_SCAN_SKIPPED_DIRS = {".hf_cache", "__pycache__", "data", "node_modules"}
+_SCAN_SKIPPED_PREFIXES = (".venv", ".uv_")
+
+
+def _walk_project(root: Path):
+    """os.walk over root, pruning virtualenvs/caches; errors are skipped."""
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if name not in _SCAN_SKIPPED_DIRS and not name.startswith(_SCAN_SKIPPED_PREFIXES)
+        ]
+        yield dirpath, dirnames, filenames
 
 
 def _recently_modified_files(root: Path, limit: int = 10) -> list[str]:
