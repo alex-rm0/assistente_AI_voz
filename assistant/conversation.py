@@ -385,6 +385,18 @@ def _local_ollama_semantic_extractor(llm) -> SemanticExtractor | None:
     return OllamaSemanticExtractor(llm)
 
 
+def session_summary_has_content(summary) -> bool:
+    """Whether a session summary is worth a long-term memory: at least one of
+    tasks changed, tools or decisions (scripts/cleanup_session_summaries.py
+    applies the same rule to stored memories). files_touched does not count:
+    it is the Context Observer's recently modified project files, not what
+    the session did."""
+    return any(
+        str(getattr(summary, name, "") or "").strip()
+        for name in ("tasks_changed", "tools_used", "decisions_taken")
+    )
+
+
 # Phase 8.1 (section 11): internal feature flag for the FIRST activated
 # Presence behavior (question discipline). Deliberately a plain module
 # constant, not config/settings.json -- flip to False to instantly restore
@@ -7618,6 +7630,10 @@ class AssistantEngine:
         self._remember_session_summary(summary)
 
     def _remember_session_summary(self, summary) -> None:
+        # KNOWN_ISSUES §5: sessions without content flooded long-term memory;
+        # the summary is still kept in session_manager.sqlite.
+        if not session_summary_has_content(summary):
+            return
         remember_context_summary = getattr(self.long_term_memory, "remember_context_summary", None)
         if remember_context_summary is not None:
             content = (
