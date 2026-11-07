@@ -75,7 +75,26 @@ foram corrigidos**. Cada entrada tem o sintoma, a evidência e o estado.
 - **Evidência:** 202 de 216 memórias começam por "Resumo de sessao". São
   texto padrão (hora de início e fim, motivo de fecho, atividade genérica,
   ficheiros como `output.txt`/`.pytest_cache`), sem factos relevantes.
-- **Estado:** aberto.
+  Como o texto inclui as etiquetas `projeto=`, `tarefas=`, etc., as
+  pesquisas "projeto", "tarefa" e "assistenteIA" só devolviam resumos.
+- **Estado:** mitigado.
+  - **Sessões vazias:** já não são gravadas. Só passa para a memória de
+    longo prazo uma sessão com tarefas, ferramentas ou decisões
+    (`session_summary_has_content`). `files_touched` não conta, porque
+    são os ficheiros modificados recentemente segundo o Context Observer.
+    O resumo continua a ser guardado no `session_manager.sqlite`.
+  - **Limpeza:** `scripts/cleanup_session_summaries.py --apply`
+    (2026-10-30) removeu 164 resumos vazios. As memórias passaram de 219
+    para 55, e a timeline de 218 para 54. O backup está em
+    `data/long_term_memory.backup-20261030-141920.sqlite`.
+  - **Pesquisa genérica:** os 41 resumos restantes ficam de fora de
+    `LongTermMemory.search` e `context_for`. Continuam guardados e
+    aparecem na timeline por data. A continuidade de sessão lê do
+    `session_manager`.
+  - **Em aberto:** a deteção de decisões (`_track_decision` em
+    `assistant/session_manager.py`) apanha frases que não são decisões,
+    como "Da ultima vez, estivemos a trabalhar…" ou "Vou sugerir alguns
+    destinos…". Por isso, alguns resumos sem conteúdo real ficam guardados.
 
 ## 6. Arranques a frio
 

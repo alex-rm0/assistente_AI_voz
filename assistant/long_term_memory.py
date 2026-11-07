@@ -16,6 +16,15 @@ from assistant.task_formatter import format_task_collection_for_assistant, forma
 
 
 DEFAULT_MEMORY_DB = "long_term_memory.sqlite"
+# KNOWN_ISSUES §5: session summaries ("Resumo de sessao: projeto=...;
+# tarefas=...") match almost any query through their field labels. Session
+# continuity reads session_manager, so generic search/context_for skip them;
+# they stay stored and in the date timeline.
+SESSION_SUMMARY_PREFIX = "Resumo de sessao"
+
+
+def _is_session_summary(content: str) -> bool:
+    return content.startswith(SESSION_SUMMARY_PREFIX)
 
 
 class MemoryCategory(str, Enum):
@@ -924,6 +933,8 @@ class LongTermMemory:
 
         records: list[tuple[MemoryRecord, list[float] | None]] = []
         for row in rows:
+            if _is_session_summary(row[2]):
+                continue
             embedding = _loads_embedding(row[3])
             records.append((MemoryRecord(id=row[0], category=row[1], content=row[2]), embedding))
         return records
@@ -977,6 +988,8 @@ class LongTermMemory:
 
         scored: list[tuple[int, TimelineEvent]] = []
         for event in self._timeline_events(limit=50):
+            if _is_session_summary(event.content):
+                continue
             haystack = _normalize_text(" ".join((event.content, event.project, event.people)))
             score = sum(1 for term in terms if term in haystack)
             if score > 0:
