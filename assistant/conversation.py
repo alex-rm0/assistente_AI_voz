@@ -9056,6 +9056,17 @@ def is_pure_social_turn(message: str) -> bool:
         "como estás",
         "how are you",
         "how are you doing",
+        # KNOWN_ISSUES §3: formal greetings (exact phrases only, so "como
+        # esta o projeto" stays out).
+        "como esta",
+        "ola como esta",
+        "bom dia como esta",
+        "boa tarde como esta",
+        "boa noite como esta",
+        "como vai",
+        "ola como vai",
+        "hello how are you",
+        "hi how are you",
         "tudo bem",
         "estas bem",
         "estás bem",

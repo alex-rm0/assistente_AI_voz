@@ -42,7 +42,12 @@ foram corrigidos**. Cada entrada tem o sintoma, a evidência e o estado.
   path.
 - **Evidência:** no log real foi `GENERAL_CONVERSATION` →
   `RESPONSE_COMPOSER`, com uma chamada ao LLM (`llm_calls=1`).
-- **Estado:** aberto.
+- **Estado:** corrigido. `is_pure_social_turn` passou a aceitar as formas
+  formais como frases exatas ("olá, como está?", "bom dia, como está?",
+  "como vai?", "hello, how are you?"). Por serem exatas, "como está o
+  projeto?" continua fora do social fast path. Teste:
+  `tests/test_formal_greeting_social.py`. A resposta continua a ser a
+  informal "Estou bem. E tu?".
 
 ## 4. Embeddings nunca funcionaram
 
