@@ -127,3 +127,18 @@ foram corrigidos**. Cada entrada tem o sintoma, a evidência e o estado.
   QWebEngine real (`tests/test_ui_response_delivery.py`).
 - **Estado:** corrigido no código e coberto por testes. **Falta a
   validação manual na app real** (microfone e janela reais).
+
+## 9. Critérios de comparação fora da lista fixa
+
+- **Sintoma:** numa comparação, um critério fora da lista fixa (ecrã,
+  peso…) não fica registado. "o critério é o ecrã" vai para
+  `GENERAL_CONVERSATION` (resposta do LLM) e o card continua com "Ainda
+  falta: critérios de decisão".
+- **Evidência:** `_criterion_mentions` (`assistant/task_intelligence.py`)
+  só conhece câmara, bateria, suporte, preço e localização. O caminho dos
+  objetos `kind="criterion"` (`extract_comparison_criteria`) só corre em
+  operações "comparar …" e não alimenta `infer_unknowns`. Coberto por um
+  teste `xfail` em `tests/test_comparison_criterion_statements.py`. As
+  declarações simples com critérios da lista ("o critério é a bateria",
+  "critério: preço", "decidir pela autonomia") já ficam registadas.
+- **Estado:** aberto.

@@ -856,7 +856,7 @@ def _plan_comparison_dialogue(
             implication=_comparison_budget_implication(knowledge, budget, response_language),
             next_question=_comparison_next_question(task, knowledge, reasoning, response_language),
         )
-    if {"camera_priority", "battery_priority", "support_priority"}.intersection(delta_predicates):
+    if {"camera_priority", "battery_priority", "support_priority", "price_priority", "location_priority"}.intersection(delta_predicates):
         return TaskDialoguePlan(
             acknowledgement=_comparison_preference_ack(delta, response_language),
             implication=_comparison_current_implication(knowledge, reasoning, response_language),
@@ -1384,6 +1384,13 @@ def _extract_criterion_priorities(normalized: str) -> list[tuple[str, str]]:
     ):
         for predicate in criteria[:1]:
             priorities.append((predicate, "high"))
+    # Battery scenario 11: a plain declaration ("o critério é a bateria",
+    # "critério: preço", "decidir pela autonomia") is a criterion too.
+    if re.search(r"\bcriterios?\s*:", normalized) or contains_any_phrase(
+        normalized,
+        ("criterio e", "criterios sao", "decidir pela", "decidir pelo", "decidir por"),
+    ):
+        priorities.extend((predicate, "high") for predicate in criteria)
     less_than_match = re.search(r"\b(.+?)\s+importa(?:m)?(?:,)?\s+mas\s+menos\s+do\s+que\s+(.+)$", normalized)
     if not less_than_match:
         less_than_match = re.search(r"\b(.+?)\s+importa(?:m)?\s+menos\s+do\s+que\s+(.+)$", normalized)
