@@ -684,6 +684,10 @@ _STRINGS: dict[str, tuple[str, str]] = {
         "Percebi: a bateria também conta na decisão.",
         "Got it: the battery matters too in the decision.",
     ),
+    "task.comparison.preference_battery_first": (
+        "Percebi: a bateria conta na decisão.",
+        "Got it: the battery matters in the decision.",
+    ),
     "task.comparison.preference_support": (
         "Percebi: suporte passa a pesar mais do que escolher apenas pelo preço.",
         "Got it: support now matters more than choosing on price alone.",

@@ -858,7 +858,7 @@ def _plan_comparison_dialogue(
         )
     if {"camera_priority", "battery_priority", "support_priority", "price_priority", "location_priority"}.intersection(delta_predicates):
         return TaskDialoguePlan(
-            acknowledgement=_comparison_preference_ack(delta, response_language),
+            acknowledgement=_comparison_preference_ack(delta, response_language, knowledge),
             implication=_comparison_current_implication(knowledge, reasoning, response_language),
             next_question=_comparison_next_question(task, knowledge, reasoning, response_language),
         )
@@ -1018,7 +1018,9 @@ def _comparison_budget_implication(knowledge: list[KnowledgeEntry], budget: str,
     return ""
 
 
-def _comparison_preference_ack(delta: list[KnowledgeEntry], response_language: str = "pt-PT") -> str:
+def _comparison_preference_ack(
+    delta: list[KnowledgeEntry], response_language: str = "pt-PT", knowledge: list[KnowledgeEntry] | None = None
+) -> str:
     predicates = {entry.predicate for entry in delta}
     if "camera_priority" in predicates and "battery_priority" in predicates:
         return localize("task.comparison.preference_camera_and_battery", response_language)
@@ -1028,6 +1030,14 @@ def _comparison_preference_ack(delta: list[KnowledgeEntry], response_language: s
         value = _latest_delta_value(delta, "battery_priority")
         if value == "low":
             return localize("task.comparison.preference_battery_low", response_language)
+        # "também"/"too" only once another criterion was already stated.
+        delta_ids = {entry.id for entry in delta}
+        has_other = any(
+            entry.kind in {"preference", "criterion"} and entry.id not in delta_ids
+            for entry in _active_entries(knowledge or [])
+        )
+        if knowledge is not None and not has_other:
+            return localize("task.comparison.preference_battery_first", response_language)
         return localize("task.comparison.preference_battery_other", response_language)
     if "support_priority" in predicates:
         return localize("task.comparison.preference_support", response_language)
