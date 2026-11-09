@@ -76,6 +76,15 @@ Do not talk about your own level of knowledge.
 """.strip()
 
 
+def _with_language_anchor(user_message: str, response_language: str) -> str:
+    # Only the payload sent to the model: a short note right next to the
+    # user's text, which a small model follows better than the system
+    # message alone. History and UI are untouched; pt-PT unchanged.
+    if normalize_response_language(response_language) == ENGLISH_GB:
+        return f"{user_message}\n\n(Reply in English.)"
+    return user_message
+
+
 def _base_system_prompt(response_language: str) -> str:
     if normalize_response_language(response_language) == ENGLISH_GB:
         return _SYSTEM_PROMPT_EN
@@ -168,7 +177,7 @@ class ResponseComposer:
         try:
             _mark_llm_source(self.llm, "RESPONSE_COMPOSER")
             reply = self.llm.chat(
-                self._user_prompt(request),
+                _with_language_anchor(self._user_prompt(request), request.response_language),
                 history=request.history,
                 system_prompt=_system_prompt_for(request),
                 **generation_kwargs,
@@ -217,8 +226,10 @@ class ResponseComposer:
         try:
             _mark_llm_source(self.llm, "RESPONSE_COMPOSER_REGENERATION")
             reply = self.llm.chat(
-                f"{instruction}\n\n{message_label}:\n{user_message.strip()}\n\n"
-                f"{reason_label}: {reason}",
+                _with_language_anchor(
+                    f"{instruction}\n\n{message_label}:\n{user_message.strip()}\n\n{reason_label}: {reason}",
+                    response_language,
+                ),
                 history=history or [],
                 system_prompt=system_prompt,
             )
