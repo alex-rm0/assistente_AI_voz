@@ -1425,6 +1425,16 @@ class TTSManager:
         self.default_voice_id = default_voice_id
         self._last_logged_availability_signature: tuple | None = None
 
+    def prewarm(self) -> bool:
+        """Starts the provider's long-lived worker (the Pocket TTS server)
+        so the first spoken reply does not pay its ~5 s start-up. Blocking:
+        call it from a background thread. No-op when already running."""
+        warmup = getattr(self.provider, "warmup", None)
+        if not callable(warmup):
+            return False
+        warmup()
+        return True
+
     def active_voice_id(self) -> str:
         data = self.store.load() if self.store is not None else {}
         return str(data.get("active_voice_id") or self.default_voice_id)

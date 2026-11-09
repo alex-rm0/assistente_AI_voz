@@ -433,6 +433,13 @@ class EchoUIController(QObject):
         # [VOICE_STOP] event=returned_to_listening a real completion point
         # rather than firing immediately/optimistically at request time.
         self._voice_stop_awaiting_listen_log = False
+        # Pocket TTS cold start: the server used to start on the first speak
+        # request (~5 s), delaying the first wake ack. Same ownership rule as
+        # _wake_prewarm_thread: set when started, cleared when finished.
+        self._tts_prewarm_thread: QThread | None = None
+        self._tts_prewarm_started_at: float | None = None
+        if self.voice_available:
+            QTimer.singleShot(0, self._prewarm_tts)
 
     @Slot(str)
     def submitMessage(self, text: str) -> None:
@@ -613,6 +620,7 @@ class EchoUIController(QObject):
         self._voice_session_id += 1
         self._voice_conversation_failures = 0
         self._log_voice("started")
+        self._prewarm_tts()
         self.voiceConversationChanged.emit(True)
         self._begin_listening()
         return True
@@ -676,6 +684,7 @@ class EchoUIController(QObject):
         self._log_wake("standby_entered", reason=reason)
         self.voiceStandbyChanged.emit(True)
         self._prewarm_wake_recognizer()
+        self._prewarm_tts()
         if self._active or self._tts_worker is not None:
             # Something else is genuinely still busy (a typed turn, TTS
             # being stopped as part of this same sleep transition) -- ITS
@@ -754,6 +763,37 @@ class EchoUIController(QObject):
         if self._wake_prewarm_thread is thread:
             self._wake_prewarm_thread = None
         self._log_wake_prewarm("finished")
+        if thread is not None:
+            thread.deleteLater()
+
+    def _prewarm_tts(self) -> None:
+        # Starts the TTS manager's long-lived worker (Pocket server) off the
+        # UI thread so the first spoken reply / wake ack does not wait for
+        # its start-up. Duck-typed (a TTS double without prewarm() is
+        # skipped); one at a time; never once shutdown has begun. When the
+        # server is already running prewarm() returns at once. A real speak
+        # racing this simply waits on the provider's own lock for the same
+        # server, never a second one.
+        if self._tts_prewarm_thread is not None or self._wake_prewarm_shutting_down or self._shutdown_requested:
+            return
+        prewarm = getattr(self.tts_manager, "prewarm", None)
+        if not callable(prewarm):
+            return
+        thread = _WakeRecognizerPrewarmThread(prewarm, self)
+        self._tts_prewarm_thread = thread
+        self._tts_prewarm_started_at = time.perf_counter()
+        thread.finished.connect(self._on_tts_prewarm_finished)
+        print("[TTS_PREWARM] event=started")
+        thread.start()
+
+    @Slot()
+    def _on_tts_prewarm_finished(self) -> None:
+        # Must stay a declared @Slot (see _on_wake_prewarm_finished).
+        thread = self.sender()
+        if self._tts_prewarm_thread is thread:
+            self._tts_prewarm_thread = None
+        elapsed_ms = int((time.perf_counter() - self._tts_prewarm_started_at) * 1000) if self._tts_prewarm_started_at else 0
+        print(f"[TTS_PREWARM] event=finished elapsed_ms={elapsed_ms}")
         if thread is not None:
             thread.deleteLater()
 
@@ -1384,6 +1424,11 @@ class EchoUIController(QObject):
         self._wake_prewarm_shutting_down = True
         if self._wake_prewarm_thread is not None:
             _log_shutdown(component="wake_prewarm", event="stop_requested")
+        if self._tts_prewarm_thread is not None:
+            # A Pocket server start can't be cancelled (stopping the manager
+            # would block on the provider's lock until it is ready) -- it is
+            # drained like any other worker, with the window already hidden.
+            _log_shutdown(component="tts_prewarm", event="stop_requested")
         if self._voice_worker is not None:
             self._voice_worker.stop()
             _log_shutdown(component="voice_worker", event="stop_requested")
@@ -1407,6 +1452,8 @@ class EchoUIController(QObject):
         pending: list[str] = []
         if self._wake_prewarm_thread is not None:
             pending.append("wake_prewarm")
+        if self._tts_prewarm_thread is not None:
+            pending.append("tts_prewarm")
         if self._voice_thread is not None:
             pending.append("voice_worker")
         if self._tts_thread is not None:
@@ -1481,6 +1528,7 @@ class EchoUIController(QObject):
         self._shutdown_wake_prewarm_thread(wait_ms)
         if had_prewarm:
             _log_shutdown(component="wake_prewarm", event="finished", elapsed_ms=self._shutdown_elapsed_ms())
+        self._shutdown_tts_prewarm_thread(wait_ms)
         if self._voice_worker is not None:
             self._voice_worker.stop()
             self._cleanup_voice_worker()
@@ -1535,6 +1583,18 @@ class EchoUIController(QObject):
         if self._shutdown_started_at is None:
             return 0
         return int((time.perf_counter() - self._shutdown_started_at) * 1000)
+
+    def _shutdown_tts_prewarm_thread(self, wait_ms: int) -> None:
+        # Same ownership/isValid rule as _shutdown_wake_prewarm_thread; runs
+        # before _shutdown_tts_manager() so the manager stop never blocks on
+        # a server start still holding the provider lock.
+        thread = self._tts_prewarm_thread
+        if thread is None:
+            return
+        if shiboken6.isValid(thread) and thread.isRunning() and not thread.wait(wait_ms):
+            _debug_ui("[Echo UI] shutdown=tts_prewarm_still_running")
+        self._tts_prewarm_thread = None
+        _log_shutdown(component="tts_prewarm", event="finished", elapsed_ms=self._shutdown_elapsed_ms())
 
     def _shutdown_wake_prewarm_thread(self, wait_ms: int) -> None:
         """Phase 7.6.6.1: the shutdown-time half of the ownership rule --
