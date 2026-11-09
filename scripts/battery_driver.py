@@ -16,6 +16,10 @@ Optionally pass the repo root as the first argument (defaults to the
 parent of this scripts/ folder). Paid model calls are kept off:
 ECHO_ALLOW_PAID_MODEL_CALLS is removed from the environment.
 
+Scenario 12 starts from pt-PT: before the app starts, the driver sets
+`response_language` to "pt-PT" in data/user_settings.json, and "responde
+em inglês" is then sent while scenario 11's task is still open.
+
 WARNING: this drives the real app, so it WRITES TO data/ (history.json,
 long_term_memory.sqlite -- one more session summary per run --,
 session_manager.sqlite, user_settings.json, and a task created by scenario
@@ -168,6 +172,24 @@ import threading  # noqa: E402
 
 import app  # noqa: E402
 
+def reset_response_language() -> None:
+    # Scenario 12 must show a real switch: start every run from pt-PT, so
+    # "responde em inglês" (sent while scenario 11's task is still open)
+    # changes the language in the middle of a task.
+    path = os.path.join(REPO, "data", "user_settings.json")
+    settings: dict[str, object] = {}
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as handle:
+            settings = json.load(handle)
+    previous = settings.get("response_language")
+    settings["response_language"] = "pt-PT"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(settings, handle, ensure_ascii=False, indent=2)
+    mark(scenario=12, event="response_language_reset", previous=previous, value="pt-PT")
+
+
+reset_response_language()
 _guard = threading.Timer(TURN_TIMEOUT_S * 9, lambda: (mark(event="global_timeout"), os._exit(3)))
 _guard.daemon = True
 _guard.start()
