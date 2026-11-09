@@ -419,6 +419,14 @@ class EchoUIController(QObject):
         # must not be touched or duplicated".
         self._voice_worker_is_barge_in = False
         self._voice_worker_barge_in_confirmed = False
+        # Diagnostics only, never read by the voice loop itself:
+        # [VOICE_TURN_TIMING] perf_counter() marks for the voice turn in
+        # flight (None when there is none), and the two [VOICE_LOST_SPEECH]
+        # flags -- an unconfirmed barge-in monitor cancelled because TTS
+        # ended, and "the next capture follows a confirmed barge-in".
+        self._voice_turn_timing: dict[str, float] | None = None
+        self._barge_in_cancelled_at_tts_end = False
+        self._barge_in_recent = False
         # Phase 7.6.2 (section 3): set when stopSpeaking() interrupts an
         # actual SPEAKING TTS worker -- consumed (and logged) the next time
         # _begin_listening() actually reopens the mic, giving the requested
@@ -887,8 +895,11 @@ class EchoUIController(QObject):
     def _auto_speak_response(self, response_text: str, session_id: int) -> None:
         if not self._voice_conversation_active or session_id != self._voice_session_id:
             self._log_voice("stale_callback_ignored", context="auto_speak")
+            self._log_voice_turn_timing("stale")
             return
         self._log_voice("tts_requested")
+        if self._voice_turn_timing is not None:
+            self._voice_turn_timing["tts_requested_at"] = time.perf_counter()
         self.speakText(response_text)
 
     def _is_voice_worker_stale(self) -> bool:
@@ -1002,6 +1013,96 @@ class EchoUIController(QObject):
             f"classification_ms={classification_ms:.2f} "
             f"wake_to_active_ms={wake_to_active_ms:.2f} "
             f"total_ms={int(total_ms)}"
+        )
+
+    def _start_voice_turn_timing(self) -> None:
+        # Diagnostics only: copies the capture/STT marks of the transcript
+        # about to be submitted; the rest is filled in as the turn advances
+        # (_handle_response -> _auto_speak_response -> _handle_tts_started).
+        outcome = getattr(self.voice_transcriber, "last_vad_outcome", None) or {}
+        timing: dict[str, float] = {"transcript_at": time.perf_counter()}
+        capture_ended_at = outcome.get("capture_ended_at")
+        if isinstance(capture_ended_at, (int, float)):
+            timing["capture_ended_at"] = float(capture_ended_at)
+            timing["speech_end_at"] = float(capture_ended_at) - float(outcome.get("trailing_silence_ms") or 0.0) / 1000.0
+        stt_started_at = outcome.get("stt_started_at")
+        if isinstance(stt_started_at, (int, float)):
+            timing["stt_started_at"] = float(stt_started_at)
+        if isinstance(outcome.get("stt_ms"), (int, float)):
+            timing["stt_ms"] = float(outcome["stt_ms"])
+        self._voice_turn_timing = timing
+
+    def _log_voice_turn_timing(self, outcome: str, *, tts_payload: str = "") -> None:
+        # One bounded line per voice turn, durations only (no content):
+        # end of speech -> STT start, STT, engine turn (LLM included),
+        # TTS request -> first audio, and end of speech -> first sound.
+        # mic_closed_ms is the window in which nothing listens (from the
+        # end of the capture until playback starts and the barge-in
+        # monitor opens the mic again). Fields that were not reached for
+        # this outcome are "n/a".
+        timing = self._voice_turn_timing
+        self._voice_turn_timing = None
+        if timing is None:
+            return
+
+        def span(start: str, end: str) -> object:
+            if start in timing and end in timing:
+                return int((timing[end] - timing[start]) * 1000)
+            return "n/a"
+
+        def value(key: str) -> object:
+            return int(timing[key]) if key in timing else "n/a"
+
+        provider_first_audio_ms: object = "n/a"
+        provider_synthesis_ms: object = "n/a"
+        try:
+            data = json.loads(tts_payload) if tts_payload else {}
+        except json.JSONDecodeError:
+            data = {}
+        if "first_audio_ms" in data:
+            provider_first_audio_ms = data.get("first_audio_ms")
+        if "synthesis_ms" in data:
+            provider_synthesis_ms = data.get("synthesis_ms")
+        print(
+            "[VOICE_TURN_TIMING] "
+            f"session_id={self._voice_session_id} "
+            f"outcome={outcome} "
+            f"stt_model={getattr(self.voice_transcriber, 'model_name', 'unknown')} "
+            f"speech_end_to_stt_start_ms={span('speech_end_at', 'stt_started_at')} "
+            f"stt_ms={value('stt_ms')} "
+            f"engine_ms={value('engine_ms')} "
+            f"response_to_tts_request_ms={span('response_at', 'tts_requested_at')} "
+            f"tts_to_first_audio_ms={span('tts_requested_at', 'first_sound_at')} "
+            f"provider_first_audio_ms={provider_first_audio_ms} "
+            f"provider_synthesis_ms={provider_synthesis_ms} "
+            f"speech_end_to_first_sound_ms={span('speech_end_at', 'first_sound_at')} "
+            f"mic_closed_ms={span('capture_ended_at', 'first_sound_at')}"
+        )
+
+    def _log_lost_speech(self, reason: str, *, approx_ms: object, **fields: object) -> None:
+        # Diagnostics only: speech a VAD saw that nothing will transcribe.
+        # The mic is closed between the end of a capture and the start of
+        # playback, so speech in that window cannot be detected at all --
+        # its length is [VOICE_TURN_TIMING] mic_closed_ms.
+        parts = [f"[VOICE_LOST_SPEECH] reason={reason}", f"session_id={self._voice_session_id}", f"approx_ms={approx_ms}"]
+        for key, value in fields.items():
+            parts.append(f"{key}={value}")
+        print(" ".join(parts))
+
+    def _log_lost_barge_in_candidate(self) -> None:
+        # The barge-in monitor had a speech candidate (loud enough, not yet
+        # sustained long enough to confirm) when TTS ended and it was
+        # cancelled -- that speech is dropped. May also be TTS bleed; the
+        # peak/threshold fields let a log reader tell.
+        outcome = getattr(self.voice_transcriber, "last_vad_outcome", None)
+        if not isinstance(outcome, dict) or not outcome.get("candidate_entered") or outcome.get("confirmed"):
+            return
+        self._log_lost_speech(
+            "barge_in_candidate_dropped_at_tts_end",
+            approx_ms=int(outcome.get("max_sustained_ms") or 0),
+            required_ms=outcome.get("required_ms"),
+            peak_rms=f"{float(outcome.get('peak_rms') or 0.0):.5f}",
+            effective_threshold=f"{float(outcome.get('effective_threshold') or 0.0):.5f}",
         )
 
     def _log_barge_in(self, event: str, **fields: object) -> None:
@@ -1499,6 +1600,13 @@ class EchoUIController(QObject):
             )
             if should_auto_speak:
                 self._log_voice("response_ready")
+            if self._voice_turn_timing is not None:
+                now = time.perf_counter()
+                self._voice_turn_timing["response_at"] = now
+                if self._started_at:
+                    self._voice_turn_timing["engine_ms"] = (now - self._started_at) * 1000.0
+                if not should_auto_speak:
+                    self._log_voice_turn_timing("no_tts")
             if last_progress_event == "rewrite_cancelled":
                 # The request already resolved to "Pedido cancelado." -- go
                 # straight to idle instead of playing the normal thinking->
@@ -1533,6 +1641,7 @@ class EchoUIController(QObject):
         # the voice loop rather than stranding it, same reasoning as
         # section 17/18's TTS/STT failure recovery.
         should_rearm = self._voice_conversation_active and self._voice_turn_session_id == self._voice_session_id
+        self._log_voice_turn_timing("engine_error")
         try:
             _debug_ui(
                 "[Echo UI DEBUG] emitting errorOccurred",
@@ -1614,7 +1723,9 @@ class EchoUIController(QObject):
             self._enter_voice_standby(reason="sleep_command")
             return
         self._voice_conversation_failures = 0
+        self._barge_in_recent = False
         self._log_voice("transcript_ready", chars=len(clean))
+        self._start_voice_turn_timing()
         self.submitMessage(clean)
 
     @Slot(str)
@@ -1639,6 +1750,14 @@ class EchoUIController(QObject):
             # main response area with a scary error for it, just rearm (see
             # the section-9 note above -- no backoff needed once VAD bounds
             # cycle length structurally).
+            if self._barge_in_recent and "curta" in error_text.lower():
+                outcome = getattr(self.voice_transcriber, "last_vad_outcome", None) or {}
+                self._log_lost_speech(
+                    "short_capture_after_barge_in",
+                    approx_ms=int(float(outcome.get("speech_ms") or 0.0)),
+                    min_speech_ms=getattr(getattr(self.voice_transcriber, "vad_config", None), "min_speech_ms", "n/a"),
+                )
+            self._barge_in_recent = False
             self._log_voice("benign_retry")
             self._schedule_voice_rearm()
             return
@@ -1676,6 +1795,9 @@ class EchoUIController(QObject):
         self._thread_debug("_cleanup_voice_worker")
         if self._voice_worker_is_barge_in:
             self._log_barge_in_monitor_summary()
+            if self._barge_in_cancelled_at_tts_end:
+                self._log_lost_barge_in_candidate()
+        self._barge_in_cancelled_at_tts_end = False
         if self._voice_thread is not None:
             self._voice_thread.quit()
             self._voice_thread.wait()
@@ -1690,6 +1812,9 @@ class EchoUIController(QObject):
     def _handle_tts_started(self, payload: str) -> None:
         self._thread_debug("_handle_tts_started")
         _debug_tts("[TTS]", "event=playback_started", _bounded_tts_payload(payload))
+        if self._voice_turn_timing is not None and "tts_requested_at" in self._voice_turn_timing:
+            self._voice_turn_timing["first_sound_at"] = time.perf_counter()
+            self._log_voice_turn_timing("spoken", tts_payload=payload)
         if self._voice_conversation_active:
             self._log_voice("speaking_started")
         self._emit_state("speaking")
@@ -1704,6 +1829,7 @@ class EchoUIController(QObject):
         nothing left to interrupt. A CONFIRMED barge-in worker is left
         completely alone: it IS the capture we want to keep running."""
         if self._voice_worker is not None and self._voice_worker_is_barge_in and not self._voice_worker_barge_in_confirmed:
+            self._barge_in_cancelled_at_tts_end = True
             self.cancelVoiceInput()
             return True
         return False
@@ -1735,6 +1861,7 @@ class EchoUIController(QObject):
         self._thread_debug("_handle_tts_error")
         error_text = str(error or "Não consegui falar a resposta.")
         _debug_tts("[TTS]", "event=error", "success=false", f"failure_reason={error_text[:160]}")
+        self._log_voice_turn_timing("tts_error")
         self._cleanup_tts_worker()
         self.ttsError.emit(error_text)
         if self._cancel_unconfirmed_barge_in_monitor():
@@ -1800,6 +1927,7 @@ class EchoUIController(QObject):
         if self._is_voice_worker_stale():
             return
         self._voice_worker_barge_in_confirmed = True
+        self._barge_in_recent = True
         self._log_barge_in("confirmed")
         if self._tts_worker is not None:
             # Direct worker-level stop, NOT self.stopSpeaking() -- that

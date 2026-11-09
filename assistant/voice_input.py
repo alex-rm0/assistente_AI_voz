@@ -697,6 +697,7 @@ class VoiceTranscriber:
             raise VoiceInputError(f"Nao consegui gravar audio do microfone: {exc}") from exc
 
         reason = tracker.reason if tracker.done.is_set() else "manual_stop"
+        capture_ended_at = time.perf_counter()
         with lock:
             captured_frames = list(frames)
 
@@ -731,6 +732,9 @@ class VoiceTranscriber:
             # configured floor once the baseline rose above it).
             "baseline_rms": tracker.baseline_rms,
             "effective_threshold": tracker.last_effective_threshold,
+            # Diagnostics only ([VOICE_TURN_TIMING]): perf_counter() when
+            # the capture stopped (end of speech + trailing silence).
+            "capture_ended_at": capture_ended_at,
         }
 
         if not captured_frames:
@@ -801,6 +805,8 @@ class VoiceTranscriber:
             require_confirmation_before_recording=require_confirmation_before_recording,
         )
         stt_started_at = time.perf_counter()
+        if self.last_vad_outcome is not None:
+            self.last_vad_outcome["stt_started_at"] = stt_started_at
         try:
             return self.transcribe(
                 audio_path, input_language=input_language if input_language is not None else self.input_language
