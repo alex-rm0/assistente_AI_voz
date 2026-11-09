@@ -182,3 +182,16 @@ foram corrigidos**. Cada entrada tem o sintoma, a evidência e o estado.
   declarações simples com critérios da lista ("o critério é a bateria",
   "critério: preço", "decidir pela autonomia") já ficam registadas.
 - **Estado:** aberto.
+
+## 10. Qualidade das respostas do composer (notas, sem correção)
+
+- **Echo inventa estado próprio em inglês:** com en-GB, a "Olá, tudo bem?
+  Diz-me uma curiosidade." o Echo respondeu "Not much to report, just the
+  usual system checks." (Ollama real, 2026-11-09). É estado inventado,
+  mas os detetores dos guards só conhecem frases em português (§1), por
+  isso uma afirmação destas em inglês não é bloqueada.
+- **"Diz-me uma curiosidade" responde com uma pergunta:** nas 5 corridas
+  da mesma validação, o Echo perguntou se o utilizador queria uma
+  curiosidade ("Did you want a simple fact or a more interesting
+  curiosity?") em vez de a dizer.
+- **Estado:** aberto.
