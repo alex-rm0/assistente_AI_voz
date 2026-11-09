@@ -24,14 +24,36 @@
   //   document logic is ever duplicated in JavaScript.
   // - Session-only state: nothing here persists across an app restart.
 
+  // Visible labels follow the fixed response_language (set by echo_ui.js
+  // from the telemetry payload through setLanguage()).
   const TYPE_LABELS = {
-    document: "DOCUMENTO",
-    draft: "RASCUNHO",
-    comparison: "COMPARAÇÃO",
-    excerpt: "TRECHO",
-    task_artifact: "TAREFA",
-    writing_task: "TAREFA",
+    "pt-PT": {
+      document: "DOCUMENTO",
+      draft: "RASCUNHO",
+      comparison: "COMPARAÇÃO",
+      excerpt: "TRECHO",
+      task_artifact: "TAREFA",
+      writing_task: "TAREFA",
+    },
+    "en-GB": {
+      document: "DOCUMENT",
+      draft: "DRAFT",
+      comparison: "COMPARISON",
+      excerpt: "EXCERPT",
+      task_artifact: "TASK",
+      writing_task: "TASK",
+    },
   };
+  const CLOSE_LABELS = { "pt-PT": "Fechar", "en-GB": "Close" };
+  let uiLanguage = "pt-PT";
+
+  function typeLabel(type) {
+    return (TYPE_LABELS[uiLanguage] || TYPE_LABELS["pt-PT"])[type] || String(type || "").toUpperCase();
+  }
+
+  function actionLabel(actionId) {
+    return (ACTION_LABELS[uiLanguage] || ACTION_LABELS["pt-PT"])[actionId] || actionId;
+  }
 
   // Phase 3B (Cognitive Workspace Blueprint v2): REPRESENTATION RENDERER.
   // Backend semantics (assistant/representation.py) already define exactly
@@ -58,14 +80,26 @@
   };
 
   const ACTION_LABELS = {
-    open: "Abrir",
-    close: "Fechar",
-    rewrite: "Melhorar",
-    improve: "Melhorar",
-    compare: "Comparar",
-    save: "Guardar",
-    restore: "Versão anterior",
-    discard: "Descartar",
+    "pt-PT": {
+      open: "Abrir",
+      close: "Fechar",
+      rewrite: "Melhorar",
+      improve: "Melhorar",
+      compare: "Comparar",
+      save: "Guardar",
+      restore: "Versão anterior",
+      discard: "Descartar",
+    },
+    "en-GB": {
+      open: "Open",
+      close: "Close",
+      rewrite: "Improve",
+      improve: "Improve",
+      compare: "Compare",
+      save: "Save",
+      restore: "Previous version",
+      discard: "Discard",
+    },
   };
 
   // Action hierarchy (section 8): the primary surface gets a handful of
@@ -2246,7 +2280,7 @@
 
       const eyebrow = document.createElement("span");
       eyebrow.className = "workspace-object__type";
-      eyebrow.textContent = TYPE_LABELS[obj.type] || obj.type.toUpperCase();
+      eyebrow.textContent = typeLabel(obj.type);
       header.appendChild(eyebrow);
 
       // Always present, only shown via CSS for a closable surface (a
@@ -2256,7 +2290,7 @@
       closeButton.type = "button";
       closeButton.className = "workspace-object__close";
       closeButton.dataset.action = "close";
-      closeButton.setAttribute("aria-label", "Fechar");
+      closeButton.setAttribute("aria-label", CLOSE_LABELS[uiLanguage] || CLOSE_LABELS["pt-PT"]);
       closeButton.textContent = "×";
       header.appendChild(closeButton);
       article.appendChild(header);
@@ -2290,13 +2324,32 @@
       return article;
     }
 
+    // Relabels existing cards in place (same nodes, same ids) when the
+    // response language changes; new cards already use uiLanguage.
+    function setLanguage(language) {
+      const next = TYPE_LABELS[language] ? language : "pt-PT";
+      if (next === uiLanguage) return uiLanguage;
+      uiLanguage = next;
+      if (!container) return uiLanguage;
+      container.querySelectorAll(".workspace-object").forEach((node) => {
+        const eyebrow = node.querySelector(".workspace-object__type");
+        if (eyebrow) eyebrow.textContent = typeLabel(node.dataset.type);
+        const close = node.querySelector(".workspace-object__close");
+        if (close) close.setAttribute("aria-label", CLOSE_LABELS[uiLanguage]);
+        node.querySelectorAll(".workspace-object__actions button, .workspace-object__actions-secondary button").forEach((button) => {
+          button.textContent = actionLabel(button.dataset.action);
+        });
+      });
+      return uiLanguage;
+    }
+
     function fillActions(host, actionIds) {
       host.innerHTML = "";
       actionIds.forEach((actionId) => {
         const button = document.createElement("button");
         button.type = "button";
         button.dataset.action = actionId;
-        button.textContent = ACTION_LABELS[actionId] || actionId;
+        button.textContent = actionLabel(actionId);
         host.appendChild(button);
       });
     }
@@ -2772,6 +2825,8 @@
       applyAttention,
       getAttention,
       computeSpacePressure,
+      // Fixed response_language: visible card labels.
+      setLanguage,
       _testTetherGeometry: {
         isFinitePoint,
         tetherPath,

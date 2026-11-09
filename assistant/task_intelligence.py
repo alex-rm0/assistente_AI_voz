@@ -7,7 +7,7 @@ from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Any
 
-from assistant.response_language import localize
+from assistant.response_language import localize, localize_task_goal
 from assistant.text_matching import contains_any_phrase, normalize_for_matching
 
 
@@ -459,7 +459,7 @@ def cognitive_task_view_model(
     view = CognitiveTaskViewModel(
         task_id=task.id,
         task_type=task.task_type,
-        title=title or getattr(task, "goal", "") or task.task_type,
+        title=title or localize_task_goal(getattr(task, "goal", ""), response_language) or task.task_type,
         stage=stage,
         sections=sections,
     )
@@ -508,7 +508,7 @@ def _overview_items(task, knowledge: list[KnowledgeEntry], response_language: st
     if category and task.task_type == "generic_comparison":
         items.append({"label": f"{localize('task.card.category', response_language)} {category}", "details": []})
     if getattr(task, "goal", ""):
-        items.append({"label": task.goal, "details": []})
+        items.append({"label": localize_task_goal(task.goal, response_language), "details": []})
     for predicate in ("destination", "origin", "date_range"):
         value = _latest_value(knowledge, "trip", predicate)
         if value:

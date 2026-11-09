@@ -245,6 +245,20 @@ _STRINGS: dict[str, tuple[str, str]] = {
     "task.title.writing": ("Escrita em conjunto", "Collaborative writing"),
     "task.title.generic": ("Tarefa", "Task"),
     "task.card.goal": ("Objetivo:", "Goal:"),
+    # Built-in task goals (the stored ActiveTaskContext.goal values in
+    # conversation.py/_TASK_METADATA); shown through localize_task_goal().
+    "task.goal.compose_email": ("escrever um email", "write an email"),
+    "task.goal.writing": ("escrever em conjunto", "write together"),
+    "task.goal.plan_trip": ("planear férias", "plan a holiday"),
+    "task.goal.make_decision": ("tomar uma decisão", "make a decision"),
+    "task.goal.study_topic": ("estudar", "study"),
+    "task.goal.research_topic": ("investigar opções", "research options"),
+    "task.goal.generic_comparison": ("comparar opções", "compare options"),
+    "task.goal.generic_activity": ("trabalhar num objetivo", "work towards a goal"),
+    "task.goal.preference_discovery": (
+        "continuar a compreender preferências antes de recomendar",
+        "keep understanding preferences before recommending",
+    ),
     "task.card.destination": ("Destino:", "Destination:"),
     "task.card.preference": ("Preferência:", "Preference:"),
     "task.card.theme": ("Tema:", "Theme:"),
@@ -897,6 +911,27 @@ def localize(key: str, response_language: str, **params: object) -> str:
     loud bug, not a quiet Portuguese leak."""
     template = _STRINGS[key][1 if normalize_response_language(response_language) == ENGLISH_GB else 0]
     return template.format(**params) if params else template
+
+
+_BUILT_IN_TASK_GOALS = {
+    "escrever um email": "task.goal.compose_email",
+    "escrever em conjunto": "task.goal.writing",
+    "planear ferias": "task.goal.plan_trip",
+    "tomar uma decisao": "task.goal.make_decision",
+    "estudar": "task.goal.study_topic",
+    "investigar opcoes": "task.goal.research_topic",
+    "comparar opcoes": "task.goal.generic_comparison",
+    "trabalhar num objetivo": "task.goal.generic_activity",
+    "continuar a compreender preferencias antes de recomendar": "task.goal.preference_discovery",
+}
+
+
+def localize_task_goal(goal: str, language: str) -> str:
+    """Display text for a task goal: built-in goals (stored as fixed
+    Portuguese values) are localized; a goal the user stated is shown as is.
+    The stored value itself never changes."""
+    key = _BUILT_IN_TASK_GOALS.get(_normalize(str(goal or "")).strip())
+    return localize(key, language) if key else str(goal or "")
 
 
 def localize_deterministic_response(response: str, language: str) -> str:

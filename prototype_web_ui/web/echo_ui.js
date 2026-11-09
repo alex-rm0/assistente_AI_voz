@@ -660,8 +660,23 @@
     updateTelemetryButtons();
   }
 
+  // Fixed response_language: the controller adds it to every telemetry
+  // payload; the page language and the workspace card labels follow it.
+  function applyResponseLanguage(language) {
+    const value = String(language || "");
+    if (value !== "pt-PT" && value !== "en-GB") return;
+    if (document.documentElement.lang !== value) {
+      document.documentElement.lang = value;
+      console.log(`[UI_LANGUAGE] lang=${value}`);
+    }
+    if (window.echoWorkspaceObjects && typeof window.echoWorkspaceObjects.setLanguage === "function") {
+      window.echoWorkspaceObjects.setLanguage(value);
+    }
+  }
+
   function applyRealTelemetry(payload) {
     const data = parseTelemetryPayload(payload);
+    if (data) applyResponseLanguage(data.response_language);
     if (!data || telemetryDebugMode) return;
     latestRealTelemetry = data;
     if (String(data.state || "") === "error") {

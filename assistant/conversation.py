@@ -135,6 +135,7 @@ from assistant.response_language import (
     legacy_language_value,
     localize,
     localize_deterministic_response,
+    localize_task_goal,
     looks_mixed_for_language,
     normalize_response_language,
     response_language_instruction,
@@ -8811,6 +8812,11 @@ class AssistantEngine:
             if self._turn_trace is not None:
                 self._turn_trace["response_language_changed"] = True
                 self._turn_trace["response_language"] = self.response_language
+            # The open task card is rendered in the response language, so
+            # re-send it (same artifact/task id) instead of waiting for the
+            # next task turn.
+            if self._active_task_context is not None and self._active_task_context.active_artifact_id:
+                self._update_task_artifact_ui(self._active_task_context)
             return command.confirmation
 
         return None
@@ -13806,7 +13812,7 @@ def _generic_task_card_content(ctx: "ActiveTaskContext", response_language: str 
     # (destination names, topics, options, free-text facts/requests) are
     # user/content data and are never translated (section 18).
     goal_label = localize("task.card.goal", response_language)
-    lines = [f"{goal_label} {ctx.goal or _generic_task_title(ctx, response_language).lower()}"]
+    lines = [f"{goal_label} {localize_task_goal(ctx.goal, response_language) or _generic_task_title(ctx, response_language).lower()}"]
     if ctx.parameters.get("destination"):
         lines.append(f"{localize('task.card.destination', response_language)} {ctx.parameters['destination']}")
     if ctx.parameters.get("travel_style"):

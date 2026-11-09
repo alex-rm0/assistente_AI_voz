@@ -1916,11 +1916,23 @@ class EchoUIController(QObject):
         if self.model_runtime is None:
             return _json_payload({"state": state, "note": "O runtime de modelos não está disponível."})
         if state == "request_started":
-            return _json_payload(self.model_runtime.request_started_payload())
-        telemetry = self.get_telemetry_callback() if self.get_telemetry_callback is not None else None
-        if telemetry:
-            return _json_payload(self.model_runtime.telemetry_payload(telemetry, state=state))
-        return _json_payload(self.model_runtime.current_payload(state=state))
+            payload = self.model_runtime.request_started_payload()
+        else:
+            telemetry = self.get_telemetry_callback() if self.get_telemetry_callback is not None else None
+            if telemetry:
+                payload = self.model_runtime.telemetry_payload(telemetry, state=state)
+            else:
+                payload = self.model_runtime.current_payload(state=state)
+        return _json_payload(self._with_response_language(payload))
+
+    def _with_response_language(self, payload: dict) -> dict:
+        # The page learns the fixed response_language from this existing
+        # telemetry channel (startup getModelTelemetry + every turn) -- no
+        # dedicated signal. Only set when known.
+        response_language = self._response_language()
+        if response_language and isinstance(payload, dict):
+            return {**payload, "response_language": response_language}
+        return payload
 
     def _emit_runtime_telemetry(self, state: str, error_message: str = "") -> None:
         if self.model_runtime is None:
@@ -1928,7 +1940,7 @@ class EchoUIController(QObject):
         try:
             if state == "error":
                 payload = self.model_runtime.error_payload(error_message or "Erro.", provider_error_type="ui_error")
-                encoded = _json_payload(payload)
+                encoded = _json_payload(self._with_response_language(payload))
             else:
                 encoded = self._runtime_payload_json(state)
             _debug_ui(f"[Echo UI DEBUG] emitting telemetryUpdated {encoded}")
