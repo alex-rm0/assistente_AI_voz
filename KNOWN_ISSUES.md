@@ -26,7 +26,33 @@ foram corrigidos**. Cada entrada tem o sintoma, a evidência e o estado.
     apanhado por `looks_mixed_for_language` (`assistant/response_language.py`).
     Por isso sai em português mesmo com en-GB.
   - A mensagem expõe ao utilizador o nome interno "Context Observer".
-- **Estado:** aberto.
+- **Estado:** parcialmente corrigido (2026-11-09). A política está decidida
+  no §7.
+  - **Corrigido:**
+    - O composer usa um system prompt inteiramente inglês com en-GB, tanto
+      em `compose()` como em `regenerate()` (commit `551816b`). Com pt-PT
+      não mudou.
+    - Os 6 textos dos guards de finalização em `_complete_turn` passam por
+      `localize()` em PT e EN (commit `bbc27cc`): tool claim, memory recall
+      claim, memory claim, duração histórica, atividade e workspace. O
+      texto da atividade deixou de expor "Context Observer".
+  - **Falta:**
+    - **Pergunta curta em PT:** com o Ollama real e en-GB, "Explica-me o
+      que é um algoritmo numa frase" respondeu em inglês 3/3 (antes 1/3).
+      "Qual é a capital de França?" (`GENERAL_CONVERSATION`) continua em
+      português em 2/3, mesmo com o system prompt e as etiquetas da
+      mensagem em inglês. O modelo segue a língua de uma pergunta curta.
+      Não há nenhuma verificação do idioma da resposta gerada que a
+      regenere.
+    - **Detetores dos guards só em português:** os marcadores (ex.: "se
+      não me engano", "pesquisei", "lembro-me") só conhecem frases em
+      português, por isso uma resposta inventada em inglês não é
+      bloqueada.
+    - **Literais PT fora deste bloco:** ver a lista no relatório de
+      2026-11-09. Por exemplo, `_local_writing_fallback` devolve um email
+      fixo em português.
+    - **UI e card da task:** não acompanham o idioma (`<html lang>`
+      continua `pt-PT`; o card mantém "TAREFA"/"comparar opcoes").
 
 ## 2. Campos de trace `voice_critic_*` com nome enganador
 
@@ -112,14 +138,17 @@ foram corrigidos**. Cada entrada tem o sintoma, a evidência e o estado.
   - Ollama: carregamento a frio do modelo na primeira chamada.
 - **Estado:** aberto.
 
-## 7. Política de idioma por decidir
+## 7. Política de idioma
 
-- **Sintoma:** não está definido o que o Echo deve fazer quando o
+- **Sintoma:** não estava definido o que o Echo deve fazer quando o
   utilizador fala português com a definição en-GB (responder em en-GB,
   seguir o idioma falado, ou perguntar).
 - **Evidência:** é o caso real do problema 1. O STT deteta `pt`, a definição
   é `en-GB` e o TTS usa a voz inglesa para texto em português.
-- **Estado:** aberto (decisão de produto).
+- **Estado:** decidido (2026-11-09): `response_language` é uma **definição
+  fixa**. Com en-GB, toda a resposta visível sai em inglês, mesmo que o
+  utilizador fale português. Só muda com um comando explícito ("responde
+  em português"). O que já cumpre esta política e o que falta está no §1.
 
 ## 8. Phase 8.1.1: UI não mostrava respostas depois do STANDBY
 
