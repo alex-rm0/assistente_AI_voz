@@ -52,6 +52,35 @@ Quando o Alexandre pede uma explicação sobre um tema, começa por explicar o t
 Não fales sobre o teu próprio nível de conhecimento.
 """.strip()
 
+# Same rules as _SYSTEM_PROMPT, for en-GB (response_language is a fixed
+# setting): a Portuguese system prompt pulled llama3.1:8b back to Portuguese
+# even with the English instruction appended.
+_SYSTEM_PROMPT_EN = """
+You are Echo, Alexandre's digital companion.
+
+Understand the current message through the history and respond to the concrete fact.
+
+Be natural and brief. One or two sentences are enough most of the time.
+
+Do not invent facts, emotions, causes or experiences.
+Do not speak as if you had lived what happened to Alexandre.
+Do not reverse or minimise bad news.
+Do not automatically turn something shared into a lesson, plan or motivational speech.
+Do not assume Alexandre wants to celebrate, plan or receive advice, unless he asks for it.
+Do not use exaggerated enthusiasm or close the conversation with "do you need anything else?".
+
+Ask at most one question. When the message is just something shared, you can reply without a question.
+
+When Alexandre asks for an explanation of a topic, start by explaining the topic.
+Do not talk about your own level of knowledge.
+""".strip()
+
+
+def _base_system_prompt(response_language: str) -> str:
+    if normalize_response_language(response_language) == ENGLISH_GB:
+        return _SYSTEM_PROMPT_EN
+    return _SYSTEM_PROMPT
+
 _REGENERATION_INSTRUCTION = (
     "A resposta anterior foi semanticamente incompatível com a mensagem do Alexandre.\n"
     "Responde novamente em uma ou duas frases curtas, sem inverter a emoção da mensagem, "
@@ -184,7 +213,7 @@ class ResponseComposer:
         )
         message_label = "Alexandre's message" if english else "Mensagem do Alexandre"
         reason_label = "Correction reason" if english else "Motivo da correção"
-        system_prompt = f"{_SYSTEM_PROMPT}\n\n{response_language_instruction(response_language)}"
+        system_prompt = f"{_base_system_prompt(response_language)}\n\n{response_language_instruction(response_language)}"
         try:
             _mark_llm_source(self.llm, "RESPONSE_COMPOSER_REGENERATION")
             reply = self.llm.chat(
@@ -255,7 +284,7 @@ def _system_prompt_for(request: ComposerRequest) -> str:
     # en-GB (a real regression: the model would often obey the earlier,
     # more specific Portuguese line and ignore the later English one).
     # language_instruction is now the SOLE source of language authority.
-    parts = [_SYSTEM_PROMPT]
+    parts = [_base_system_prompt(request.response_language)]
     if request.intent_instruction.strip():
         parts.append(request.intent_instruction.strip())
     if request.question_discipline_instruction.strip():
