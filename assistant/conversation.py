@@ -3717,30 +3717,38 @@ class AssistantEngine:
                     "task_type": ctx.task_type,
                     "status": ctx.status,
                     "title": title,
-                    "subtitle": ctx.status,
+                    "subtitle": _task_status_label(ctx.status, self.response_language),
                     "content": content,
                     "presentation": presentation,
                 },
             )
             return
+        lang = self.response_language
         recipient = ctx.entities.get("recipient") or ""
-        role_label = _ROLE_LABELS.get(ctx.entities.get("recipientRole") or "", ctx.entities.get("recipientRole") or "")
-        title = f"Email para {recipient}" if recipient else (f"Email para o {role_label}" if role_label else "Email")
+        role = ctx.entities.get("recipientRole") or ""
+        role_label = localize(f"email.role.{role}", lang) if role in _ROLE_LABELS else role
+        role_who = localize("email.card.role_article", lang, role=role_label) if role_label else ""
+        if recipient or role_who:
+            title = localize("email.card.title_to", lang, who=recipient or role_who)
+        else:
+            title = localize("email.card.title", lang)
         generated_draft = ctx.parameters.get("generated_draft") or ""
         if generated_draft:
             content = generated_draft
         else:
             lines = []
             if recipient or role_label:
-                who = recipient or f"o {role_label}"
-                lines.append(f"Para: {who}" + (f" ({role_label})" if recipient and role_label else ""))
+                who = recipient or role_who
+                lines.append(f"{localize('email.card.to', lang)} {who}" + (f" ({role_label})" if recipient and role_label else ""))
             if ctx.parameters.get("course"):
-                lines.append(f"Contexto: {ctx.parameters['course']}")
+                lines.append(f"{localize('email.card.context', lang)} {ctx.parameters['course']}")
             if ctx.parameters.get("purpose"):
-                lines.append(f"Objetivo: {_PURPOSE_LABELS.get(ctx.parameters['purpose'], ctx.parameters['purpose'])}")
+                purpose = ctx.parameters["purpose"]
+                purpose_label = localize(f"email.purpose.{purpose}", lang) if purpose in _PURPOSE_LABELS else purpose
+                lines.append(f"{localize('email.card.purpose', lang)} {purpose_label}")
             if ctx.parameters.get("topic"):
-                lines.append(f"Assunto: {ctx.parameters['topic']}")
-            lines.append("[conteúdo ainda em preparação]" if ctx.status != "ready" else "[pronto para redigir]")
+                lines.append(f"{localize('email.card.subject', lang)} {ctx.parameters['topic']}")
+            lines.append(localize("email.card.preparing" if ctx.status != "ready" else "email.card.ready", lang))
             content = "\n".join(lines)
         if not ctx.active_artifact_id:
             ctx.active_artifact_id = f"artifact-{ctx.id}"
@@ -3759,7 +3767,7 @@ class AssistantEngine:
                 "task_type": ctx.task_type,
                 "status": ctx.status,
                 "title": title,
-                "subtitle": ctx.status,
+                "subtitle": _task_status_label(ctx.status, self.response_language),
                 "content": content,
             },
         )
@@ -14294,6 +14302,14 @@ def _compose_email_question(ctx: "ActiveTaskContext") -> str:
     # as confirming THIS specific offer (see _detect_task_control_action).
     ctx.pending_action = "create_draft"
     return "Já tenho o suficiente. Queres que escreva uma primeira versão?"
+
+
+def _task_status_label(status: str, response_language: str) -> str:
+    """Readable task card subtitle for the internal ActiveTaskContext.status."""
+    try:
+        return localize(f"task.card_status.{status}", response_language)
+    except KeyError:
+        return ""
 
 
 _ROLE_LABELS = {

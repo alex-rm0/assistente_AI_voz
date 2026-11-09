@@ -45,6 +45,20 @@ foram corrigidos**. Cada entrada tem o sintoma, a evidência e o estado.
       "Explica-me o que é um algoritmo numa frase" deu 5/5. "Olá, tudo
       bem? Diz-me uma curiosidade." deu 5/5. Por isso não foi preciso
       acrescentar uma verificação de idioma com regeneração.
+    - A página e o card da task acompanham o idioma (commit `268e6df`):
+      `<html lang>`, os rótulos "TAREFA"/"TASK" e os botões, o objetivo
+      ("comparar opções"/"compare options"). Ao mudar de idioma a meio de
+      uma task, o mesmo card é atualizado (mesmo `task_id`).
+    - Mais três textos visíveis passaram por `localize()`:
+      - a resposta das ferramentas do Context Observer sem dados
+        (`get_active_window`, `get_active_application`,
+        `get_open_windows`, `get_recent_activity`);
+      - o subtítulo do card de task, que mostrava o estado interno cru
+        ("ready"). Agora mostra "pronta"/"ready", "a recolher
+        informação"/"collecting details", etc., sem mudar o valor interno;
+      - o card do email (`compose_email`): título "Email para"/"Email to",
+        "Para:", "Contexto:", "Objetivo:", "Assunto:", os marcadores de
+        estado e os papéis e finalidades.
   - **Falta:**
     - **Sem verificação do idioma gerado:** se o modelo voltar a responder
       em português, nada o deteta nem regenera, além do
@@ -56,9 +70,10 @@ foram corrigidos**. Cada entrada tem o sintoma, a evidência e o estado.
       bloqueada.
     - **Literais PT fora deste bloco:** ver a lista no relatório de
       2026-11-09. Por exemplo, `_local_writing_fallback` devolve um email
-      fixo em português.
-    - **UI e card da task:** não acompanham o idioma (`<html lang>`
-      continua `pt-PT`; o card mantém "TAREFA"/"comparar opcoes").
+      fixo em português. As ferramentas técnicas do Context Observer
+      (`get_last_context_snapshot`, `get_current_activity_summary` e
+      `get_raw_context_snapshot`) continuam só em português e não recebem
+      `response_language`.
 
 ## 2. Campos de trace `voice_critic_*` com nome enganador
 

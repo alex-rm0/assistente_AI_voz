@@ -490,7 +490,7 @@ def list_workspace_files(workspace_path: Path | None = None) -> str:
 def get_active_window(context_observer: Any | None = None, response_language: str = "") -> str:
     snapshot = _fresh_context_snapshot(context_observer)
     if snapshot is None or not snapshot.active_window:
-        return NO_SYSTEM_CONTEXT_MESSAGE
+        return localize("tool.no_system_context", response_language)
 
     # Phase 7.7 (section 5): the LABEL ("Active window detected:") is
     # Echo-authored presentation text and must localize; the window title
@@ -511,7 +511,7 @@ def get_active_window(context_observer: Any | None = None, response_language: st
 def get_active_application(context_observer: Any | None = None, response_language: str = "") -> str:
     snapshot = _fresh_context_snapshot(context_observer)
     if snapshot is None or not snapshot.active_app:
-        return NO_SYSTEM_CONTEXT_MESSAGE
+        return localize("tool.no_system_context", response_language)
 
     return localize("tool.active_application", response_language, name=snapshot.active_app)
 
@@ -532,7 +532,7 @@ def get_open_windows(context_observer: Any | None = None, response_language: str
     # never translated (section 18).
     snapshot = _fresh_context_snapshot(context_observer)
     if snapshot is None:
-        return NO_SYSTEM_CONTEXT_MESSAGE
+        return localize("tool.no_system_context", response_language)
 
     header = localize("tool.windows_detected_header", response_language)
     active_marker = localize("tool.active_marker", response_language)
@@ -542,7 +542,7 @@ def get_open_windows(context_observer: Any | None = None, response_language: str
         return f"{header}\n- {snapshot.active_window}{app_label}{active_marker}"
 
     if not snapshot.open_windows:
-        return NO_SYSTEM_CONTEXT_MESSAGE
+        return localize("tool.no_system_context", response_language)
 
     lines = [header]
     for window in snapshot.open_windows:
@@ -567,7 +567,7 @@ def get_open_windows(context_observer: Any | None = None, response_language: str
 )
 def get_recent_activity(context_observer: Any | None = None, response_language: str = "") -> str:
     if context_observer is None:
-        return NO_SYSTEM_CONTEXT_MESSAGE
+        return localize("tool.no_system_context", response_language)
 
     latest_summary = context_observer.latest_summary()
     if latest_summary is not None and latest_summary.summary:
@@ -578,7 +578,7 @@ def get_recent_activity(context_observer: Any | None = None, response_language: 
 
     summary = context_observer.activity_summary(limit=5)
     if not summary:
-        return NO_SYSTEM_CONTEXT_MESSAGE
+        return localize("tool.no_system_context", response_language)
 
     lines = [localize("tool.recent_activity_header", response_language)]
     for active_app, active_window, current_project, total_seconds in summary:

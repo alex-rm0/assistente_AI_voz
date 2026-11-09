@@ -208,6 +208,12 @@ def looks_mixed_for_language(response: str, language: str) -> bool:
 _STRINGS: dict[str, tuple[str, str]] = {
     # --- assistant/tools.py: context-observer tool result headers -------
     "tool.windows_detected_header": ("Janelas detetadas:", "Open windows detected:"),
+    "tool.no_system_context": (
+        "Consigo tentar observar o computador, mas ainda não tenho dados suficientes. "
+        "Experimenta mudar de janela ou aguardar alguns segundos.",
+        "I can try to observe the computer, but I don't have enough data yet. "
+        "Try switching windows or waiting a few seconds.",
+    ),
     "tool.active_window": ("Janela ativa detetada: {name}", "Active window detected: {name}"),
     "tool.active_application": ("Aplicação ativa detetada: {name}", "Active application detected: {name}"),
     "tool.recent_activity_header": ("Atividade recente detetada:", "Recent activity detected:"),
@@ -269,6 +275,34 @@ _STRINGS: dict[str, tuple[str, str]] = {
     "task.card.notes": ("Notas:", "Notes:"),
     "task.card.collecting_context": ("[a recolher contexto]", "[gathering context]"),
     # --- assistant/task_formatter.py + long_term_memory.py: reminders ---
+    # Task card subtitle: readable label for ActiveTaskContext.status (the
+    # internal value itself is never changed).
+    "task.card_status.collecting": ("a recolher informação", "collecting details"),
+    "task.card_status.ready": ("pronta", "ready"),
+    "task.card_status.working": ("a preparar", "working"),
+    "task.card_status.reviewing": ("em revisão", "in review"),
+    "task.card_status.paused": ("em pausa", "paused"),
+    # compose_email task card.
+    "email.card.title": ("Email", "Email"),
+    "email.card.title_to": ("Email para {who}", "Email to {who}"),
+    "email.card.role_article": ("o {role}", "the {role}"),
+    "email.card.to": ("Para:", "To:"),
+    "email.card.context": ("Contexto:", "Context:"),
+    "email.card.purpose": ("Objetivo:", "Purpose:"),
+    "email.card.subject": ("Assunto:", "Subject:"),
+    "email.card.preparing": ("[conteúdo ainda em preparação]", "[content still being prepared]"),
+    "email.card.ready": ("[pronto para redigir]", "[ready to draft]"),
+    "email.role.professor": ("professor", "professor"),
+    "email.role.colleague": ("colega", "colleague"),
+    "email.role.client": ("cliente", "client"),
+    "email.role.sponsor": ("patrocinador", "sponsor"),
+    "email.role.manager": ("chefe", "manager"),
+    "email.role.advisor": ("orientador", "supervisor"),
+    "email.purpose.request_clarification": ("pedir esclarecimentos", "ask for clarification"),
+    "email.purpose.request_help": ("pedir ajuda", "ask for help"),
+    "email.purpose.schedule_meeting": ("marcar uma reunião", "schedule a meeting"),
+    "email.purpose.thanks": ("agradecer", "say thank you"),
+    "email.purpose.ask_exam_date": ("perguntar a data do exame", "ask for the exam date"),
     "task.status.pending": ("pendente", "pending"),
     "task.status.completed": ("concluída", "completed"),
     "task.status.cancelled": ("cancelada", "cancelled"),
