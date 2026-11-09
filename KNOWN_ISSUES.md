@@ -36,14 +36,20 @@ foram corrigidos**. Cada entrada tem o sintoma, a evidência e o estado.
       `localize()` em PT e EN (commit `bbc27cc`): tool claim, memory recall
       claim, memory claim, duração histórica, atividade e workspace. O
       texto da atividade deixou de expor "Context Observer".
+    - Com en-GB, `compose()` e `regenerate()` acrescentam "(Reply in
+      English.)" ao fim da última mensagem do utilizador. Isto só afeta o
+      payload; o histórico e a UI não mudam (commit `d1135a8`). Antes, a
+      instrução de idioma estava só na mensagem `system`.
+    - **Validação com o Ollama real e en-GB (5 corridas cada): 15/15 em
+      inglês.** "Qual é a capital de França?" passou de 1/3 para 5/5.
+      "Explica-me o que é um algoritmo numa frase" deu 5/5. "Olá, tudo
+      bem? Diz-me uma curiosidade." deu 5/5. Por isso não foi preciso
+      acrescentar uma verificação de idioma com regeneração.
   - **Falta:**
-    - **Pergunta curta em PT:** com o Ollama real e en-GB, "Explica-me o
-      que é um algoritmo numa frase" respondeu em inglês 3/3 (antes 1/3).
-      "Qual é a capital de França?" (`GENERAL_CONVERSATION`) continua em
-      português em 2/3, mesmo com o system prompt e as etiquetas da
-      mensagem em inglês. O modelo segue a língua de uma pergunta curta.
-      Não há nenhuma verificação do idioma da resposta gerada que a
-      regenere.
+    - **Sem verificação do idioma gerado:** se o modelo voltar a responder
+      em português, nada o deteta nem regenera, além do
+      `looks_mixed_for_language`, que só apanha respostas que misturam as
+      duas línguas.
     - **Detetores dos guards só em português:** os marcadores (ex.: "se
       não me engano", "pesquisei", "lembro-me") só conhecem frases em
       português, por isso uma resposta inventada em inglês não é
