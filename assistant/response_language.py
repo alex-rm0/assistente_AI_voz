@@ -318,6 +318,32 @@ _STRINGS: dict[str, tuple[str, str]] = {
     "task.reminder.detail.priority": ("prioridade:", "priority:"),
     "task.reminder.detail.status": ("estado:", "status:"),
     # --- assistant/response_composer.py: composer-owned fallback text ---
+    # Final-response guards (AssistantEngine._complete_turn): Echo-authored
+    # replacements for a blocked reply. No internal component names.
+    "guard.tool_claim": (
+        "Ainda não consegui fazer essa pesquisa — não tenho essa ferramenta ligada a esta conversa.",
+        "I still can't do that research. I don't have that tool connected to this conversation.",
+    ),
+    "guard.memory_recall_claim": (
+        "Não tenho essa informação guardada sobre isso.",
+        "I don't have that information saved.",
+    ),
+    "guard.memory_claim": (
+        "Não quero inventar memória. Posso consultar a memória real se quiseres.",
+        "I don't want to make up a memory. I can check the real memory if you'd like.",
+    ),
+    "guard.historical_duration_claim": (
+        "Não tenho memória suficiente para confirmar essa duração.",
+        "I don't have enough memory to confirm that duration.",
+    ),
+    "guard.activity_claim": (
+        "Não sei o que estiveste a fazer. Posso dizer-te que janela tens aberta agora, se me perguntares.",
+        "I don't know what you were doing. I can tell you which window you have open right now if you ask me.",
+    ),
+    "guard.workspace_claim": (
+        "Não alterei nada no workspace. Preciso de identificar um objeto real antes de agir.",
+        "I didn't change anything in the workspace. I need to identify a real object before acting.",
+    ),
     "composer.no_context_fallback": (
         "Tenho algum contexto sobre isso, mas ainda não o suficiente para te responder bem.",
         "I have some context about this, but not enough yet to give you a good answer.",
@@ -884,11 +910,6 @@ def localize_deterministic_response(response: str, language: str) -> str:
         "claro. o que se passa?": "Sure. What's going on?",
         "feito.": "Done.",
         "de nada.": "You're welcome.",
-        "ainda nao consegui fazer essa pesquisa — nao tenho essa ferramenta ligada a esta conversa.": (
-            "I still can't do that research. I don't have that tool connected to this conversation."
-        ),
-        "nao tenho essa informacao guardada sobre isso.": "I don't have that information saved.",
-        "nao tenho memoria suficiente para confirmar essa duracao.": "I don't have enough memory to confirm that duration.",
         # Phase 7.3.4: compose_email task-dialogue questions (conversation.py
         # _compose_email_question) -- a technical/deterministic turn, so it
         # never reaches the LLM/language_instruction path at all; without an

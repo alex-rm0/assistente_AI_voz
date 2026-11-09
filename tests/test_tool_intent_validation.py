@@ -142,7 +142,7 @@ def test_composer_cannot_speculate_about_real_activity_without_a_tool(tmp_path: 
         selected_path="GENERAL_CONVERSATION",
     )
 
-    assert blocked == "Não tenho essa informação sobre a tua atividade real — só o Context Observer sabe isso."
+    assert blocked == "Não sei o que estiveste a fazer. Posso dizer-te que janela tens aberta agora, se me perguntares."
 
 
 def test_ordinary_composer_reply_is_not_touched_by_the_activity_guard(tmp_path: Path) -> None:

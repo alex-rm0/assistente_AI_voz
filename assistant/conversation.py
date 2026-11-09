@@ -6623,9 +6623,7 @@ class AssistantEngine:
 
         claim_reason = _detect_unsupported_tool_claim(final_response, tools_used)
         if claim_reason:
-            final_response = (
-                "Ainda não consegui fazer essa pesquisa — não tenho essa ferramenta ligada a esta conversa."
-            )
+            final_response = localize("guard.tool_claim", self.response_language)
             final_response_source = "TOOL_CLAIM_BLOCKED"
             self._last_response_blocked = True
 
@@ -6640,7 +6638,7 @@ class AssistantEngine:
         ):
             memory_claim_reason = detect_unsupported_memory_claim(final_response, [])
             if memory_claim_reason:
-                final_response = "Não tenho essa informação guardada sobre isso."
+                final_response = localize("guard.memory_recall_claim", self.response_language)
                 final_response_source = "MEMORY_CLAIM_BLOCKED"
                 self._last_response_blocked = True
                 self._record_memory_grounding(False, [], True, memory_claim_reason)
@@ -6648,7 +6646,7 @@ class AssistantEngine:
         if final_response_source in {"RESPONSE_COMPOSER", "AGENT_DIRECT", "COMPOSER_REGENERATED"}:
             memory_claim_reason = _detect_ungrounded_memory_claim(final_response)
             if memory_claim_reason:
-                final_response = "Não quero inventar memória. Posso consultar a memória real se quiseres."
+                final_response = localize("guard.memory_claim", self.response_language)
                 final_response_source = "MEMORY_CLAIM_BLOCKED"
                 self._last_response_blocked = True
                 self._record_memory_grounding(False, [], True, memory_claim_reason)
@@ -6657,7 +6655,7 @@ class AssistantEngine:
             sources = list(self._turn_trace.get("grounding_sources") or []) if self._turn_trace is not None else []
             history_claim_reason = _detect_ungrounded_historical_duration_claim(final_response, sources)
             if history_claim_reason:
-                final_response = "Não tenho memória suficiente para confirmar essa duração."
+                final_response = localize("guard.historical_duration_claim", self.response_language)
                 final_response_source = "MEMORY_CLAIM_BLOCKED"
                 self._last_response_blocked = True
                 self._record_memory_grounding(False, [], True, history_claim_reason)
@@ -6665,7 +6663,7 @@ class AssistantEngine:
         if final_response_source in {"RESPONSE_COMPOSER", "AGENT_DIRECT", "COMPOSER_REGENERATED"} and not tools_used and not technical:
             activity_claim_reason = _detect_ungrounded_activity_claim(final_response)
             if activity_claim_reason:
-                final_response = "Não tenho essa informação sobre a tua atividade real — só o Context Observer sabe isso."
+                final_response = localize("guard.activity_claim", self.response_language)
                 final_response_source = "ACTIVITY_CLAIM_BLOCKED"
                 self._last_response_blocked = True
                 if self._turn_trace is not None:
@@ -6675,7 +6673,7 @@ class AssistantEngine:
         if final_response_source in {"RESPONSE_COMPOSER", "AGENT_DIRECT", "COMPOSER_REGENERATED"} and not tools_used and not technical:
             workspace_claim_reason = _detect_ungrounded_workspace_operation_claim(user_message, final_response)
             if workspace_claim_reason:
-                final_response = "Não alterei nada no workspace. Preciso de identificar um objeto real antes de agir."
+                final_response = localize("guard.workspace_claim", self.response_language)
                 final_response_source = "WORKSPACE_CLAIM_BLOCKED"
                 self._last_response_blocked = True
                 if self._turn_trace is not None:
