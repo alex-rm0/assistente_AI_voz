@@ -440,6 +440,9 @@ class VoiceTranscriber:
         self.preroll_ms = max(0, int(preroll_ms))
         self.ready_delay_ms = max(0, int(ready_delay_ms))
         self.debug_audio_path = Path(debug_audio_path)
+        # Debug only: when set (app.py, voice.debug_save_captures), accepted
+        # captures are kept here -- see _save_accepted_capture().
+        self.capture_dir: Path | None = None
         self.initial_prompt = initial_prompt
         self._model: Any | None = None
         self.last_audio_duration_seconds = 0.0
@@ -808,12 +811,29 @@ class VoiceTranscriber:
         if self.last_vad_outcome is not None:
             self.last_vad_outcome["stt_started_at"] = stt_started_at
         try:
-            return self.transcribe(
+            text = self.transcribe(
                 audio_path, input_language=input_language if input_language is not None else self.input_language
             )
         finally:
             if self.last_vad_outcome is not None:
                 self.last_vad_outcome["stt_ms"] = (time.perf_counter() - stt_started_at) * 1000.0
+        self._save_accepted_capture(text)
+        return text
+
+    def _save_accepted_capture(self, text: str) -> None:
+        # Debug only (voice.debug_save_captures, off by default): keeps
+        # each ACCEPTED capture (transcribe() raises for a rejected one) as
+        # <stamp>.wav plus its transcript in <stamp>.txt, for
+        # scripts/benchmark_stt.py. Never affects the turn itself.
+        if self.capture_dir is None or not text:
+            return
+        try:
+            self.capture_dir.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{int(time.time() * 1000) % 1000:03d}"
+            shutil.copyfile(self.debug_audio_path, self.capture_dir / f"{stamp}.wav")
+            (self.capture_dir / f"{stamp}.txt").write_text(text + "\n", encoding="utf-8")
+        except OSError:
+            pass
 
     def record_and_transcribe_wake(
         self,
@@ -1038,7 +1058,9 @@ class VoiceTranscriber:
         status_callback: Callable[[str], None] | None = None,
     ) -> str:
         audio_path = self.record_until_stopped(stop_event, status_callback=status_callback)
-        return self.transcribe(audio_path)
+        text = self.transcribe(audio_path)
+        self._save_accepted_capture(text)
+        return text
 
     def transcribe_existing_wav(
         self,

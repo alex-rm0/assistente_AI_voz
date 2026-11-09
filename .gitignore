@@ -1,6 +1,7 @@
 .venv/
 .venv_tts/
 .venv_pocket_tts/
+.venv_stt_bench/
 .venv.broken-msstore-*/
 .uv_cache/
 .uv_python/
@@ -13,6 +14,7 @@ data/user_settings.json
 data/*.sqlite
 data/model_routing_usage.json
 data/debug/*.wav
+data/debug/voice_captures/
 data/tts_voice_tests/
 workspace/conversation.json
 evals/results/runs/

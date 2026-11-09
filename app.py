@@ -373,6 +373,12 @@ def main() -> int:
             tts_manager=tts_manager,
             get_response_language=lambda: engine.response_language,
         )
+        # Debug only (off by default): keep accepted voice captures + their
+        # transcripts for scripts/benchmark_stt.py.
+        transcriber = getattr(window.controller, "voice_transcriber", None)
+        if transcriber is not None and bool(voice_config.get("debug_save_captures", False)):
+            transcriber.capture_dir = data_path / "debug" / "voice_captures"
+            print(f"[VOICE_CAPTURES] enabled dir={transcriber.capture_dir}")
     else:
         from ui.main_window import MainWindow
 

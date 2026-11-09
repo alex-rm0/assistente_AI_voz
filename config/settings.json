@@ -61,7 +61,8 @@
     "probe_duration_seconds": 0.5,
     "min_record_seconds": 2,
     "preroll_ms": 500,
-    "ready_delay_ms": 200
+    "ready_delay_ms": 200,
+    "debug_save_captures": false
   },
   "memory": {
     "data_path": "data",
