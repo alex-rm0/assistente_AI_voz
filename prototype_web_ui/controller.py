@@ -11,6 +11,7 @@ from typing import Any
 import shiboken6
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 
+from assistant.model_warmup import ModelWarmup, find_ollama_provider, unload_ollama_in_background
 from assistant.secret_storage import sanitize_secret_error
 from assistant.response_language import localize
 from assistant.tts import TTSError, play_audio_file
@@ -442,8 +443,29 @@ class EchoUIController(QObject):
         self._tts_startup_prewarm_timer = QTimer(self)
         self._tts_startup_prewarm_timer.setSingleShot(True)
         self._tts_startup_prewarm_timer.timeout.connect(self._prewarm_tts)
+        # R2: GPU STT + Ollama warm-up on the same timer (assistant/model_warmup.py).
+        self._model_warmup: ModelWarmup | None = None
+        self._tts_startup_prewarm_timer.timeout.connect(self._prewarm_models)
 
     _TTS_STARTUP_PREWARM_DELAY_MS = 3000
+
+    @Slot()
+    def _prewarm_models(self) -> None:
+        # Background, once, never after shutdown began; failures are logged
+        # by ModelWarmup and the first turn pays the cold start as before.
+        if self._model_warmup is not None or self._shutdown_requested:
+            return
+        engine = getattr(self.responder, "__self__", None)
+        self._model_warmup = ModelWarmup(transcriber=self.voice_transcriber, llm=getattr(engine, "llm", None))
+        self._model_warmup.start()
+
+    def _release_local_models(self) -> None:
+        # App close, never waiting: stop a warm-up in flight and ask Ollama
+        # to unload the model the chats keep loaded (keep_alive=-1).
+        if self._model_warmup is not None:
+            self._model_warmup.cancel()
+        engine = getattr(self.responder, "__self__", None)
+        unload_ollama_in_background(find_ollama_provider(getattr(engine, "llm", None)))
 
     def notify_ui_ready(self) -> None:
         if self._ui_ready_received or self._shutdown_requested:
@@ -632,6 +654,7 @@ class EchoUIController(QObject):
         self._voice_conversation_failures = 0
         self._log_voice("started")
         self._prewarm_tts()
+        self._prewarm_models()
         self.voiceConversationChanged.emit(True)
         self._begin_listening()
         return True
@@ -696,6 +719,7 @@ class EchoUIController(QObject):
         self.voiceStandbyChanged.emit(True)
         self._prewarm_wake_recognizer()
         self._prewarm_tts()
+        self._prewarm_models()
         if self._active or self._tts_worker is not None:
             # Something else is genuinely still busy (a typed turn, TTS
             # being stopped as part of this same sleep transition) -- ITS
@@ -1431,6 +1455,7 @@ class EchoUIController(QObject):
         self._tts_startup_prewarm_timer.stop()
         self._shutdown_started_at = time.perf_counter()
         _log_shutdown(event="started")
+        self._release_local_models()
         self._stop_voice_conversation(reason="app_shutdown")
         self._stop_voice_standby(reason="app_shutdown")
         # A Whisper model load can't be cancelled mid-way; this only blocks
