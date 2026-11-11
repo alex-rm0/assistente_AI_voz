@@ -11623,6 +11623,7 @@ def _detect_unsupported_tool_claim(response: str, tools_used: tuple[str, ...]) -
 
 
 _UNGROUNDED_MEMORY_CLAIM_MARKERS = (
+    "i remember",
     "lembro-me",
     "lembro me",
     "tenho guardado",
@@ -11644,6 +11645,9 @@ _UNGROUNDED_MEMORY_CLAIM_MARKERS = (
 # turn — this is the defense-in-depth backstop for phrasings that slip
 # through with tools_used=[] anyway.
 _UNGROUNDED_ACTIVITY_CLAIM_MARKERS = (
+    "i was just waiting for you",
+    "just the usual system checks",
+    "i was running system checks",
     "se nao me engano",
     "se não me engano",
     "estavas a trabalhar",
@@ -11672,6 +11676,7 @@ def _detect_ungrounded_activity_claim(response: str) -> str:
 
 
 _WORKSPACE_OPERATION_REQUEST_MARKERS = (
+    "open",
     "abre",
     "abrir",
     "mostra",
@@ -11684,6 +11689,7 @@ _WORKSPACE_OPERATION_REQUEST_MARKERS = (
 )
 
 _WORKSPACE_OPERATION_SUCCESS_CLAIM_MARKERS = (
+    "i opened",
     "esta a abrir",
     "está a abrir",
     "abri",

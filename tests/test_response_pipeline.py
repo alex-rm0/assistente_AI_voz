@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from assistant.conversation import AssistantEngine
 from assistant.desktop_actions import DesktopActionResult
 from assistant.memory import ConversationMemory
@@ -9,6 +11,44 @@ from assistant.presence_manager import PresenceManager
 from assistant.prompts import get_base_system_prompt
 from assistant.tool_registry import ToolRegistry
 from assistant.tools import get_open_windows, open_url
+
+
+@pytest.mark.parametrize("detector,message,response", [
+    ("activity", "", "I was just waiting for you to bring up your emails again"),
+    ("activity", "", "just the usual system checks"),
+    ("activity", "", "I was running system checks."),
+    ("memory", "", "I remember your email preferences."),
+    ("workspace", "Open the email", "I opened the email."),
+])
+def test_english_ungrounded_claim_markers(detector, message, response):
+    from assistant.conversation import (
+        _detect_ungrounded_activity_claim,
+        _detect_ungrounded_memory_claim,
+        _detect_ungrounded_workspace_operation_claim,
+    )
+
+    checks = {
+        "activity": lambda: _detect_ungrounded_activity_claim(response),
+        "memory": lambda: _detect_ungrounded_memory_claim(response),
+        "workspace": lambda: _detect_ungrounded_workspace_operation_claim(message, response),
+    }
+    assert checks[detector]()
+
+
+@pytest.mark.parametrize("response", [
+    "I can help you write the email",
+    "You said you were working from home",
+])
+def test_english_legitimate_statements_are_not_ungrounded_claims(response):
+    from assistant.conversation import (
+        _detect_ungrounded_activity_claim,
+        _detect_ungrounded_memory_claim,
+        _detect_ungrounded_workspace_operation_claim,
+    )
+
+    assert not _detect_ungrounded_activity_claim(response)
+    assert not _detect_ungrounded_memory_claim(response)
+    assert not _detect_ungrounded_workspace_operation_claim("Open the email", response)
 
 
 class PipelineLLM:
