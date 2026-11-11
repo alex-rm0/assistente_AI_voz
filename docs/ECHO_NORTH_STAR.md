@@ -19,8 +19,10 @@ O Echo é uma **presença pessoal contínua** do Alexandre:
 - **Age com confirmação por omissão**: lê o que lhe for autorizado; ações com efeito externo pedem
   confirmação, exceto categorias reversíveis às quais o Alexandre deu autorização prévia (§8).
 
-Não é: um chatbot, um wrapper de LLM, um agente autónomo que decide sozinho, nem uma framework
-genérica (OpenJarvis/Ruflo: referências, não dependências).
+Não é: um chatbot, um wrapper de LLM, nem uma framework genérica (OpenJarvis/Ruflo: referências,
+não dependências). Também não é um agente autónomo de propósito geral: não define objetivos por si
+nem age fora da autoridade dada; a autonomia existe apenas dentro de categorias explicitamente
+autorizadas pelo Alexandre (§8).
 
 ### 1.1 O que "24/7" significa
 
@@ -74,19 +76,26 @@ Ambos devem tornar-se critérios de aceitação testáveis (bateria/evals).
 3. **Vigias observam, não notificam.** Um vigia lê estado externo e emite `EchoEvent`; nunca fala
    diretamente com o Alexandre. O resto do Core só consome `EchoEvent`, nunca objetos específicos
    de um fornecedor.
-4. **Vigias baratos e determinísticos.** Verificar um site, ler a agenda ou listar emails novos
+4. **Facto → decisão → entrega, em camadas separadas.** O `EchoEvent` descreve o que aconteceu ou
+   foi observado; a `AttentionDecision` descreve o que o Echo decidiu fazer com isso; a entrega
+   (`OutgoingNotification`) executa essa decisão. Nenhuma camada absorve a seguinte.
+5. **Event Store não é memória.** O Event Store regista eventos operacionais e do mundo. Não é
+   memória pessoal de longo prazo e não substitui a memória curada, o perfil nem o estado das
+   tasks. O histórico de eventos pode alimentar a curadoria da memória mais tarde, mas guardar um
+   evento não equivale a criar uma memória.
+6. **Vigias baratos e determinísticos.** Verificar um site, ler a agenda ou listar emails novos
    não precisa de LLM. O LLM só entra para classificar importância e escrever resumos.
-5. **Um único sítio decide interromper**: a política de atenção, com regras explícitas e testáveis.
-6. **Privacidade verificada na fronteira.** O router de modelos verifica
+7. **Um único sítio decide interromper**: a política de atenção, com regras explícitas e testáveis.
+8. **Privacidade verificada na fronteira.** O router de modelos verifica
    `provider_allowed(privacy_class)` antes de enviar qualquer dado a um modelo (§6).
-7. **Credenciais nunca no código nem no git** (secret_storage); permissões mínimas, só leitura primeiro.
-8. **Falhar parcialmente, nunca globalmente.** Um vigia, fornecedor ou canal que falha não derruba o
+9. **Credenciais nunca no código nem no git** (secret_storage); permissões mínimas, só leitura primeiro.
+10. **Falhar parcialmente, nunca globalmente.** Um vigia, fornecedor ou canal que falha não derruba o
    Core. Cada componente principal tem estado de saúde `healthy` / `degraded` / `unavailable`
-   (ex.: Ollama em baixo, Claude indisponível, sem internet, Telegram em baixo, exceção num vigia,
-   calendário indisponível). O painel de saúde mostra-o.
-9. **Fiabilidade antes de capacidade**: reinício automático, logs, testes e bateria. Um assistente
-   24/7 que crasha às 3h não serve.
-10. **Cérebro trocável**: tudo passa pelo ModelProvider; nenhuma lógica depende de um modelo.
+    (ex.: Ollama em baixo, Claude indisponível, sem internet, Telegram em baixo, exceção num vigia,
+    calendário indisponível). O painel de saúde mostra-o.
+11. **Fiabilidade antes de capacidade**: reinício automático, logs, testes e bateria. Um assistente
+    24/7 que crasha às 3h não serve.
+12. **Cérebro trocável**: tudo passa pelo ModelProvider; nenhuma lógica depende de um modelo.
 
 ## 3. Contratos do Core
 
@@ -94,7 +103,7 @@ Definidos conceptualmente aqui; tipos e formatos concretos ficam para a F0.
 
 ### 3.1 EchoEvent
 
-Modelo canónico de tudo o que acontece fora da conversa.
+Modelo canónico de tudo o que acontece fora da conversa. Descreve **só o facto observado**.
 
 | Campo | Significado |
 |---|---|
@@ -103,9 +112,11 @@ Modelo canónico de tudo o que acontece fora da conversa.
 | `subject`, `payload` | Sobre o quê; detalhes |
 | `importance`, `confidence` | Quão importante; quão certo |
 | `dedupe_key`, `status` | Chave de deduplicação; estado do evento |
-| `privacy_class` | Classe de dados (§6) |
-| `attention_state` | Decisão de atenção aplicada (§4) |
+| `privacy_class` | Classe dos dados deste evento (§6) |
 | `related_task_id`, `related_project_id` | Ligações a tasks/projetos |
+
+O que o Echo decide fazer com o evento não faz parte dele: vive numa `AttentionDecision` separada,
+que referencia o evento pelo `id` (§4).
 
 ### 3.2 Idempotência dos vigias
 
@@ -120,15 +131,26 @@ Modelo canónico de tudo o que acontece fora da conversa.
 A mesma condição externa nunca gera notificações repetidas a cada ciclo. Vale para sites, email,
 calendário, deploys/builds e tasks.
 
-### 3.3 Outros contratos (a definir na F0)
+### 3.3 Contrato de canal
 
-`AttentionDecision`, `Notification`, `ActionRequest`, `ActionResult`, `ActionRecord` (§8.2),
-classes de privacidade (§6), modelo de permissões/autonomia (§8), fronteira da API do Core e
-modelo de saúde.
+O Core não depende de tipos de mensagem de nenhum canal. Cada canal (Telegram primeiro; mais tarde
+email, app móvel, etc.) é um **ChannelAdapter** que traduz de e para dois contratos:
+
+| Contrato | Campos (conceptuais) |
+|---|---|
+| `IncomingMessage` | `id`, `source_channel`, `sender_id`, `text`, anexos/referência, `received_at`, `privacy_class` |
+| `OutgoingNotification` | `id`, `target_channel`, `recipient`, conteúdo/referência, `priority`, `created_at` |
+
+É só uma fronteira, não uma framework de plugins. Campos e tipos exatos ficam para a F0.
+
+### 3.4 Outros contratos (a definir na F0)
+
+`AttentionDecision`, `ActionRequest`, `ActionResult`, `ActionRecord` (§8.2), classes de
+privacidade (§6), modelo de permissões/autonomia (§8), fronteira da API do Core e modelo de saúde.
 
 ## 4. Política de atenção
 
-Cada evento recebe uma decisão de entrega:
+Cada evento recebe uma `AttentionDecision` (separada do evento, §2.1 e §3.1):
 
 | Decisão | Significado |
 |---|---|
@@ -152,16 +174,21 @@ Horas concretas e classes que furam o silêncio: em aberto (F2).
 
 ## 6. Classes de privacidade
 
-| Classe | Exemplos | Modelos permitidos |
+A classe é atribuída **aos dados concretos** (objeto, conteúdo), não ao módulo nem ao tipo de
+fonte. A mesma fonte pode produzir classes diferentes: uma conversa sobre uma preferência banal é
+`PERSONAL`; uma conversa pessoal sensível é `PRIVATE`; uma conversa com informação de trabalho
+restrita é `RESTRICTED`.
+
+| Classe | Exemplos de dados | Modelos permitidos |
 |---|---|---|
-| `PUBLIC` | conhecimento geral, páginas públicas | local e cloud |
-| `PERSONAL` | conversa, tarefas, perfil-núcleo | local e cloud (dentro do orçamento) |
-| `PRIVATE` | memória pessoal sensível, documentos do workspace | local; cloud só por regra explícita |
-| `RESTRICTED` | corpo e assunto de emails, dados de trabalho | **só local** |
+| `PUBLIC` | conhecimento geral, página web pública | local e cloud |
+| `PERSONAL` | preferência comum, tarefa banal, perfil-núcleo | local e cloud (dentro do orçamento) |
+| `PRIVATE` | conversa pessoal sensível, documento pessoal do workspace | local; cloud só por regra explícita |
+| `RESTRICTED` | corpo e assunto de emails, informação de trabalho restrita | **só local** |
 
 Regras:
 
-- Cada fonte e cada `EchoEvent` transporta `privacy_class`.
+- Cada objeto de dados, `EchoEvent` e `IncomingMessage` transporta `privacy_class`.
 - `provider_allowed(privacy_class)` é verificado **na fronteira do routing**, não em cada chamador.
 - **Conteúdo derivado herda a classe da origem.** Um resumo local de conteúdo `RESTRICTED` continua
   `RESTRICTED`; só uma regra deliberada e explícita o pode reclassificar.
@@ -245,8 +272,8 @@ Registo de execução de primeira classe, não memória conversacional.
 |---|---|---|
 | **R2 — Fluidez da voz** (em curso) | Conversa por voz natural | STT GPU default; 1.º som < 2,5 s; teste de voz real OK |
 | **R3 — Cérebro e conhecimento** | Conversa deixa de ser "estranha" | Comparação de modelos com números; perfil-núcleo + contexto por relevância; decisão local/cloud aplicada |
-| **F0 — Contratos do Core** | Definir os contratos antes de separar processos | EchoEvent, AttentionDecision, Notification, ActionRequest/Result, classes de privacidade, modelo de permissões/autonomia, API do Core e modelo de saúde definidos; Echo OS e vigias futuros desenháveis sem conhecer fornecedores |
-| **F1 — Core persistente** | Correr o Core como processo/serviço atrás desses contratos | Arranque automático e reinício; Echo OS liga-se ao Core; nada perde funcionalidade; não é o monólito de conversation.py mudado de sítio |
+| **F0 — Contratos do Core** | Definir os contratos antes de separar processos | EchoEvent, AttentionDecision, IncomingMessage/OutgoingNotification, ActionRequest/Result/Record, classes de privacidade, modelo de permissões/autonomia, API do Core e modelo de saúde com **schemas/modelos explícitos, testes e disciplina mínima de versões/compatibilidade**; Echo OS e vigias futuros dependem só dos contratos, nunca de implementações |
+| **F1 — Core persistente** | Correr o Core como processo/serviço atrás desses contratos | **Bloqueada até à F0 concluída e ao requisito do §10.1.** Arranque automático e reinício; Echo OS liga-se ao Core; nada perde funcionalidade |
 | **F2 — Primeiro vigia: sites** | Caminho completo vigia → evento → atenção → entrega | Site em baixo gera um aviso, uma vez, no canal certo; recuperação avisada; horas de silêncio respeitadas |
 | **F3 — Telegram** | Falar com o Echo fora do PC | Mensagens e resumo diário; allowlist; `source_channel` preservado |
 | **F4 — Calendário** | Saber o dia do Alexandre | Briefing da manhã com agenda real; avisos antes de reuniões |
@@ -258,10 +285,11 @@ a forma de trabalhar.
 
 ### 10.1 conversation.py
 
-Reduzir de forma incremental, com a bateria verde, sem reescrita gigante. Mas **antes ou durante
-F0/F1** separar as responsabilidades que o Core herdaria: ciclo de vida da sessão, orquestração de
-tasks, orquestração de ferramentas, presença, fronteiras da coordenação de voz e ciclo de vida da
-resposta. **A F1 não pode limitar-se a mover um monólito de 15k linhas para outro processo.**
+Reduzir de forma incremental, com testes e bateria verdes, sem reescrita gigante. Mas **a F1 fica
+bloqueada até que as responsabilidades que atravessam a futura fronteira Core/UI tenham dono claro
+num módulo próprio**, no mínimo: ciclo de vida da sessão, orquestração de tasks, orquestração de
+ferramentas/ações, Presence, ciclo de vida da resposta e fronteira de coordenação voz/Core.
+**A F1 não pode limitar-se a mover o monólito de conversation.py para outro processo.**
 
 ## 11. Decisões
 
@@ -275,7 +303,8 @@ Respondidas ficam registadas com data; abertas ficam marcadas **[aberta]**.
 - (11/11) Canal remoto: **Telegram**, bidirecional (§7).
 - (11/11) Contas: **5 emails** — 2 pessoais, 1 do remo, 2 de trabalho (Leviahub, Devlop).
   **[aberta]** fornecedor de cada uma; autorização da empresa para as de trabalho.
-- (11/11) Privacidade: **conversa e tarefas podem ir ao Claude; conteúdo de emails não** (§6).
+- (11/11) Privacidade: **conversa e tarefas comuns podem ir ao Claude; conteúdo de emails não**,
+  aplicado por classes atribuídas aos dados (§6).
 - (11/11) Autonomia: **confirmação por omissão; autorização prévia configurável por tipo de ação**,
   com máximos por tipo (§8).
 - (11/11) Sites — "estado" = **online**, **erros/certificado SSL/domínio**, **deploys/builds**.
