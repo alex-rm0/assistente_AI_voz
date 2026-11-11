@@ -1114,6 +1114,25 @@ def _qt_app():
     return app
 
 
+def test_voice_status_uses_current_response_language_without_changing_state() -> None:
+    from prototype_web_ui.controller import EchoUIController
+
+    _qt_app()
+    language = ["en-GB"]
+    controller = EchoUIController(lambda _: "", get_response_language=lambda: language[0])
+    events = []
+    states = []
+    controller.uiEvent.connect(lambda payload: events.append(json.loads(payload)))
+    controller.stateChanged.connect(states.append)
+    for status in ("Preparar...", "A ouvir...", "A processar...", "Concluído."):
+        controller._handle_voice_status(status)
+    assert [event["status"] for event in events] == ["Getting ready...", "Listening...", "Processing...", "Done."]
+    assert states == ["listening", "thinking", "thinking"]
+    language[0] = "pt-PT"
+    controller._handle_voice_status("A ouvir...")
+    assert events[-1]["status"] == "A ouvir..."
+
+
 def test_cancel_current_request_invokes_fake_engine_cancellation() -> None:
     from prototype_web_ui.controller import EchoUIController
 

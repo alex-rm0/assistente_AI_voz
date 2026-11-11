@@ -224,15 +224,17 @@ foram corrigidos**. Cada entrada tem o sintoma, a evidência e o estado.
   2993 ms (antes 54 ms), com o servidor a demorar 14 s; isolado demora
   ~5–6 s. Com um servidor preso, a espera ia até ao timeout de carregamento
   (60 s por omissão).
-- **Estado:** parcialmente corrigido.
+- **Estado:** corrigido.
   - **Corrigido em `assistant/tts.py` (commit "fix: cancellable Pocket TTS
     startup"):** `PocketTTSLocalProvider.shutdown()` fecha o processo em
     arranque sem esperar pelo `_lock`. Quando o stdout do servidor acaba, o
     `start()` falha logo em vez de esperar pelo timeout. Testes:
     `tests/test_pocket_tts_cancellable_start.py`.
-  - **Falta, em `prototype_web_ui/controller.py` (atribuído à worktree
-    paralela `../assistenteIA-par`, que é dona do ficheiro até ao merge):**
-    `request_shutdown()` tem de parar o TTS manager
-    (`_shutdown_tts_manager()`) quando há um prewarm do TTS em curso. Hoje
-    o drain espera que o prewarm acabe sozinho, por isso a espera da
-    bateria mantém-se até essa parte entrar.
+  - **Corrigido em `prototype_web_ui/controller.py` (commit `2b1871f`, do
+    `stab/paralelo`, integrado no main pelo merge):** `request_shutdown()`
+    para o TTS manager quando há um prewarm em curso, por isso o fecho já
+    não espera pelo arranque. O prewarm automático espera pela UI pronta e
+    mais 3000 ms; a entrada explícita em STANDBY/conversa continua
+    imediata. O teste do microfone saiu do caminho de arranque. Medições e
+    limites do teste em `docs/STARTUP_SHUTDOWN_TIMINGS.md` (fecho durante
+    o prewarm: 4190 -> 58 ms).

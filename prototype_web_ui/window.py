@@ -114,6 +114,9 @@ class EchoOSWindow(QWebEngineView):
         self.channel = QWebChannel(self.page())
         self.channel.registerObject("echoController", self.controller)
         self.page().setWebChannel(self.channel)
+        self._ui_ready_timer = QTimer(self)
+        self._ui_ready_timer.setSingleShot(True)
+        self._ui_ready_timer.timeout.connect(self._check_ui_ready)
         self.loadFinished.connect(self._handle_load_finished)
 
         self.load(QUrl.fromLocalFile(str((WEB_DIR / "index.html").resolve())))
@@ -151,6 +154,8 @@ class EchoOSWindow(QWebEngineView):
 
     def _handle_load_finished(self, ok: bool) -> None:
         print(f"[Echo UI DEBUG] page_load_finished={ok}")
+        if ok and not self._close_in_progress:
+            self._check_ui_ready()
         self.page().runJavaScript(
             """
             console.log("[Echo UI JS] python load probe", {
@@ -176,3 +181,18 @@ class EchoOSWindow(QWebEngineView):
                 """
             ),
         )
+
+    def _check_ui_ready(self) -> None:
+        if not self._close_in_progress:
+            self.page().runJavaScript(
+                "Boolean(window.__echoChannelInitialized && window.echoController)",
+                self._on_ui_ready_checked,
+            )
+
+    def _on_ui_ready_checked(self, ready: bool) -> None:
+        if self._close_in_progress:
+            return
+        if ready:
+            self.controller.notify_ui_ready()
+        else:
+            self._ui_ready_timer.start(50)
