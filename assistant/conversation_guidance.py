@@ -59,7 +59,7 @@ def unsupported_plan_claim(response, user_messages=()):
     evidence = normalize(" ".join(user_messages))
     if re.search(r"you (?:had|have) some ideas planned", text):
         return not bool(re.search(r"\bi (?:had|have) some ideas planned\b|tinha algumas ideias planeadas", evidence))
-    if re.search(r"not much is scheduled|nothing(?: in particular)? is (?:scheduled|planned) for today|you (?:have|had) nothing planned|your (?:day|schedule|calendar) is (?:free|clear|empty)|nao tens nada (?:marcado|planeado)|tens o dia livre", text):
+    if re.search(r"not much is scheduled|nothing(?: in particular)? is (?:scheduled|planned) for today|there(?:'s| is) nothing(?: \w+){0,3} on (?:the|your) (?:schedule|calendar|agenda)|you (?:have|had) nothing planned|your (?:day|schedule|calendar) is (?:free|clear|empty)|nao tens nada (?:marcado|planeado)|tens o dia livre", text):
         return not bool(re.search(r"\bi have nothing (?:planned|scheduled)\b|\bmy (?:day|schedule|calendar) is (?:free|clear|empty)\b|nao tenho nada (?:marcado|planeado)|tenho o dia livre", evidence))
     return False
 

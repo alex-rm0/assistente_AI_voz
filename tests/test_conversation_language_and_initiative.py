@@ -47,6 +47,8 @@ def test_unsourced_agenda_claim_is_blocked_without_extra_call(tmp_path):
     "Nothing in particular is scheduled for today. Would you like me to suggest some general tasks or activities?",
     "Nothing is planned for today.",
     "Your calendar is empty today.",
+    "There's nothing specific on the schedule, but I can recommend a news update.",
+    "There is nothing on your calendar today.",
 ])
 def test_live_agenda_variants_without_evidence_are_blocked(tmp_path, claim):
     engine, local = english_engine(tmp_path)
