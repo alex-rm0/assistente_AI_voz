@@ -312,6 +312,8 @@ class ActiveDocumentContext:
     draft_revision: int = 0
     previous_draft_content: str = ""
     previous_draft_revision: int = 0
+    prepared_content: str = ""
+    prepared_action: str = ""
 
 
 @dataclass
@@ -374,6 +376,7 @@ class WorkSession:
     capacity: SpacePressureState | None = None
     recent_references: list[object] = field(default_factory=list)
     content_focus: dict[str, object] = field(default_factory=dict)
+    prepared_output: dict[str, str] = field(default_factory=dict)
 
 
 def _local_ollama_semantic_extractor(llm) -> SemanticExtractor | None:
@@ -1839,6 +1842,7 @@ class AssistantEngine:
         self._active_document_context = None
         self._active_task_context = None
         self._paused_task_stack = []
+        self._work_session.prepared_output.clear()
         self.active_contexts = []
         self.last_context_debug = ""
         self.last_cognitive_reasoning = None
@@ -5273,12 +5277,19 @@ class AssistantEngine:
 
     def _try_artifact_export(self, user_message: str) -> str | None:
         kind = export_kind(user_message)
-        if kind is None or kind == "compose_email" or not self.presence.can_use_tools():
+        if kind is None or not self.presence.can_use_tools():
             return None
         if self._active_document_context is not None and kind in {"", "document"}:
+            return self._export_document_content(user_message)
+        if kind == "compose_email":
             return None
         if self._pending_writing_task is not None and not kind:
             return None
+        prepared = self._work_session.prepared_output
+        if not kind and prepared and self._last_selected_path == "TEXT_SUMMARIZATION":
+            output = _export_filename_for_request(self.workspace_path, user_message, prepared["title"])
+            result = self._create_workspace_txt(output, prepared["content"], tools_used=("create_workspace_file",))
+            return localize("writing.saved", self.response_language, path=f"workspace/{output}") if result.startswith("Criei o ficheiro") else localize("writing.save_failed", self.response_language)
         tasks = ([self._active_task_context] if self._active_task_context is not None else []) + list(self._paused_task_stack)
         tasks = [task for task in tasks if task.task_type != "compose_email"]
         if not tasks:
@@ -5289,7 +5300,7 @@ class AssistantEngine:
         if not candidates:
             candidates = [task for task in tasks if task.task_type == kind] if kind else tasks[:1]
         if len(candidates) != 1 or resolution.ambiguous:
-            return localize("writing.which_draft", self.response_language)
+            return localize("artifact.which", self.response_language)
         task = candidates[0]
         if _contains_path_traversal(user_message) or re.search(r"\b[A-Za-z]:[\\/]|\\\\", user_message):
             return localize("writing.save_failed", self.response_language)
@@ -5312,6 +5323,27 @@ class AssistantEngine:
         if obj is not None:
             obj.payload["saved_file"] = f"workspace/{output}"
         self._update_task_artifact_ui(task)
+        return localize("writing.saved", self.response_language, path=f"workspace/{output}")
+
+    def _export_document_content(self, user_message: str) -> str:
+        refreshed = self._refresh_active_document_context(self._active_document_context)
+        if refreshed is None:
+            return localize("writing.save_failed", self.response_language)
+        context, reloaded = refreshed
+        self._active_document_context = context
+        text = _normalize_text(user_message)
+        summary_requested = bool(re.search(r"\b(?:resumo|summary)\b", text))
+        content = context.prepared_content if summary_requested else context.draft_content or context.prepared_content
+        if not content:
+            return localize("artifact.no_content", self.response_language)
+        title = Path(context.resolved_file).stem + " " + localize("artifact.summary" if summary_requested else "artifact.revised", self.response_language)
+        output = _export_filename_for_request(self.workspace_path, user_message, title)
+        tools = (("read_workspace_document",) if reloaded else ()) + ("create_workspace_file",)
+        result = self._create_workspace_txt(output, content, tools_used=tools)
+        if not result.startswith("Criei o ficheiro"):
+            return localize("writing.save_failed", self.response_language)
+        context.draft_saved = content == context.draft_content
+        self._queue_ui_event("document_draft_saved", {"file_name": context.resolved_file, "output_name": output})
         return localize("writing.saved", self.response_language, path=f"workspace/{output}")
 
     def _try_writing_draft_followup(self, user_message: str) -> str | None:
@@ -5362,10 +5394,8 @@ class AssistantEngine:
         obj = drafts[0]
         draft = str(obj.payload["draft_content"])
         if save_request:
-            output = _extract_output_txt_filename(user_message)
-            if not output:
-                subject = re.sub(r"^(?:subject|assunto):\s*", "", draft.splitlines()[0], flags=re.I)
-                output = _automatic_export_filename(self.workspace_path, f"{obj.title} {subject}")
+            subject = re.sub(r"^(?:subject|assunto):\s*", "", draft.splitlines()[0], flags=re.I)
+            output = _export_filename_for_request(self.workspace_path, user_message, f"{obj.title} {subject}")
             return self._save_writing_draft_file(output, draft, obj)
         # An afternoon correction alone does not identify an exact clock time.
         if (re.search(r"\b(?:tarde|afternoon)\b", text)
@@ -5731,20 +5761,7 @@ class AssistantEngine:
                 document_action=action, active_document=context, context_reused=not reloaded,
                 draft_reused=bool(context.draft_content),
             )
-            if not context.draft_content:
-                return "Ainda não tenho nenhuma versão melhorada para guardar."
-            stem = Path(context.resolved_file).stem
-            suffix = Path(context.resolved_file).suffix or ".txt"
-            proposed_name = f"{stem} (melhorado){suffix}"
-            self._pending_document_task = {
-                "current_step": "awaiting_draft_save_confirmation",
-                "draft_output_name": proposed_name,
-                "draft_source_file": context.resolved_file,
-            }
-            return (
-                f"Não substituo o ficheiro original automaticamente. Queres que eu guarde a versão melhorada "
-                f"num novo ficheiro, '{proposed_name}', mantendo '{context.resolved_file}' como está? (sim/não)"
-            )
+            return self._export_document_content(user_message)
 
         if action == "rewrite":
             request = DocumentTaskRequest(
@@ -6328,6 +6345,9 @@ class AssistantEngine:
         )
         self._last_fast_tools_used = ("workspace_search", "read_workspace_document")
         document_action = request.action or ("summarize" if "summarize" in request.actions else "read")
+        if document_action != "read" and composed.strip():
+            active_context.prepared_content = composed
+            active_context.prepared_action = document_action
         self._record_document_trace(
             found=True,
             files_used=files_used,
@@ -6792,6 +6812,8 @@ class AssistantEngine:
         )
         if has_mojibake_markers(final_response):
             debug_text_encoding("assistant_engine_final_response", final_response)
+        if selected_path == "TEXT_SUMMARIZATION" and not self._last_response_blocked:
+            self._work_session.prepared_output = {"content": final_response, "title": localize("artifact.summary", self.response_language)}
         if remember and not self._last_response_blocked:
             self._remember_pair(user_message, final_response)
         self._last_selected_path = selected_path or source
@@ -10417,6 +10439,16 @@ def _automatic_export_filename(workspace: Path, title: str) -> str:
         filename = f"{stem}_{index}.txt"
         index += 1
     return filename
+
+
+def _export_filename_for_request(workspace: Path, message: str, title: str) -> str:
+    if _contains_path_traversal(message) or re.search(r"\b[A-Za-z]:[\\/]|\\\\", message):
+        return "../"
+    output = _extract_output_txt_filename(message)
+    if not output:
+        match = re.search(r"\b(?:em|to|as|chamado|called)\s+([^\s,;]+\.txt)\b", message, re.I)
+        output = match[1] if match else ""
+    return output or _automatic_export_filename(workspace, title)
 
 
 def _extract_inline_file_content(message: str) -> str:

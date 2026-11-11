@@ -90,3 +90,62 @@ def test_export_does_not_overwrite_explicit_existing_filename(tmp_path):
     task = engine._active_task_context
     assert not engine._work_session.objects[task.active_artifact_id].payload.get("saved_file")
     assert local.calls == []
+
+
+@pytest.mark.parametrize("language", ["pt-PT", "en-GB"])
+def test_document_draft_export_chooses_name_and_keeps_original(tmp_path, language):
+    engine, _, local, _ = make_engine(tmp_path, mode="local")
+    engine._set_response_language(language)
+    source = engine.workspace_path / "notas.txt"
+    source.write_text("Texto original.", encoding="utf-8")
+    engine.respond("Lê o ficheiro notas.txt")
+    draft = "Prepared revised text.\nSecond paragraph."
+    engine._active_document_context.draft_content = draft
+    engine._active_document_context.draft_revision = 1
+    response = engine.respond("Guarda esta versão num ficheiro na workspace.")
+    outputs = [p for p in engine.workspace_path.glob("*.txt") if p != source]
+    assert len(outputs) == 1
+    assert outputs[0].read_text(encoding="utf-8") == draft
+    assert source.read_text(encoding="utf-8") == "Texto original."
+    assert ("Saved" if language == "en-GB" else "Guardei") in response
+    assert local.calls == []
+
+
+def test_document_summary_export_reuses_prepared_output_not_source(tmp_path):
+    summary = "Summary: a short meeting on Thursday."
+    engine, _, local, _ = make_engine(tmp_path, mode="local", ollama_replies=[summary])
+    engine._set_response_language("en-GB")
+    (engine.workspace_path / "notas.txt").write_text("A reunião de quinta-feira serve para rever o relatório e distribuir tarefas.", encoding="utf-8")
+    engine.respond("Resume o ficheiro notas.txt.")
+    calls = len(local.calls)
+    response = engine.respond("Guarda esse resumo num ficheiro.")
+    outputs = [p for p in engine.workspace_path.glob("*.txt") if p.name != "notas.txt"]
+    assert len(outputs) == 1
+    assert outputs[0].read_text(encoding="utf-8") == summary
+    assert "Saved" in response
+    assert len(local.calls) == calls
+
+
+def test_inline_text_summary_is_saved_without_copying_other_chat(tmp_path):
+    summary = "- First point.\n- Second point."
+    engine, _, local, _ = make_engine(tmp_path, mode="local", ollama_replies=[summary])
+    engine._set_response_language("en-GB")
+    engine.respond("Resume este texto em dois pontos: A reunião definiu o relatório e as tarefas da semana.")
+    calls = len(local.calls)
+    response = engine.respond("Guarda esse resumo num ficheiro.")
+    assert next(engine.workspace_path.glob("*.txt")).read_text(encoding="utf-8") == summary
+    assert "Saved" in response
+    assert len(local.calls) == calls
+    engine.clear_conversation()
+    assert engine._work_session.prepared_output == {}
+
+
+def test_missing_document_draft_does_not_save_the_original_by_mistake(tmp_path):
+    engine, _, local, _ = make_engine(tmp_path, mode="local")
+    source = engine.workspace_path / "notas.txt"
+    source.write_text("Original.", encoding="utf-8")
+    engine.respond("Lê o ficheiro notas.txt")
+    response = engine.respond("Guarda o rascunho num ficheiro.")
+    assert list(engine.workspace_path.glob("*.txt")) == [source]
+    assert "guardar" in response or "rascunho" in response
+    assert local.calls == []
