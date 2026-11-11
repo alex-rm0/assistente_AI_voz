@@ -25,6 +25,8 @@ CLAUDE.md e AGENTS.md têm o mesmo conteúdo: altera sempre os dois.
   repõe no fim.
 - Nunca corras benchmarks de GPU (`scripts/benchmark_stt.py`) em paralelo
   com outro agente: os tempos e a memória da GPU ficam contaminados.
+- Mudanças em threads, timers Qt ou no ciclo de vida do controller: correr também
+  scripts/flaky_check.py --runs 40 e comparar com o KNOWN_ISSUES §12.
 
 ## Trabalho paralelo
 - O `stab/paralelo` foi integrado no main (merge `7741fc9`). Nenhuma
