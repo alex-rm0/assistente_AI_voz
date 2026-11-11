@@ -1074,9 +1074,24 @@ def localize_deterministic_response(response: str, language: str) -> str:
         "claro. para quem e?": "Sure. Who's it for?",
         "o que precisas de pedir ou dizer nesse email?": "What do you need to ask for or say in that email?",
         "sobre que assunto, mais especificamente?": "What subject, more specifically?",
+        "nao posso criar ficheiros fora da pasta workspace.": "I can't create files outside the workspace.",
+        "nao posso aceder a caminhos fora da workspace.": "I can't access paths outside the workspace.",
+        "so posso criar ficheiros com extensao .txt.": "I can only create .txt files.",
+        "indica o texto que queres guardar no ficheiro.": "What text would you like to save?",
+        "a pasta de destino dentro da workspace nao existe.": "The destination folder doesn't exist in the workspace.",
+        "preciso do nome do ficheiro da workspace que queres usar.": "Which file in the workspace would you like me to use?",
+        "nao consegui voltar a aceder ao documento anterior na workspace.": "I couldn't access the previous document in the workspace again.",
+        "nao encontrei esse objeto no workspace.": "I couldn't find that object in the workspace.",
+        "ainda nao sei executar este tipo de tarefa.": "I can't carry out this type of task yet.",
     }
     if normalized in exact:
         return exact[normalized]
+    created = re.fullmatch(r"Criei o ficheiro '(.+)' na pasta workspace\.", text)
+    if created:
+        return f"Created the file '{created[1]}' in the workspace."
+    existing = re.fullmatch(r"O ficheiro '(.+)' ja existe\. Nao vou sobrescrever ficheiros nesta versao; no futuro posso pedir confirmacao\.", text)
+    if existing:
+        return f"The file '{existing[1]}' already exists. I haven't overwritten it."
     if normalized.startswith("boa, temos ") and " como opcoes" in normalized:
         body = re.sub(r"^boa, temos\s+", "", text, flags=re.IGNORECASE)
         body = re.sub(r"\s+como opções.*$", "", body, flags=re.IGNORECASE)

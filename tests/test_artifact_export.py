@@ -230,3 +230,27 @@ def test_legacy_prepared_email_uses_same_export_contract(tmp_path):
 def test_english_rewrite_preamble_is_not_part_of_document(preamble):
     from assistant.conversation import _strip_rewrite_preamble
     assert _strip_rewrite_preamble(preamble + "\n\nCanonical document.") == "Canonical document."
+
+
+@pytest.mark.parametrize("source,expected", [
+    ("Criei o ficheiro 'note.txt' na pasta workspace.", "Created the file 'note.txt' in the workspace."),
+    ("Nao posso criar ficheiros fora da pasta workspace.", "I can't create files outside the workspace."),
+    ("So posso criar ficheiros com extensao .txt.", "I can only create .txt files."),
+    ("Preciso do nome do ficheiro da workspace que queres usar.", "Which file in the workspace would you like me to use?"),
+    ("Não encontrei esse objeto no workspace.", "I couldn't find that object in the workspace."),
+])
+def test_fixed_file_responses_use_selected_language(source, expected):
+    from assistant.response_language import localize_deterministic_response
+    assert localize_deterministic_response(source, "en-GB") == expected
+    assert localize_deterministic_response(source, "pt-PT") == source
+
+
+def test_document_summary_is_also_the_content_sent_to_its_card(tmp_path):
+    import json
+    summary = "Prepared summary of the document."
+    engine, _, _, _ = make_engine(tmp_path, mode="local", ollama_replies=[summary])
+    engine._set_response_language("en-GB")
+    (engine.workspace_path / "notes.txt").write_text("Meeting on Thursday, report on Friday.", encoding="utf-8")
+    engine.respond("Resume o ficheiro notes.txt.")
+    events = [json.loads(event) for event in engine.consume_ui_events()]
+    assert any(event["type"] == "document_draft_ready" and event.get("content") == summary for event in events)

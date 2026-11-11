@@ -6188,6 +6188,8 @@ class AssistantEngine:
         )
         context.prepared_content = prepared_response
         context.prepared_action = action
+        if action in {"summarize", "compose_email"}:
+            self._queue_ui_event("document_draft_ready", {"file_name": context.resolved_file, "revision": 1, "based_on": action, "content": prepared_response})
         return prepared_response
 
     def _try_active_document_grounded_fallback(self, user_message: str, normalized: str) -> str | None:
@@ -6367,6 +6369,7 @@ class AssistantEngine:
         if document_action != "read" and composed.strip():
             active_context.prepared_content = composed
             active_context.prepared_action = document_action
+            self._queue_ui_event("document_draft_ready", {"file_name": active_context.resolved_file, "revision": 1, "based_on": document_action, "content": composed})
         self._record_document_trace(
             found=True,
             files_used=files_used,
