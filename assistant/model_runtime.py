@@ -19,6 +19,7 @@ from assistant.secret_storage import (
     sanitize_secret_error,
 )
 from assistant.system_commands import SystemCommand, parse_system_command
+from assistant.response_language import normalize_response_language, ENGLISH_GB
 from assistant.tavily_research import TavilyResearchConfig, TavilyResearchProvider
 
 
@@ -312,36 +313,38 @@ class ModelRuntimeBridge:
             return self.test_tavily_connection()
         return self.error_payload("Comando de sistema desconhecido.", provider_error_type="unknown_system_command")
 
-    def system_status_answer(self, user_message: str) -> str | None:
+    def system_status_answer(self, user_message: str, response_language: str = "pt-PT") -> str | None:
+        def say(pt, en):
+            return en if normalize_response_language(response_language) == ENGLISH_GB else pt
         text = _normalize(user_message)
         if not _looks_like_system_status_question(text):
             return None
         payload = self.current_payload(state="system_status")
         if "configuro" in text or "configurar" in text or "claude" in text and "como" in text:
-            return (
+            return say((
                 "Para configurares o Claude, abre o painel lateral, vai a Models e usa a área Anthropic API Key. "
                 "A chave não é guardada no ficheiro de configuração nem enviada para a conversa."
-            )
+            ), "To configure Claude, open Models in the side panel and use Anthropic API Key. The key is not stored in the configuration file or sent to the conversation.")
         if "api key" in text or "chave" in text:
             source = str(payload["api_key_source"])
             if payload["api_key_configured"] and source == "environment":
-                return "Sim, a chave da Anthropic está configurada pelo ambiente."
+                return say("Sim, a chave da Anthropic está configurada pelo ambiente.", "The Anthropic key is configured through the environment.")
             if payload["api_key_configured"]:
-                return "Sim, a chave da Anthropic está configurada em armazenamento seguro."
-            return "Ainda não tens uma chave da Anthropic configurada."
+                return say("Sim, a chave da Anthropic está configurada em armazenamento seguro.", "The Anthropic key is configured in secure storage.")
+            return say("Ainda não tens uma chave da Anthropic configurada.", "No Anthropic key is configured yet.")
         if "gastei" in text or "custo" in text:
-            return f"Hoje tens {payload['daily_used_usd']:.3f} dólares registados em chamadas pagas."
+            return say(f"Hoje tens {payload['daily_used_usd']:.3f} dólares registados em chamadas pagas.", f"Today's recorded paid-call usage is {payload['daily_used_usd']:.3f} dollars.")
         if "orcamento" in text or "orçamento" in text:
-            return f"O orçamento diário está em {payload['daily_budget_usd']:.2f} dólares."
+            return say(f"O orçamento diário está em {payload['daily_budget_usd']:.2f} dólares.", f"The daily budget is {payload['daily_budget_usd']:.2f} dollars.")
         if "bloqueado" in text or "linha de comandos" in text or "cli" in text:
-            return "Sim, o modo está bloqueado por CLI." if self.cli_locked else "Não, o modo não está bloqueado pela linha de comandos."
+            return say("Sim, o modo está bloqueado por CLI.", "The mode is locked by the command line.") if self.cli_locked else say("Não, o modo não está bloqueado pela linha de comandos.", "The mode is not locked by the command line.")
         if "automatic" in text or "automatico" in text or "automático" in text:
             state_label = "ligado" if payload["automatic_claude_enabled"] else "desligado"
-            return f"O encaminhamento automático para Claude está {state_label}."
+            return say(f"O encaminhamento automático para Claude está {state_label}.", f"Automatic routing to Claude is {'enabled' if payload['automatic_claude_enabled'] else 'disabled'}.")
         if "modo" in text:
-            return f"Estou em modo {payload['mode']}."
+            return say(f"Estou em modo {payload['mode']}.", f"I'm in {payload['mode']} mode.")
         if "modelo" in text:
-            return f"Estou a usar {payload.get('base_model') or payload['model']} através de {payload.get('base_provider') or payload['provider']}."
+            return say(f"Estou a usar {payload.get('base_model') or payload['model']} através de {payload.get('base_provider') or payload['provider']}.", f"I'm using {payload.get('base_model') or payload['model']} through {payload.get('base_provider') or payload['provider']}.")
         return None
 
     def save_anthropic_key(self, value: str) -> dict[str, Any]:

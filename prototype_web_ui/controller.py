@@ -1534,6 +1534,9 @@ class EchoUIController(QObject):
             self._cleanup_voice_worker()
             _log_shutdown(component="voice_worker", event="finished", elapsed_ms=self._shutdown_elapsed_ms())
         self._shutdown_tts_manager()
+        close_stt = getattr(self.voice_transcriber, "close", None)
+        if callable(close_stt):
+            close_stt()
         if self._tts_worker is not None:
             self._tts_worker.stop(reason="shutdown")
             self._cleanup_tts_worker()
@@ -1738,6 +1741,14 @@ class EchoUIController(QObject):
             self._emit_state("listening")
         elif "process" in lowered or "conclu" in lowered:
             self._emit_state("thinking")
+        key = {
+            "Preparar...": "voice.status.preparing",
+            "A ouvir...": "voice.status.listening",
+            "A processar...": "voice.status.processing",
+            "Concluído.": "voice.status.done",
+        }.get(clean_status)
+        if key:
+            clean_status = localize(key, self._response_language())
         self.uiEvent.emit(_json_payload({"type": "voice_status", "status": clean_status}))
 
     @Slot(str)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import os
 import tempfile
 import threading
 import time
@@ -351,8 +352,15 @@ class VoiceTranscriber:
         barge_in_vad_config: VadConfig | None = None,
         standby_vad_config: VadConfig | None = None,
         wake_recognizer: WakeRecognizer | None = None,
+        stt_provider: str | None = None,
     ) -> None:
         self.model_name = model_name
+        self.stt_provider = stt_provider or os.environ.get("ECHO_STT_PROVIDER", "openai-whisper")
+        self._stt_backend = None
+        if self.stt_provider not in {"openai-whisper", "faster-whisper"}:
+            raise VoiceInputError("ECHO_STT_PROVIDER deve ser openai-whisper ou faster-whisper.")
+        if self.stt_provider == "faster-whisper":
+            self.model_name = os.environ.get("ECHO_STT_MODEL", "large-v3-turbo")
         self.language = language
         # Phase 7.5 (section 10): a SEPARATE concept from `language` above --
         # `language` is the legacy field manual MIC's record_and_transcribe()
@@ -1003,13 +1011,6 @@ class VoiceTranscriber:
         "en" explicitly (as record_and_transcribe_vad() does) switches to
         the Phase 7.5 input-language resolution (section 10/11), entirely
         independent of response_language."""
-        try:
-            import whisper
-        except ImportError as exc:
-            raise VoiceInputError(
-                "Voice Input precisa do Whisper local instalado: openai-whisper."
-            ) from exc
-
         if input_language is None:
             whisper_language: str | None = self.language or "pt"
             prompt = self.initial_prompt
@@ -1019,17 +1020,19 @@ class VoiceTranscriber:
             logged_input_language = str(input_language or "auto").strip().lower()
 
         try:
-            if self._model is None:
-                self._model = whisper.load_model(self.model_name)
-            result = self._model.transcribe(
-                str(audio_path),
-                language=whisper_language,
-                initial_prompt=prompt,
-                task="transcribe",
-                temperature=0.0,
-                condition_on_previous_text=False,
-                fp16=False,
-            )
+            if self.stt_provider == "faster-whisper":
+                if self._stt_backend is None:
+                    from assistant.stt_backend import FasterWhisperBackend
+                    self._stt_backend = FasterWhisperBackend(model=self.model_name)
+                result = self._stt_backend.transcribe(audio_path, language=whisper_language, initial_prompt=prompt)
+            else:
+                import whisper
+                if self._model is None:
+                    self._model = whisper.load_model(self.model_name)
+                result = self._model.transcribe(
+                    str(audio_path), language=whisper_language, initial_prompt=prompt,
+                    task="transcribe", temperature=0.0, condition_on_previous_text=False, fp16=False,
+                )
         except Exception as exc:
             raise VoiceInputError(f"Nao consegui transcrever o audio com Whisper: {exc}") from exc
         finally:
@@ -1051,6 +1054,10 @@ class VoiceTranscriber:
         if not decision.accepted:
             raise VoiceNoSpeechDetected("Nao detetei fala.")
         return text
+
+    def close(self) -> None:
+        if self._stt_backend is not None:
+            self._stt_backend.close()
 
     def record_and_transcribe(
         self,
@@ -1190,6 +1197,7 @@ def voice_status_report(
     language: str = "pt",
     silent_rms_threshold: float = 0.001,
     probe_duration: float = 0.5,
+    response_language: str = "pt-PT",
 ) -> str:
     missing = list(missing_dependencies or [])
     chosen = None
@@ -1205,6 +1213,23 @@ def voice_status_report(
             )
         except Exception:
             chosen = None
+
+    from assistant.response_language import normalize_response_language, ENGLISH_GB
+    if normalize_response_language(response_language) == ENGLISH_GB:
+        lines = ["Voice status:", f"- configuration: {'enabled' if enabled else 'disabled'}",
+                 f"- voice.enabled: {enabled}", f"- input_device: {input_device}",
+                 f"- auto_select_input: {auto_select_input}", f"- Whisper model: {model_name}",
+                 f"- input language: {language or 'pt'}", f"- sample rate: {sample_rate} Hz", f"- channels: {channels}"]
+        for name, dependency in [("Whisper", "openai-whisper"), ("ffmpeg", "ffmpeg"), ("sounddevice", "sounddevice"), ("numpy", "numpy")]:
+            lines.append(f"- {name}: {'missing' if dependency in missing else 'ready'}")
+        if chosen is not None:
+            lines.extend([f"- selected microphone: {chosen.device_name}", f"- index: {chosen.device_index}", f"- RMS: {chosen.rms:.5f}"])
+        lines.append(f"- microphone test: {'passed' if microphone_ok else 'not passed or not tested'}")
+        if not enabled:
+            lines.append("Voice input is disabled in config/settings.json.")
+        elif missing:
+            lines.append("Missing dependencies: " + ", ".join(missing))
+        return "\n".join(lines)
 
     lines = ["Estado da voz:"]
     lines.append(f"- configuracao: {'ativa' if enabled else 'desativada'}")

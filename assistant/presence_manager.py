@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unicodedata
 from enum import Enum
+from assistant.response_language import normalize_response_language, ENGLISH_GB
 
 
 class PresenceState(str, Enum):
@@ -92,11 +93,28 @@ class PresenceManager:
 
         return None
 
-    def state_report(self) -> str:
+    def state_report(self, response_language: str = "pt-PT") -> str:
+        if normalize_response_language(response_language) == ENGLISH_GB:
+            descriptions = {
+                PresenceState.ACTIVE_CONVERSATION: "Active conversation: I can respond, use tools and ask for confirmation.",
+                PresenceState.PASSIVE_MONITORING: "Observer mode: I follow quietly.",
+                PresenceState.FOCUS_MODE: "Focus mode: I avoid interruptions.",
+                PresenceState.PRIVATE_MODE: "Private mode: this conversation is not stored.",
+                PresenceState.OFFLINE: "Offline: waiting for reactivation.",
+            }
+            return f"I'm in {self.state.value}. {descriptions[self.state]}"
         return f"Estou em {self.state.value}. {self.description()}"
 
-    def confirmation_for(self, state: str | PresenceState) -> str:
+    def confirmation_for(self, state: str | PresenceState, response_language: str = "pt-PT") -> str:
         confirmed_state = self._coerce_state(state)
+        if normalize_response_language(response_language) == ENGLISH_GB:
+            return {
+                PresenceState.ACTIVE_CONVERSATION: "Understood, back to conversation mode.",
+                PresenceState.PASSIVE_MONITORING: "Understood, I'll stay in observer mode.",
+                PresenceState.FOCUS_MODE: "Understood, I'll stay in focus mode.",
+                PresenceState.PRIVATE_MODE: "Understood, private mode is on and I won't store this conversation.",
+                PresenceState.OFFLINE: "Understood, I'll go offline.",
+            }[confirmed_state]
         confirmations = {
             PresenceState.ACTIVE_CONVERSATION: "Entendido, volto ao modo conversa.",
             PresenceState.PASSIVE_MONITORING: "Entendido, vou ficar em modo observador.",
