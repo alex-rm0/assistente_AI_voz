@@ -29,5 +29,6 @@ CLAUDE.md e AGENTS.md têm o mesmo conteúdo: altera sempre os dois.
   que nenhum outro agente a está a usar.
 
 ## Referências
+- Antes de propor trabalho novo, ler docs/ECHO_NORTH_STAR.md.
 - KNOWN_ISSUES.md: problemas conhecidos e o seu estado.
 - docs/STABILIZATION_BATTERY.md: bateria de estabilização.
