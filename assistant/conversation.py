@@ -377,6 +377,7 @@ class WorkSession:
     recent_references: list[object] = field(default_factory=list)
     content_focus: dict[str, object] = field(default_factory=dict)
     prepared_output: dict[str, str] = field(default_factory=dict)
+    last_export: str = ""
 
 
 def _local_ollama_semantic_extractor(llm) -> SemanticExtractor | None:
@@ -1843,6 +1844,7 @@ class AssistantEngine:
         self._active_task_context = None
         self._paused_task_stack = []
         self._work_session.prepared_output.clear()
+        self._work_session.last_export = ""
         self.active_contexts = []
         self.last_context_debug = ""
         self.last_cognitive_reasoning = None
@@ -2481,6 +2483,8 @@ class AssistantEngine:
         return result
 
     def _try_content_operation(self, user_message: str) -> str | None:
+        if _asks_to_read_file(_normalize_text(user_message)) and re.search(r"\.(?:txt|md|pdf|docx)\b", user_message, re.I):
+            return None
         task = self._active_task_context
         if task is None or task.status in ("completed", "cancelled"):
             return None
@@ -4033,6 +4037,9 @@ class AssistantEngine:
         deixis falls back to whatever is currently FOCUS. Never guesses
         when nothing resolves -- returns a clarifying question instead of
         silently acting on the wrong object."""
+        context = self._active_document_context
+        if context is not None and _active_document_followup_action(user_message, context.detected_content_type, bool(context.draft_content)) in {"display_draft", "compare_versions", "discard_draft", "restore_previous_draft"}:
+            return None
         started_at = time.perf_counter()
         if not self._route_is_authorized("ATTENTION_COMMAND"):
             return None
@@ -5276,6 +5283,12 @@ class AssistantEngine:
         return f"Associei {labels} a essa comparação."
 
     def _try_artifact_export(self, user_message: str) -> str | None:
+        text = _normalize_text(user_message)
+        if re.match(r"^(?:qual (?:e )?o nome d[oa] (?:ficheiro|fecheiro)|what is the (?:file ?name|name of the file))", text):
+            path = self._work_session.last_export
+            return localize("writing.saved", self.response_language, path=path) if path else localize("artifact.no_content", self.response_language)
+        if re.search(r"\b(?:resume|reescreve|melhora|summarize|rewrite|read)\b", text):
+            return None
         kind = export_kind(user_message)
         if kind is None or not self.presence.can_use_tools():
             return None
@@ -5658,7 +5671,7 @@ class AssistantEngine:
                 active_document=context,
                 context_reused=not reloaded,
             )
-            return f"Aqui está outra vez o conteúdo de '{context.resolved_file}':\n\n{_truncate_document_content(context.content)}"
+            return localize("document.content_again", self.response_language, name=context.resolved_file, content=_truncate_document_content(context.content))
 
         if action == "display_draft":
             self._last_fast_tools_used = ("read_workspace_document",) if reloaded else ()
@@ -5667,15 +5680,14 @@ class AssistantEngine:
                     found=True, files_used=files_used, output_created=False,
                     document_action=action, active_document=context, context_reused=not reloaded,
                 )
-                return "Ainda não criei nenhuma versão melhorada deste documento. Queres que o reescreva primeiro?"
+                return localize("document.no_draft", self.response_language)
             self._record_document_trace(
                 found=True, files_used=files_used, output_created=False,
                 document_action=action, active_document=context, context_reused=not reloaded,
                 draft_reused=True,
                 draft_revision_number=context.draft_revision,
             )
-            saved_note = "" if context.draft_saved else " (ainda não guardei esta versão no ficheiro original)"
-            return f"Aqui está a versão melhorada{saved_note}:\n\n{_truncate_document_content(context.draft_content)}"
+            return localize("document.draft", self.response_language, content=_truncate_document_content(context.draft_content))
 
         if action == "compare_versions":
             self._last_fast_tools_used = ("read_workspace_document",) if reloaded else ()
@@ -5686,7 +5698,7 @@ class AssistantEngine:
                 draft_revision_number=context.draft_revision,
             )
             if not context.draft_content:
-                return "Ainda não tenho nenhuma versão melhorada para comparar com o original."
+                return localize("document.no_comparison", self.response_language)
             self._queue_ui_event(
                 "document_comparison_ready",
                 {
@@ -5696,11 +5708,7 @@ class AssistantEngine:
                     "draft_content": _truncate_document_content(context.draft_content),
                 },
             )
-            return (
-                f"Original de '{context.resolved_file}':\n\n{_truncate_document_content(context.content)}\n\n"
-                "--- versão melhorada (ainda não guardada) ---\n\n"
-                f"{_truncate_document_content(context.draft_content)}"
-            )
+            return localize("document.comparison", self.response_language, name=context.resolved_file, original=_truncate_document_content(context.content), draft=_truncate_document_content(context.draft_content))
 
         if action == "discard_draft":
             self._last_fast_tools_used = ("read_workspace_document",) if reloaded else ()
@@ -5719,9 +5727,9 @@ class AssistantEngine:
                 document_action=action, active_document=context, context_reused=not reloaded,
             )
             if not had_draft:
-                return "Não havia nenhuma versão melhorada para descartar."
+                return localize("document.no_discard", self.response_language)
             self._queue_ui_event("document_draft_discarded", {"file_name": context.resolved_file})
-            return "Descartei a versão melhorada. Fica só o documento original."
+            return localize("document.discarded", self.response_language)
 
         if action == "restore_previous_draft":
             self._last_fast_tools_used = ("read_workspace_document",) if reloaded else ()
@@ -5730,7 +5738,7 @@ class AssistantEngine:
                     found=True, files_used=files_used, output_created=False,
                     document_action=action, active_document=context, context_reused=not reloaded,
                 )
-                return "Não há nenhuma versão anterior guardada para restaurar."
+                return localize("document.no_previous", self.response_language)
             context.draft_content = context.previous_draft_content
             context.draft_revision = context.previous_draft_revision
             context.previous_draft_content = ""
@@ -5752,7 +5760,7 @@ class AssistantEngine:
                     "content": _truncate_document_content(context.draft_content),
                 },
             )
-            return f"Restaurei a versão anterior (revisão {context.draft_revision}):\n\n{_truncate_document_content(context.draft_content)}"
+            return localize("document.restored", self.response_language, revision=context.draft_revision, content=_truncate_document_content(context.draft_content))
 
         if action == "save_draft":
             self._last_fast_tools_used = ("read_workspace_document",) if reloaded else ()
@@ -6135,8 +6143,8 @@ class AssistantEngine:
                 local_failure_reason=local_failure_reason,
                 **_routing_telemetry_kwargs(),
             )
-            intro = "Aqui está uma versão ainda melhor" if is_refinement else "Aqui está a versão reescrita"
-            return f"{intro}:\n\n{cleaned}\n\n(Ainda não guardei esta versão — o ficheiro original continua igual.)"
+            intro = localize("document.refined" if is_refinement else "document.rewritten", self.response_language)
+            return f"{intro}:\n\n{cleaned}\n\n({localize('document.not_saved', self.response_language)})"
 
         request = DocumentTaskRequest(
             source_files=[context.resolved_file],
@@ -6154,7 +6162,7 @@ class AssistantEngine:
             active_document=context,
             context_reused=not reloaded,
         )
-        return self.response_composer.compose(
+        prepared_response = self.response_composer.compose(
             ComposerRequest(
                 intent=f"document_{action}",
                 user_message=_active_document_followup_prompt(request, context),
@@ -6170,6 +6178,9 @@ class AssistantEngine:
                 language_instruction=self._language_instruction(),
             )
         )
+        context.prepared_content = prepared_response
+        context.prepared_action = action
+        return prepared_response
 
     def _try_active_document_grounded_fallback(self, user_message: str, normalized: str) -> str | None:
         """Last-resort grounding for a document-active turn: runs only after
@@ -6326,7 +6337,7 @@ class AssistantEngine:
                 "current_step": "read_completed",
                 "last_read_content_reference": read_result.filename,
             }
-            return f"Aqui está o conteúdo de '{read_result.filename}':\n\n{_truncate_document_content(read_result.content)}"
+            return localize("document.content", self.response_language, name=read_result.filename, content=_truncate_document_content(read_result.content))
 
         composed = self.response_composer.compose(
             ComposerRequest(
@@ -6389,6 +6400,8 @@ class AssistantEngine:
     ) -> str:
         result = create_workspace_file(filename, content, self.workspace_path)
         created = result.startswith("Criei o ficheiro")
+        if created:
+            self._work_session.last_export = f"workspace/{filename}"
         self._last_fast_tools_used = tools_used
         self._record_document_trace(
             found=True,

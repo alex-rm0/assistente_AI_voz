@@ -29,6 +29,8 @@ def test_save_current_task_uses_real_content_without_a_filename_or_llm(tmp_path,
     assert payload["saved_file"] == "workspace/" + files[0].name
     engine._update_task_artifact_ui(task)
     assert engine._work_session.objects[task.active_artifact_id].payload["saved_file"] == payload["saved_file"]
+    assert files[0].name in engine.respond("Qual é o nome do ficheiro?")
+    assert local.calls == []
 
 
 def test_real_travel_flow_exports_known_plan_not_invented_itinerary(tmp_path):
@@ -149,3 +151,50 @@ def test_missing_document_draft_does_not_save_the_original_by_mistake(tmp_path):
     assert list(engine.workspace_path.glob("*.txt")) == [source]
     assert "guardar" in response or "rascunho" in response
     assert local.calls == []
+
+
+def test_explicit_workspace_read_preempts_research_content_resolution(tmp_path):
+    engine, _, local, _ = make_engine(tmp_path, mode="local")
+    engine._set_response_language("en-GB")
+    engine.respond("Compara Samsung com Apple")
+    (engine.workspace_path / "notes.txt").write_text("Canonical document content.", encoding="utf-8")
+    response = engine.respond("Lê o ficheiro notes.txt.")
+    assert response.startswith("Here")
+    assert "Canonical document content." in response
+    assert engine.get_last_turn_telemetry()["selected_path"] == "DOCUMENT_TASK"
+    assert local.calls == []
+
+
+@pytest.mark.parametrize("message,prefix", [
+    ("Mostra o original.", "Here"),
+    ("Mostra o rascunho.", "Here"),
+    ("Descarta o rascunho.", "Discarded"),
+    ("Volta à versão anterior.", "Restored"),
+])
+def test_document_controls_keep_configured_language(tmp_path, message, prefix):
+    engine, _, local, _ = make_engine(tmp_path, mode="local")
+    engine._set_response_language("en-GB")
+    (engine.workspace_path / "notes.txt").write_text("Original text.", encoding="utf-8")
+    engine.respond("Lê o ficheiro notes.txt.")
+    context = engine._active_document_context
+    context.draft_content = "Canonical draft."
+    context.draft_revision = 2
+    context.previous_draft_content = "Earlier draft."
+    context.previous_draft_revision = 1
+    response = engine.respond(message)
+    assert response.startswith(prefix)
+    assert local.calls == []
+
+
+def test_followup_summary_replaces_previous_prepared_summary(tmp_path):
+    summary = "Latest prepared summary."
+    engine, _, local, _ = make_engine(tmp_path, mode="local", ollama_replies=[summary])
+    engine._set_response_language("en-GB")
+    (engine.workspace_path / "notes.txt").write_text("Meeting on Thursday, report on Friday.", encoding="utf-8")
+    engine.respond("Lê o ficheiro notes.txt.")
+    engine._active_document_context.prepared_content = "Old summary."
+    engine.respond("Faz um resumo.")
+    engine.respond("Guarda esse resumo num ficheiro.")
+    exported = [path for path in engine.workspace_path.glob("*.txt") if path.name != "notes.txt"]
+    assert exported[0].read_text(encoding="utf-8") == summary
+    assert len(local.calls) == 1
