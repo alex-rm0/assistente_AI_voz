@@ -270,7 +270,7 @@ Registo de execução de primeira classe, não memória conversacional.
 
 | Etapa | Objetivo | Critério de conclusão |
 |---|---|---|
-| **R2 — Fluidez da voz** (em curso) | Conversa por voz natural | STT GPU default; 1.º som < 2,5 s; teste de voz real OK |
+| **R2 — Fluidez da voz** (em curso) | Conversa por voz natural | STT GPU default; 1.º turno sem custos a frio (≤ ~0,5 s acima de um turno quente); mediana dos turnos ≈ 2,5 s; teste de voz real OK |
 | **R3 — Cérebro e conhecimento** | Conversa deixa de ser "estranha" | Comparação de modelos com números; perfil-núcleo + contexto por relevância; decisão local/cloud aplicada |
 | **F0 — Contratos do Core** | Definir os contratos antes de separar processos | EchoEvent, AttentionDecision, IncomingMessage/OutgoingNotification, ActionRequest/Result/Record, classes de privacidade, modelo de permissões/autonomia, API do Core e modelo de saúde com **schemas/modelos explícitos, testes e disciplina mínima de versões/compatibilidade**; Echo OS e vigias futuros dependem só dos contratos, nunca de implementações |
 | **F1 — Core persistente** | Correr o Core como processo/serviço atrás desses contratos | **Bloqueada até à F0 concluída e ao requisito do §10.1.** Arranque automático e reinício; Echo OS liga-se ao Core; nada perde funcionalidade |
