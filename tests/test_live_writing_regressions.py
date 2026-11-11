@@ -70,15 +70,14 @@ def test_real_log_flow_saves_canonical_email_and_adds_another(tmp_path):
     engine.respond("Escreveste mal Karina. Karina é com C.")
     engine.respond("Exatamente. Quero que corrijas, por favor.")
     response = engine.respond("Agora preciso que guardes isso num fecheiro, num workspace, por favor.")
-    assert "name" in response
+    assert "Saved" in response
     assert engine._work_session.objects[artifact].payload["draft_content"] == draft
     assert len(local.calls) == 1
-    response = engine.respond("Pode ser reuniao_semana.txt.")
-    assert "Saved" in response
-    assert (engine.workspace_path / "reuniao_semana.txt").read_text(encoding="utf-8") == draft
+    saved_name = engine._work_session.objects[artifact].payload["saved_file"]
+    assert (engine.workspace_path / saved_name.removeprefix("workspace/")).read_text(encoding="utf-8") == draft
     assert engine._last_fast_tools_used == ("create_workspace_file",)
     response = engine.respond("Qual é o nome do fecheiro?")
-    assert "reuniao_semana.txt" in response
+    assert saved_name in response
     response = engine.respond("Porquê que aparece ainda a task no ecrã? Obrigado.")
     assert "open" in response
     assert "schedule" not in response
@@ -115,7 +114,7 @@ def test_failed_save_has_no_success_receipt(tmp_path):
     engine, _ = english_engine(tmp_path, [draft])
     artifact = collected_email(engine)
     engine.respond("Guarda isso num ficheiro.")
-    engine.respond("existing.txt")
+    engine.respond("Guarda o rascunho em existing.txt")
     before = (engine.workspace_path / "existing.txt").read_text(encoding="utf-8")
     engine.respond("Guarda o rascunho em existing.txt")
     assert (engine.workspace_path / "existing.txt").read_text(encoding="utf-8") == before
@@ -160,3 +159,19 @@ def test_initial_email_accepts_equivalent_twenty_four_hour_time(tmp_path):
     engine.respond("Guarda o rascunho em meeting.txt")
     assert engine._work_session.objects[artifact].payload["draft_content"] == draft
     assert len(local.calls) == 1
+
+
+def test_automatic_names_do_not_overwrite_existing_files(tmp_path):
+    from assistant.conversation import _automatic_export_filename
+    (tmp_path / "ferias_estocolmo.txt").write_text("original", encoding="utf-8")
+    assert _automatic_export_filename(tmp_path, "Férias: Estocolmo") == "ferias_estocolmo_2.txt"
+    assert (tmp_path / "ferias_estocolmo.txt").read_text(encoding="utf-8") == "original"
+
+
+@pytest.mark.parametrize("title", ["../../C:\\Windows\\notes", "CON", "...", "A" * 250])
+def test_automatic_export_name_is_a_safe_local_text_filename(tmp_path, title):
+    from assistant.conversation import _automatic_export_filename
+    filename = _automatic_export_filename(tmp_path, title)
+    assert filename.endswith(".txt") and len(filename) < 100
+    assert "/" not in filename and "\\" not in filename and ":" not in filename
+    assert filename.split(".")[0].upper() != "CON"

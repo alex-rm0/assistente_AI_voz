@@ -5312,9 +5312,8 @@ class AssistantEngine:
         if save_request:
             output = _extract_output_txt_filename(user_message)
             if not output:
-                self._pending_document_task = {"current_step": "awaiting_output_name", "content": draft,
-                                               "writing_artifact_id": obj.id, "tools_used": ()}
-                return localize("writing.output_name", self.response_language)
+                subject = re.sub(r"^(?:subject|assunto):\s*", "", draft.splitlines()[0], flags=re.I)
+                output = _automatic_export_filename(self.workspace_path, f"{obj.title} {subject}")
             return self._save_writing_draft_file(output, draft, obj)
         # An afternoon correction alone does not identify an exact clock time.
         if (re.search(r"\b(?:tarde|afternoon)\b", text)
@@ -10336,6 +10335,9 @@ def _extract_output_txt_filename(message: str) -> str:
     text = str(message or "")
     if _contains_path_traversal(text):
         return "../"
+    quoted = re.search(r'["“]([^"“”]+\.txt)["”]', text, re.I)
+    if quoted:
+        return quoted[1]
     context_patterns = (
         r"\b(?:guarda|guardar|grava|gravar|save)\s+(?:(?:o|the)\s+)?(?:rascunho|draft|email|mail)\s+(?:em|as|to)\s+([^\s,;:\"'“”]+?\.txt)\b",
         r"\b(?:guarda|guardar|grava|gravar|escreve|escrever)\s+em\s+([^\s,;:\"'“”]+?\.txt)\b",
@@ -10350,6 +10352,19 @@ def _extract_output_txt_filename(message: str) -> str:
         if match:
             return _clean_filename_fragment(match.group(1))
     return ""
+
+
+def _automatic_export_filename(workspace: Path, title: str) -> str:
+    ascii_title = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode("ascii")
+    stem = re.sub(r"[^a-z0-9]+", "_", ascii_title.casefold()).strip("_")[:64] or "draft"
+    if re.fullmatch(r"con|prn|aux|nul|com[1-9]|lpt[1-9]", stem, re.I):
+        stem = "draft_" + stem
+    filename = f"{stem}.txt"
+    index = 2
+    while (workspace / filename).exists():
+        filename = f"{stem}_{index}.txt"
+        index += 1
+    return filename
 
 
 def _extract_inline_file_content(message: str) -> str:

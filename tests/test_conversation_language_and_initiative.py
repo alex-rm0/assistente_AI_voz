@@ -267,9 +267,8 @@ def test_corrected_draft_is_saved_exactly_without_another_model_call(tmp_path):
     corrected = engine._work_session.objects[artifact_id].payload["draft_content"]
     assert corrected == draft.replace("9:30 AM", "9:30 PM")
     response = engine.respond("Já li o rascunho. Podes criar um fecheiro com SMILE e guardar no Workspace, por favor?")
-    assert "name" in response
-    assert engine._pending_document_task["current_step"] == "awaiting_output_name"
-    response = engine.respond("Pode ser e-mail genial.")
+    assert "Saved" in response
+    response = engine.respond('Guarda o rascunho em "e-mail genial.txt"')
     assert "e-mail genial.txt" in response
     assert (engine.workspace_path / "e-mail genial.txt").read_text(encoding="utf-8") == corrected
     assert len(local.calls) == 1
