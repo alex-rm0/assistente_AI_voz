@@ -181,3 +181,44 @@ def test_controller_close_unloads_ollama_without_blocking(monkeypatch) -> None:
     for thread in threading.enumerate():
         if thread.name == "EchoOllamaUnload":
             thread.join(timeout=2)
+
+
+# --- regression: no thread when there is nothing to warm ----------------------
+# A Python thread can run the garbage collector and destroy dead Qt wrappers
+# off the GUI thread: with a warm-up thread started on every STANDBY entry,
+# the wake tests crashed with a fail-fast (0xC0000409) 6 times out of 8.
+
+
+def _count_threads(monkeypatch) -> list:
+    created: list = []
+    real_thread = model_warmup.threading.Thread
+
+    def counting_thread(*args, **kwargs):
+        created.append(kwargs.get("name"))
+        return real_thread(*args, **kwargs)
+
+    monkeypatch.setattr(model_warmup.threading, "Thread", counting_thread)
+    return created
+
+
+def test_no_thread_when_there_is_nothing_to_warm(monkeypatch) -> None:
+    created = _count_threads(monkeypatch)
+
+    class _Bare:  # a transcriber without GPU STT warm-up
+        pass
+
+    ModelWarmup(transcriber=_Bare(), llm=None).start()
+
+    assert created == []
+
+
+def test_default_stt_without_ollama_is_skipped_without_a_thread(monkeypatch, capsys) -> None:
+    from assistant.voice_input import VoiceTranscriber
+
+    created = _count_threads(monkeypatch)
+    warmup = ModelWarmup(transcriber=VoiceTranscriber(model_name="medium", stt_provider="openai-whisper"), llm=None)
+    warmup.start()
+
+    assert created == []
+    assert warmup.results == {"stt": "skipped"}
+    assert "[MODEL_WARMUP] component=stt event=skipped reason=default_stt" in capsys.readouterr().out

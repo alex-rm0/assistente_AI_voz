@@ -76,7 +76,23 @@ class ModelWarmup:
         self.cancelled = False
         self._thread: threading.Thread | None = None
 
+    def _stt_needed(self) -> bool:
+        if not callable(getattr(self.transcriber, "prewarm_stt", None)):
+            return False
+        if getattr(self.transcriber, "stt_provider", None) == "openai-whisper":
+            # Default STT: nothing to warm -- logged here, without a thread.
+            if "stt" not in self.results:
+                self.results["stt"] = "skipped"
+                print("[MODEL_WARMUP] component=stt event=skipped reason=default_stt", flush=True)
+            return False
+        return True
+
     def start(self) -> None:
+        # No thread at all when there is nothing to warm: a Python thread can
+        # run the garbage collector, which then destroys dead Qt wrappers off
+        # the GUI thread (a fail-fast crash in the wake tests, 6/8 runs).
+        if not self._stt_needed() and self.provider is None:
+            return
         # Daemon: a warm-up cut short by the app exiting leaves nothing
         # behind (Ollama finishes its load; the STT worker exits on stdin EOF).
         self._thread = threading.Thread(target=self.run, name="EchoModelWarmup", daemon=True)
@@ -94,9 +110,8 @@ class ModelWarmup:
                 close()
 
     def run(self) -> None:
-        prewarm_stt = getattr(self.transcriber, "prewarm_stt", None)
-        if callable(prewarm_stt):
-            self._step("stt", prewarm_stt, skipped_reason="default_stt")
+        if self._stt_needed():
+            self._step("stt", self.transcriber.prewarm_stt, skipped_reason="default_stt")
         if self.provider is not None and not self.cancelled:
             self._step("ollama", lambda: warm_ollama(self.provider))
 
