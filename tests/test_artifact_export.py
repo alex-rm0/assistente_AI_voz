@@ -153,12 +153,13 @@ def test_missing_document_draft_does_not_save_the_original_by_mistake(tmp_path):
     assert local.calls == []
 
 
-def test_explicit_workspace_read_preempts_research_content_resolution(tmp_path):
+@pytest.mark.parametrize("quoted", [False, True])
+def test_explicit_workspace_read_preempts_research_content_resolution(tmp_path, quoted):
     engine, _, local, _ = make_engine(tmp_path, mode="local")
     engine._set_response_language("en-GB")
     engine.respond("Compara Samsung com Apple")
     (engine.workspace_path / "notes.txt").write_text("Canonical document content.", encoding="utf-8")
-    response = engine.respond("Lê o ficheiro notes.txt.")
+    response = engine.respond('Lê o ficheiro "notes.txt".' if quoted else "Lê o ficheiro notes.txt.")
     assert response.startswith("Here")
     assert "Canonical document content." in response
     assert engine.get_last_turn_telemetry()["selected_path"] == "DOCUMENT_TASK"
@@ -199,3 +200,33 @@ def test_followup_summary_replaces_previous_prepared_summary(tmp_path):
     exported = [path for path in engine.workspace_path.glob("*.txt") if path.name != "notes.txt"]
     assert exported[0].read_text(encoding="utf-8") == summary
     assert len(local.calls) == 1
+
+
+def test_generate_and_save_document_output_does_not_ask_for_a_name(tmp_path):
+    summary = "Prepared summary of the real document."
+    engine, _, local, _ = make_engine(tmp_path, mode="local", ollama_replies=[summary])
+    engine._set_response_language("en-GB")
+    (engine.workspace_path / "notes.txt").write_text("Meeting on Thursday; report on Friday.", encoding="utf-8")
+    response = engine.respond("Resume o ficheiro notes.txt e guarda o resumo num ficheiro txt.")
+    outputs = [p for p in engine.workspace_path.glob("*.txt") if p.name != "notes.txt"]
+    assert len(outputs) == 1 and outputs[0].read_text(encoding="utf-8") == summary
+    assert "Saved" in response
+    assert len(local.calls) == 1
+
+
+def test_legacy_prepared_email_uses_same_export_contract(tmp_path):
+    draft = "Subject: Review\n\nHi Ana,\n\nPlease review the report.\n\nAlexandre"
+    engine, _, local, _ = make_engine(tmp_path, mode="local")
+    task = ActiveTaskContext(id="legacy-email", task_type="compose_email", entities={"recipient": "Ana"}, parameters={"generated_draft": draft})
+    engine._active_task_context = task
+    engine._update_task_artifact_ui(task)
+    engine.respond("Guarda esse email.")
+    assert next(engine.workspace_path.glob("*.txt")).read_text(encoding="utf-8") == draft
+    assert engine._work_session.objects[task.active_artifact_id].payload["saved_file"]
+    assert local.calls == []
+
+
+@pytest.mark.parametrize("preamble", ["Here is the rewritten document:", "Here's the revised version:"])
+def test_english_rewrite_preamble_is_not_part_of_document(preamble):
+    from assistant.conversation import _strip_rewrite_preamble
+    assert _strip_rewrite_preamble(preamble + "\n\nCanonical document.") == "Canonical document."

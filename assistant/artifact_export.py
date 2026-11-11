@@ -9,7 +9,7 @@ def export_kind(message: str) -> str | None:
         return None
     if not re.search(r"\b(?:guarda|guardar|guardes|grava|gravar|save|exporta|exportar|export)\b", text):
         return None
-    if not re.search(r"\b(?:ficheiro|fecheiro|file|workspace|rascunho|draft|plano|plan|itinerario|itinerary|comparacao|comparison|resumo|summary|notas|notes)\b", text):
+    if not re.search(r"\b(?:ficheiro|fecheiro|file|workspace|rascunho|draft|plano|plan|itinerario|itinerary|comparacao|comparison|resumo|summary|notas|notes|email|mail|versao|version|documento|document)\b", text):
         return None
     aliases = {
         "compose_email": r"\b(?:email|e-mail|mail)\b",

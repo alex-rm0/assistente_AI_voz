@@ -3848,9 +3848,11 @@ class AssistantEngine:
         ctx.active_artifact_revision += 1
         if self._turn_trace is not None:
             self._turn_trace["task_artifact_revision"] = ctx.active_artifact_revision
+        previous = self._work_session.objects.get(ctx.active_artifact_id)
         register_object(
             self._work_session,
-            SemanticObject(id=ctx.active_artifact_id, kind="task_artifact", title=title, payload={"task_type": ctx.task_type, "status": ctx.status}, task_id=ctx.id),
+            SemanticObject(id=ctx.active_artifact_id, kind="task_artifact", title=title,
+                           payload={**(previous.payload if previous else {}), "task_type": ctx.task_type, "status": ctx.status, "content": content}, task_id=ctx.id),
         )
         self._queue_ui_event(
             "task_artifact_updated",
@@ -3862,6 +3864,7 @@ class AssistantEngine:
                 "title": title,
                 "subtitle": _task_status_label(ctx.status, self.response_language),
                 "content": content,
+                "saved_file": previous.payload.get("saved_file", "") if previous else "",
             },
         )
 
@@ -5297,7 +5300,8 @@ class AssistantEngine:
             return None
         if self._active_document_context is not None and kind in {"", "document"}:
             return self._export_document_content(user_message)
-        if kind == "compose_email":
+        active = self._active_task_context
+        if kind == "compose_email" and (self._pending_writing_task is not None or active is None or active.task_type != "compose_email"):
             return None
         if self._pending_writing_task is not None and not kind:
             return None
@@ -5307,7 +5311,6 @@ class AssistantEngine:
             result = self._create_workspace_txt(output, prepared["content"], tools_used=("create_workspace_file",))
             return localize("writing.saved", self.response_language, path=f"workspace/{output}") if result.startswith("Criei o ficheiro") else localize("writing.save_failed", self.response_language)
         tasks = ([self._active_task_context] if self._active_task_context is not None else []) + list(self._paused_task_stack)
-        tasks = [task for task in tasks if task.task_type != "compose_email"]
         if not tasks:
             return None
         resolution = resolve_semantic_targets(user_message, self._work_session, "workspace_reference")
@@ -5318,15 +5321,17 @@ class AssistantEngine:
         if len(candidates) != 1 or resolution.ambiguous:
             return localize("artifact.which", self.response_language)
         task = candidates[0]
+        if task.task_type == "compose_email" and not task.parameters.get("generated_draft"):
+            return localize("artifact.no_content", self.response_language)
         if _contains_path_traversal(user_message) or re.search(r"\b[A-Za-z]:[\\/]|\\\\", user_message):
             return localize("writing.save_failed", self.response_language)
         output = _extract_output_txt_filename(user_message)
         if not output:
             match = re.search(r"\b(?:em|to|as|chamado|called)\s+([^\s,;]+\.txt)\b", user_message, re.I)
             output = match[1] if match else ""
-        title = _generic_task_title(task, self.response_language)
-        view = cognitive_task_view_model(self._work_session, task, title=title, response_language=self.response_language)
         obj = self._work_session.objects.get(task.active_artifact_id)
+        title = obj.title if task.task_type == "compose_email" and obj is not None else _generic_task_title(task, self.response_language)
+        view = cognitive_task_view_model(self._work_session, task, title=title, response_language=self.response_language)
         content = str(task.parameters.get("generated_draft") or (obj.payload.get("draft_content") if obj else "") or "")
         if not content:
             content = presentation_to_text(view, self.response_language)
@@ -6379,18 +6384,10 @@ class AssistantEngine:
                 files_used=files_used,
             )
         if request.output_format == "txt" or "write_output" in request.actions:
-            self._pending_document_task = {
-                "source_file": read_result.filename,
-                "requested_output": "",
-                "output_format": request.output_format or "txt",
-                "recipient": request.recipient or "",
-                "requested_actions": request.actions,
-                "current_step": "awaiting_output_name",
-                "missing_fields": ["output_file"],
-                "content": composed,
-                "tools_used": ("workspace_search", "read_workspace_document"),
-            }
-            return "Preparei o conteúdo. Que nome queres dar ao ficheiro .txt?"
+            title = Path(read_result.filename).stem + " " + localize("artifact.summary" if document_action == "summarize" else "artifact.revised", self.response_language)
+            output = _automatic_export_filename(self.workspace_path, title)
+            result = self._create_workspace_txt(output, composed, tools_used=("workspace_search", "read_workspace_document", "create_workspace_file"), files_used=files_used)
+            return localize("writing.saved", self.response_language, path=f"workspace/{output}") if result.startswith("Criei o ficheiro") else localize("writing.save_failed", self.response_language)
         return composed
 
     def _create_workspace_txt(
@@ -10425,7 +10422,7 @@ def _extract_output_txt_filename(message: str) -> str:
     text = str(message or "")
     if _contains_path_traversal(text):
         return "../"
-    quoted = re.search(r'["“]([^"“”]+\.txt)["”]', text, re.I)
+    quoted = re.search(r'\b(?:em|to|as|chamado|called)\s+["“]([^"“”]+\.txt)["”]', text, re.I)
     if quoted:
         return quoted[1]
     context_patterns = (
@@ -10907,6 +10904,10 @@ _REWRITE_INVALID_RESPONSE_MARKERS = (
 # only when that leading text is short and matches one of these markers —
 # it never touches anything that could be real document content.
 _REWRITE_PREAMBLE_MARKERS = (
+    "here is the rewritten document",
+    "here is the rewritten version",
+    "here is the revised version",
+    "here's the revised version",
     "vou reescrever",
     "vou analisar",
     "aqui esta a resposta",
