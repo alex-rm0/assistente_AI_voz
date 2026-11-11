@@ -2165,6 +2165,7 @@
           subtitle: event.subtitle,
           content: event.content,
           presentation: event.presentation,
+          savedFile: event.saved_file,
         });
         return true;
       // Phase 3B integration fix #2: the backend/frontend object-sync

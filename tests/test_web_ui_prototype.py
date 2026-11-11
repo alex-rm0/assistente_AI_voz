@@ -3893,6 +3893,41 @@ def test_writing_card_relabels_existing_body_on_language_switch() -> None:
     assert result["count"] == 1 and result["id"] == "email-lang"
 
 
+def test_document_labels_and_saved_receipt_follow_language_without_changing_draft() -> None:
+    result = _run_workspace_harness(
+        """
+        controller.setLanguage("en-GB");
+        controller.documentLoaded({fileName: "notes.txt", preview: "Original"});
+        const working = controller.draftWorkingStarted("notes.txt");
+        const workingLabel = working.subtitle;
+        const draft = controller.draftReady({fileName: "notes.txt", revision: 2, content: "Canonical text"});
+        controller.draftSaved({fileName: "notes.txt", outputName: "notes_revised.txt"});
+        const english = {title: draft.title, subtitle: draft.subtitle};
+        controller.setLanguage("pt-PT");
+        console.log(JSON.stringify({workingLabel, english, portuguese: {title: draft.title, subtitle: draft.subtitle}, content: draft.content, saved: draft.metadata.savedAs}));
+        """
+    )
+    assert result["workingLabel"] == "Rewriting..."
+    assert "draft" in result["english"]["title"] and result["english"]["subtitle"] == "revision 2"
+    assert "rascunho" in result["portuguese"]["title"]
+    assert "revision" not in result["portuguese"]["subtitle"]
+    assert result["content"] == "Canonical text" and result["saved"] == "notes_revised.txt"
+
+
+def test_task_export_receipt_reaches_existing_card_without_duplicate_identity() -> None:
+    ui_js = (WEB / "echo_ui.js").read_text(encoding="utf-8")
+    case = ui_js[ui_js.index('case "task_artifact_updated"'):ui_js.index('case "semantic_object_upserted"')]
+    assert "savedFile: event.saved_file" in case
+    result = _run_workspace_harness(
+        """
+        const first = controller.upsertTaskArtifact({id: "trip", taskId: "task-trip", title: "Trip", content: "Current plan"});
+        const second = controller.upsertTaskArtifact({id: "trip", taskId: "task-trip", title: "Trip", content: "Current plan", savedFile: "workspace/trip.txt"});
+        console.log(JSON.stringify({same: first === second, count: controller.listObjects().length, saved: second.metadata.savedFile}));
+        """
+    )
+    assert result == {"same": True, "count": 1, "saved": "workspace/trip.txt"}
+
+
 # --- Phase 3C: Cognitive Layout Baseline. The real Qt manual test showed
 # cards pinned to the top-left corner, a list rendered as a full-height
 # sidebar, and side_by_side surfaces stretched across the whole viewport

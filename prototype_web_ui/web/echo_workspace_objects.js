@@ -47,6 +47,19 @@
   const CLOSE_LABELS = { "pt-PT": "Fechar", "en-GB": "Close" };
   let uiLanguage = "pt-PT";
 
+  function documentLabel(key) {
+    const labels = uiLanguage === "en-GB"
+      ? {draft: "draft", comparison: "comparison", rewriting: "Rewriting...", revision: "revision", saved: "Saved to"}
+      : {draft: "rascunho", comparison: "comparação", rewriting: "A reescrever...", revision: "revisão", saved: "Guardado em"};
+    return labels[key] || key;
+  }
+
+  function refreshDocumentLabels(obj) {
+    if (!obj.source || !["draft", "comparison"].includes(obj.type)) return;
+    obj.title = `${obj.source.fileName} — ${documentLabel(obj.type)}`;
+    obj.subtitle = obj.metadata.working ? documentLabel("rewriting") : `${documentLabel("revision")} ${obj.revision}`;
+  }
+
   function typeLabel(type) {
     return (TYPE_LABELS[uiLanguage] || TYPE_LABELS["pt-PT"])[type] || String(type || "").toUpperCase();
   }
@@ -596,7 +609,7 @@
           id: nextId("draft"),
           type: "draft",
           title: `${targetFileName} — draft`,
-          subtitle: "a reescrever…",
+          subtitle: documentLabel("rewriting"),
           content: "",
           source: { fileName: targetFileName },
           state: "created",
@@ -612,6 +625,7 @@
       } else {
         draft.metadata.working = true;
       }
+      refreshDocumentLabels(draft);
       setPrimary(draft.id);
       scheduleRender();
       return draft;
@@ -655,6 +669,7 @@
       draft.metadata.working = false;
       draft.metadata.hasValidContent = true;
       draft.metadata.basedOn = fields.basedOn || draft.metadata.basedOn;
+      refreshDocumentLabels(draft);
       if (doc && !draft.relatedTo) draft.relatedTo = doc.id;
       touch(draft);
       setPrimary(draft.id); // idempotent if this revision's draft is already primary
@@ -739,6 +754,7 @@
       comparison.revision = fields.revision || comparison.revision;
       comparison.metadata.originalContent = fields.originalContent || "";
       comparison.metadata.draftContent = fields.draftContent || "";
+      refreshDocumentLabels(comparison);
       comparison.relatedTo = [doc ? doc.id : null, draft ? draft.id : null].filter(Boolean);
       touch(comparison);
       openTransientView(comparison.id);
@@ -799,12 +815,14 @@
         if (f.subtitle) existing.subtitle = f.subtitle;
         if (f.content) existing.content = f.content;
         if (f.presentation) existing.metadata.presentation = f.presentation;
+        if (f.savedFile !== undefined) existing.metadata.savedFile = f.savedFile;
         touch(existing);
         scheduleRender();
         return existing;
       }
       const created = createObject({id: stableId || null, type: "task_artifact", title: f.title, subtitle: f.subtitle, content: f.content, primary: true});
       if (f.presentation) created.metadata.presentation = f.presentation;
+      if (f.savedFile !== undefined) created.metadata.savedFile = f.savedFile;
       created.metadata.taskId = f.taskId;
       return created;
     }
@@ -2215,11 +2233,22 @@
       const presentation = obj && obj.metadata ? obj.metadata.presentation : null;
       if (presentation && Array.isArray(presentation.sections)) {
         host.appendChild(buildCognitiveTaskProjection(obj, presentation));
+        appendSavedReceipt(host, obj);
         return;
       }
       const wrapper = document.createElement("div");
       wrapper.innerHTML = buildBody(obj);
       while (wrapper.firstChild) host.appendChild(wrapper.firstChild);
+      appendSavedReceipt(host, obj);
+    }
+
+    function appendSavedReceipt(host, obj) {
+      const path = obj.metadata.savedFile || (obj.metadata.savedAs ? `workspace/${obj.metadata.savedAs}` : "");
+      if (!path) return;
+      const paragraph = document.createElement("p");
+      paragraph.className = "workspace-object__text";
+      paragraph.textContent = `${documentLabel("saved")}: ${path}`;
+      host.appendChild(paragraph);
     }
 
     function buildCognitiveTaskProjection(obj, presentation) {
@@ -2353,6 +2382,7 @@
       const next = TYPE_LABELS[language] ? language : "pt-PT";
       if (next === uiLanguage) return uiLanguage;
       uiLanguage = next;
+      objects.forEach(refreshDocumentLabels);
       if (!container) return uiLanguage;
       container.querySelectorAll(".workspace-object").forEach((node) => {
         const eyebrow = node.querySelector(".workspace-object__type");
@@ -2360,7 +2390,9 @@
         const close = node.querySelector(".workspace-object__close");
         if (close) close.setAttribute("aria-label", CLOSE_LABELS[uiLanguage]);
         const obj = objects.get(node.dataset.id);
-        if (obj && obj.type === "writing_task" && obj.metadata.semanticPayload) {
+        if (obj) {
+          node.querySelector(".workspace-object__title").textContent = obj.title;
+          node.querySelector(".workspace-object__subtitle").textContent = obj.subtitle || "";
           fillBody(node.querySelector(".workspace-object__body"), obj);
         }
         node.querySelectorAll(".workspace-object__actions button, .workspace-object__actions-secondary button").forEach((button) => {
