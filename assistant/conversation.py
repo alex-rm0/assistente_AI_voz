@@ -4281,7 +4281,7 @@ class AssistantEngine:
             self._turn_trace["workspace_reference_confidence"] = match.confidence
             self._turn_trace["workspace_reference_resolution_source"] = target_resolution.source
         label = match.title or "isso"
-        return f"Pronto, {label} está outra vez em foco."
+        return localize("workspace.refocused", self.response_language, label=label)
 
     def _try_pending_workspace_action(self, user_message: str) -> str | None:
         """Phase 4 (section 15): "Echo asked permission to minimize
@@ -4330,8 +4330,8 @@ class AssistantEngine:
                     deferred_response = self.respond(deferred_message)
                 finally:
                     self._task_surface_capacity_override = False
-                return f"Feito, minimizei {label}. {deferred_response}"
-            return f"Feito, minimizei {label}."
+                return localize("workspace.minimized", self.response_language, label=label) + " " + deferred_response
+            return localize("workspace.minimized", self.response_language, label=label)
 
         if _is_negative_confirmation(user_message):
             object_ids = list(pending.get("object_ids") or [])
@@ -4345,8 +4345,8 @@ class AssistantEngine:
                 self._turn_trace["space_pressure_action"] = "cancelled"
                 self._turn_trace["minimization_reason"] = pending.get("reason") or "space_pressure"
             if str(pending.get("action") or "") == "minimize_for_task_surface":
-                return "Ok, mantenho tudo como está. Para abrir essa tarefa, preciso que minimizes uma das quatro tarefas abertas."
-            return "Ok, mantenho tudo visível por agora. Não volto a sugerir essa minimização enquanto o espaço não mudar."
+                return localize("workspace.cancelled_capacity", self.response_language)
+            return localize("workspace.cancelled_minimization", self.response_language)
 
         # Neither a clear yes nor no -- decay like _pending_user_intent's
         # own ttl pattern rather than let an unrelated later "sim" resolve
@@ -4434,7 +4434,7 @@ class AssistantEngine:
             self._turn_trace["pending_workspace_action_created"] = True
             self._turn_trace["pending_workspace_action_object_ids"] = [candidate_id]
             self._turn_trace["minimization_reason"] = "space_pressure"
-        return f" O espaço está com pouca folga -- posso minimizar {label} para abrir espaço?"
+        return localize("workspace.pressure.ask", self.response_language, label=label)
 
     def _apply_auto_attention_for_new_activity(self, user_message: str) -> None:
         """Phase 4 (section 4): a conservative, deterministic first-version
@@ -5003,7 +5003,7 @@ class AssistantEngine:
                 self._turn_trace["task_surface_open_task_count"] = len(open_task_ids)
                 self._turn_trace["pending_workspace_action_created"] = False
                 self._turn_trace["minimization_reason"] = "task_surface_capacity"
-            return "Já tens quatro tarefas abertas. Preciso que minimizes uma delas antes de abrir outra."
+            return localize("workspace.capacity.blocked", self.response_language)
         self._pending_workspace_action = {
             "action": "minimize_for_task_surface",
             "object_ids": [candidate_id],
@@ -5019,7 +5019,7 @@ class AssistantEngine:
             self._turn_trace["pending_workspace_action_created"] = True
             self._turn_trace["pending_workspace_action_object_ids"] = [candidate_id]
             self._turn_trace["minimization_reason"] = "task_surface_capacity"
-        return f"Já tens quatro tarefas abertas. Posso minimizar {self._task_surface_label(candidate_id)} para abrir esta?"
+        return localize("workspace.capacity.ask", self.response_language, label=self._task_surface_label(candidate_id))
 
     def _maybe_prepare_task_surface_expand_action(self, target_id: str) -> str:
         open_task_ids = self._task_surface_open_artifact_ids()
@@ -5042,10 +5042,7 @@ class AssistantEngine:
             self._turn_trace["pending_workspace_action_created"] = True
             self._turn_trace["pending_workspace_action_object_ids"] = [candidate_id]
             self._turn_trace["minimization_reason"] = "task_surface_expand"
-        return (
-            f"Posso dar mais espaço a {self._task_surface_label(target_id)}, "
-            f"mas preciso de minimizar uma das outras tarefas. Posso minimizar {self._task_surface_label(candidate_id)}?"
-        )
+        return localize("workspace.capacity.expand", self.response_language, target=self._task_surface_label(target_id), label=self._task_surface_label(candidate_id))
 
     def _explicit_alternatives_would_create_new_activity(self, user_message: str, candidates: list[str], category: str) -> bool:
         equivalent = self._find_equivalent_generic_comparison(candidates)

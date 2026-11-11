@@ -323,3 +323,20 @@ def test_language_switch_refreshes_all_open_cards_not_only_active_task(tmp_path)
     assert email.payload["draft_content"] == "Subject: Original\n\nHello Ana."
     assert engine._active_task_context is comparison
     assert local.calls == []
+
+
+def test_workspace_capacity_dialogue_keeps_language_and_confirmation_policy(tmp_path):
+    from assistant.representation import SemanticObject
+    engine, _, local, _ = make_engine(tmp_path, mode="local")
+    engine._set_response_language("en-GB")
+    for index in range(4):
+        engine._work_session.objects[str(index)] = SemanticObject(id=str(index), kind="task_artifact", title=f"Task {index}")
+    question = engine._maybe_prepare_task_surface_capacity_action("Vamos preparar umas férias em Estocolmo.")
+    assert question.startswith("You already have four tasks open.")
+    assert engine._pending_workspace_action is not None
+    assert engine.respond("não").startswith("OK, I'll keep")
+    assert engine._pending_workspace_action is None
+    engine._maybe_prepare_task_surface_capacity_action("Vamos preparar umas férias em Estocolmo.")
+    assert engine.respond("sim").startswith("Done, minimised")
+    assert engine._active_task_context.task_type == "plan_trip"
+    assert local.calls == []
