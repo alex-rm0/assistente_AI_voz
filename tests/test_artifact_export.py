@@ -174,6 +174,7 @@ def test_explicit_workspace_read_preempts_research_content_resolution(tmp_path):
 def test_document_controls_keep_configured_language(tmp_path, message, prefix):
     engine, _, local, _ = make_engine(tmp_path, mode="local")
     engine._set_response_language("en-GB")
+    engine.respond("Compara Samsung com Apple")
     (engine.workspace_path / "notes.txt").write_text("Original text.", encoding="utf-8")
     engine.respond("Lê o ficheiro notes.txt.")
     context = engine._active_document_context

@@ -4188,6 +4188,9 @@ class AssistantEngine:
         currently FOCUS -- "abre a porta" naming nothing real must never be
         misread as a no-op re-focus of the current object."""
         normalized_message = normalize_for_matching(user_message)
+        context = self._active_document_context
+        if context is not None and _active_document_followup_action(user_message, context.detected_content_type, bool(context.draft_content)) in {"display", "display_draft", "compare_versions", "discard_draft", "restore_previous_draft"}:
+            return None
         if not _is_open_reference_phrase(normalized_message):
             return None
         representation_intent = (
