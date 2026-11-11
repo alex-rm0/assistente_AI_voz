@@ -68,6 +68,11 @@ foram corrigidos**. Cada entrada tem o sintoma, a evidência e o estado.
       não me engano", "pesquisei", "lembro-me") só conhecem frases em
       português, por isso uma resposta inventada em inglês não é
       bloqueada.
+    - **WRITING_TASK em en-GB:** "Ajuda-me a escrever um email" responde
+      com o literal "Para quem é o email?" em português (caminho
+      determinístico do `WRITING_TASK`, fora do composer). A frase longa
+      do log de 11/11 deu "Who is the email for?", por isso há pelo menos
+      dois caminhos e só um está traduzido.
     - **Literais PT fora deste bloco:** ver a lista no relatório de
       2026-11-09. Por exemplo, `_local_writing_fallback` devolve um email
       fixo em português. As ferramentas técnicas do Context Observer
