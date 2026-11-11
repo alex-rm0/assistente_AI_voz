@@ -76,6 +76,21 @@ Do not talk about your own level of knowledge.
 """.strip()
 
 
+def _closing_line(request: ComposerRequest, *, english: bool) -> str:
+    # Presence question discipline: as a system-message line alone it lost
+    # to "Continue the conversation naturally as Echo." at the end of the
+    # user message (7/9 real replies still ended with a question). When it
+    # applies, that invitation is replaced by a short note in the same
+    # position; the language anchor (_with_language_anchor) stays last.
+    if request.question_discipline_instruction.strip():
+        if english:
+            return "(Answer without a follow-up question unless one is needed.)"
+        return "(Responde sem pergunta de seguimento, a não ser que seja necessária.)"
+    if english:
+        return "Continue the conversation naturally as Echo."
+    return "Continua naturalmente a conversa como Echo."
+
+
 def _with_language_anchor(user_message: str, response_language: str) -> str:
     # Only the payload sent to the model: a short note right next to the
     # user's text, which a small model follows better than the system
@@ -270,7 +285,7 @@ class ResponseComposer:
                     parts.append(f"Relevant facts:\n{facts}")
             if request.next_goal.strip():
                 parts.append(f"Next conversation goal:\n{request.next_goal.strip()}")
-            parts.append("Continue the conversation naturally as Echo.")
+            parts.append(_closing_line(request, english=True))
             return "\n\n".join(parts)
         parts = [
             f"Mensagem do Alexandre:\n{request.user_message.strip()}",
@@ -284,7 +299,7 @@ class ResponseComposer:
                 parts.append(f"Factos relevantes:\n{facts}")
         if request.next_goal.strip():
             parts.append(f"Próximo objetivo da conversa:\n{request.next_goal.strip()}")
-        parts.append("Continua naturalmente a conversa como Echo.")
+        parts.append(_closing_line(request, english=False))
         return "\n\n".join(parts)
 
 
