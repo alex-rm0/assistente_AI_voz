@@ -28,3 +28,4 @@ evals/results/legacy/
 evals/results/index.md
 evals/results/baselines/
 output.txt
+.claude/
