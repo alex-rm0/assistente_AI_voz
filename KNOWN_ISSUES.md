@@ -244,3 +244,31 @@ foram corrigidos**. Cada entrada tem o sintoma, a evidência e o estado.
     imediata. O teste do microfone saiu do caminho de arranque. Medições e
     limites do teste em `docs/STARTUP_SHUTDOWN_TIMINGS.md` (fecho durante
     o prewarm: 4190 -> 58 ms).
+
+## 12. Crash intermitente nos testes de wake (fail-fast 0xC0000409)
+
+- **Sintoma:** o pytest morre a meio, sem resumo, com o código de saída
+  `0xC0000409` (fail-fast nativo, sem traceback nem evento no Windows). Um
+  conjunto mínimo de 9 testes de wake em `tests/test_web_ui_prototype.py`
+  reproduz o problema. É o conjunto por omissão de `scripts/flaky_check.py`.
+- **Evidência** (`scripts/flaky_check.py`, cada corrida num processo novo,
+  2026-11-11):
+
+  | Código | Corridas | Falhas | Taxa |
+  |---|---|---|---|
+  | `e460691` (antes do R2) | 40 (+24 antes) | 0 (0/64 no total) | 0% |
+  | `1824adc` (aquecimento publicado no R2) | 8 | 6 | 75% |
+  | `e5d008c` (HEAD, depois de `481f2a8`) | 40 (+24 antes) | 1 (2/64 no total) | 2,5% (3,1%) |
+
+  - A falha de `1824adc` contra o antes do R2 é significativa (teste exato
+    de Fisher, p = 0,0002). A hipótese de causa: uma thread Python arrancada
+    em cada entrada em STANDBY corre o garbage collector e destrói wrappers
+    Qt mortos fora da thread da UI. Foi corrigida em `481f2a8`: deixou de
+    haver thread quando não há nada para aquecer.
+  - Depois disso, a diferença entre o HEAD e o antes do R2 **não é
+    significativa**: p = 1,0 com 1/40 contra 0/40, e p = 0,50 com 2/64
+    contra 0/64. A falha que resta tem a mesma assinatura e pode ser
+    instabilidade que já existia, mas as amostras não o provam.
+- **Estado:** aberto (monitorizar). Volta a correr
+  `.venv\Scripts\python.exe scripts\flaky_check.py --runs 40` depois de
+  qualquer mudança em threads ou no ciclo de vida do controller.
