@@ -340,3 +340,27 @@ def test_workspace_capacity_dialogue_keeps_language_and_confirmation_policy(tmp_
     assert engine.respond("sim").startswith("Done, minimised")
     assert engine._active_task_context.task_type == "plan_trip"
     assert local.calls == []
+
+
+@pytest.mark.parametrize("message,destination", [
+    ("Vamos também preparar umas férias em Coimbra.", "Coimbra"),
+    ("Quero uma viagem para Aveiro.", "Aveiro"),
+    ("Let's plan a holiday in York.", "York"),
+    ("Quero férias em julho.", ""),
+    ("Férias em Julho.", ""),
+    ("Férias em Família.", ""),
+    ("Vamos viajar em família.", ""),
+    ("Não quero férias em Coimbra.", ""),
+    ("I do not want a holiday in York.", ""),
+])
+def test_explicit_destination_is_not_limited_to_predefined_city(message, destination):
+    from assistant.task_intelligence import _extract_destination
+    assert _extract_destination(message) == destination
+
+
+def test_current_plan_export_retains_explicit_coimbra_destination(tmp_path):
+    engine, _, local, _ = make_engine(tmp_path, mode="local")
+    engine.respond("Vamos preparar umas férias em Coimbra.")
+    engine.respond("Guarda esse plano num ficheiro.")
+    assert "Coimbra" in next(engine.workspace_path.glob("*.txt")).read_text(encoding="utf-8")
+    assert local.calls == []

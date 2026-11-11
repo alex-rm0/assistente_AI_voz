@@ -2149,6 +2149,19 @@ def _extract_destination(message: str) -> str:
     match = re.search(r"\b(?:vou\s+a|vou\s+para|destino\s+e|destino\s+é)\s+(?:o|a|os|as)?\s*([A-ZÀ-Ý][\wÀ-ÿ]+(?:\s+[A-ZÀ-Ý][\wÀ-ÿ]+){0,3})", message)
     if match:
         return match.group(1).strip(" .,!?:;")
+    explicit = re.search(
+        r"(?i:\b(?:f[eé]rias|viagem|holiday|vacation|trip)\s+(?:em|para|in|to))\s+"
+        r"([A-ZÀ-Ý][\wÀ-ÿ'-]+(?:\s+(?:(?:de|da|do|das|dos|of|the)\s+)?[A-ZÀ-Ý][\wÀ-ÿ'-]+){0,3})",
+        message,
+    )
+    if explicit:
+        prefix = normalize_for_matching(message[:explicit.start()])
+        if re.search(r"\b(?:nao|not|don't|never|nunca)\b[^.,;!?]*$", prefix):
+            return ""
+        candidate = explicit[1].strip(" .,!?:;")
+        non_places = {"janeiro", "fevereiro", "marco", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro", "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december", "familia", "family", "grupo", "group"}
+        if normalize_for_matching(candidate) not in non_places:
+            return candidate
     normalized = normalize_for_matching(message)
     if "estocolmo" in normalized:
         return "Estocolmo"
