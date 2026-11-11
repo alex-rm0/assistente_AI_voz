@@ -37,6 +37,7 @@ surfaces personal context even when a memory candidate scores high.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from assistant.text_matching import contains_any_phrase, normalize_for_matching
@@ -119,6 +120,8 @@ REASON_PERSONAL_CONTEXT_NOT_MATERIAL = "PERSONAL_CONTEXT_NOT_MATERIAL"
 REASON_PERSONAL_CONTEXT_MATERIAL = "PERSONAL_CONTEXT_MATERIAL"
 # Phase 8.0.2 addition (section 10/16):
 REASON_SELF_REPRESENTATION_MOMENT = "SELF_REPRESENTATION_MOMENT"
+# A vague action request ("marca isso") with no antecedent to refer to.
+REASON_VAGUE_ACTION_REFERENCE = "VAGUE_ACTION_REFERENCE"
 
 # --- Closure / acknowledgement detection (section 10) ----------------------
 # Bounded phrase lists, matched via contains_any_phrase (word-boundary safe,
@@ -221,6 +224,40 @@ _ADDRESS_STRONG_MOMENT_MIN_GAP = 3
 _ADDRESS_WEAK_MOMENT_MIN_GAP = 10
 
 
+# An action request whose only object is a vague reference ("marca isso",
+# "send it"). Bounded verb list; the whole message must be just verb +
+# reference (optionally "podes"/"por favor"), so a comment like "faz
+# sentido isso" or "gosto disso" never matches.
+# ("copy that" is left out: in English it means "understood".)
+_VAGUE_ACTION_REQUEST_RE = re.compile(
+    r"^(?:(?:podes|pode|por favor|please)\s+)?"
+    r"(?P<verb>marca|envia|manda|guarda|abre|faz|apaga|copia|mark|send|save|open|do|delete)"
+    r"\s+(?:isso|isto|aquilo|that|it|this)"
+    r"(?:\s+(?:por favor|please))?[\s.!]*$"
+)
+_VAGUE_ACTION_KINDS = {
+    "marca": "mark", "mark": "mark",
+    "envia": "send", "manda": "send", "send": "send",
+    "guarda": "save", "save": "save",
+    "abre": "open", "open": "open",
+    "faz": "do", "do": "do",
+}
+
+
+def _looks_like_vague_action_request(normalized_message: str) -> bool:
+    return bool(_VAGUE_ACTION_REQUEST_RE.match(normalized_message.strip()))
+
+
+def vague_action_kind(user_message: str) -> str:
+    """For a vague action request: "mark"/"send"/"save"/"open"/"do", or
+    "other" for a recognized verb without its own clarifying question;
+    "" when the message is not a vague action request."""
+    match = _VAGUE_ACTION_REQUEST_RE.match(normalize_for_matching(user_message).strip())
+    if match is None:
+        return ""
+    return _VAGUE_ACTION_KINDS.get(match.group("verb"), "other")
+
+
 def _looks_like_direct_question(normalized_message: str) -> bool:
     if normalized_message.endswith("?"):
         return True
@@ -316,6 +353,12 @@ def _decide_initiative_and_question(
     if active_task_present and active_task_unresolved:
         reason_codes.append(REASON_MISSING_REQUIRED_INFO)
         reason_codes.append(REASON_TASK_CONTINUATION)
+        return "ask", True, reason_codes
+    if not active_task_present and _looks_like_vague_action_request(normalized_message):
+        # Nothing the reference can point to (Presence only sees an
+        # antecedent through an active task): the object is missing, and
+        # the turn answers with a fixed clarifying question.
+        reason_codes.append(REASON_VAGUE_ACTION_REFERENCE)
         return "ask", True, reason_codes
     if active_task_present and is_continue_directive:
         reason_codes.append(REASON_USER_CONTINUE_DIRECTIVE)
