@@ -625,11 +625,19 @@ class PocketTTSLocalProvider:
         self.shutdown()
 
     def shutdown(self) -> None:
-        with self._lock:
-            process = self._process
-            self._process = None
+        # Close first WITHOUT the lock: a start() still loading the server
+        # holds it, and closing its process makes that start fail at once
+        # (see _PocketTTSServerProcess._read_stdout) instead of making
+        # shutdown wait for the whole start-up / load timeout.
+        process = self._process
         if process is not None:
             process.close()
+        if self._lock.acquire(timeout=2):
+            try:
+                if self._process is process:
+                    self._process = None
+            finally:
+                self._lock.release()
 
     def list_voices(self) -> list[VoiceSpec]:
         return [self._profile(DEFAULT_ENGLISH_VOICE_ID, ENGLISH_GB), self._profile(DEFAULT_PORTUGUESE_VOICE_ID, PORTUGUESE_PT)]
@@ -1193,11 +1201,14 @@ class _PocketTTSServerProcess:
         self.responses: queue.Queue[dict[str, Any]] = queue.Queue()
         self.reader: threading.Thread | None = None
         self.stderr_reader: threading.Thread | None = None
+        # Set by close(), which may run from another thread while start()
+        # is still waiting for "ready" (app shutdown during the prewarm).
+        self.closed = False
 
     def start(self) -> dict[str, Any]:
         _debug_tts_trace("pocket_tts_server_start")
         launched = time.perf_counter()
-        self.process = self.process_factory(
+        process = self.process_factory(
             [str(self.runtime_python), str(self.runner_path), "--server", "--language", "english"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -1206,6 +1217,10 @@ class _PocketTTSServerProcess:
             encoding="utf-8",
             env=self.env,
         )
+        self.process = process
+        if self.closed:  # closed while the subprocess was being launched
+            self.close()
+            raise TTSError("pocket_tts_server_closed")
         worker_launch_ms = (time.perf_counter() - launched) * 1000.0
         self.reader = threading.Thread(target=self._read_stdout, name="EchoPocketTTSReader", daemon=True)
         self.reader.start()
@@ -1275,6 +1290,7 @@ class _PocketTTSServerProcess:
         return bool(process is not None and getattr(process, "poll", lambda: None)() is None)
 
     def close(self) -> None:
+        self.closed = True
         process = self.process
         self.process = None
         if process is None:
@@ -1312,6 +1328,10 @@ class _PocketTTSServerProcess:
             payload = _json_object(line)
             if payload:
                 self.responses.put(payload)
+        # stdout ended: the server exited (or was closed). Wake whoever is
+        # waiting (start() for "ready", a synthesis for its result) at once
+        # instead of letting it sit until its timeout.
+        self.responses.put({"ok": False, "error": "pocket_tts_server_exited"})
 
     def _drain_stderr(self) -> None:
         stderr = getattr(self.process, "stderr", None)
