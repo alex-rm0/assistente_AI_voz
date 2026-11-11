@@ -111,7 +111,7 @@ def test_recipient_spelling_proposal_can_be_declined(tmp_path):
 
 
 def test_failed_save_has_no_success_receipt(tmp_path):
-    draft = "Subject: Meeting\n\nHi Francisca and Karina,\n\nCan you attend this week?\n\nAlexandre"
+    draft = "Subject: Meeting\n\nHi Francisca and Karina,\n\nCan you attend this week at 21:30?\n\nAlexandre"
     engine, _ = english_engine(tmp_path, [draft])
     artifact = collected_email(engine)
     engine.respond("Guarda isso num ficheiro.")
@@ -129,3 +129,34 @@ def test_machine_footer_does_not_become_email_content(tmp_path):
     engine.respond("Guarda isso num ficheiro.")
     assert engine._pending_writing_task is not None
     assert not engine._work_session.objects[artifact].payload.get("draft_content")
+
+
+@pytest.mark.parametrize("instruction,expected", [
+    ("às 9h30 da noite", 21 * 60 + 30),
+    ("às 9h30 da manhã", 9 * 60 + 30),
+    ("at 9:30 PM", 21 * 60 + 30),
+    ("às 3h15 da tarde", 15 * 60 + 15),
+])
+def test_explicit_time_period_is_preserved(instruction, expected):
+    from assistant.conversation import _requested_writing_clock
+    assert _requested_writing_clock(instruction) == expected
+
+
+def test_initial_email_with_missing_period_cannot_be_exported(tmp_path):
+    draft = "Subject: Meeting\n\nDear Francisca and Karina,\n\nCan you attend this week at 9:30?\n\nAlexandre"
+    engine, local = english_engine(tmp_path, [draft])
+    artifact = collected_email(engine)
+    response = engine.respond("Guarda o rascunho em meeting.txt")
+    assert "couldn't" in response
+    assert not engine._work_session.objects[artifact].payload.get("draft_content")
+    assert not (engine.workspace_path / "meeting.txt").exists()
+    assert "21:30" in str(local.calls[0]["messages"])
+
+
+def test_initial_email_accepts_equivalent_twenty_four_hour_time(tmp_path):
+    draft = "Subject: Meeting\n\nDear Francisca and Karina,\n\nCan you attend this week at 21:30?\n\nAlexandre"
+    engine, local = english_engine(tmp_path, [draft])
+    artifact = collected_email(engine)
+    engine.respond("Guarda o rascunho em meeting.txt")
+    assert engine._work_session.objects[artifact].payload["draft_content"] == draft
+    assert len(local.calls) == 1

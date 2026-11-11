@@ -2105,8 +2105,11 @@ class AssistantEngine:
         )
         header = re.search(r"(?im)^\s*(?:subject|assunto):", draft)
         names = [name for name in re.findall(r"\w+", task.recipient) if name.casefold() not in {"e", "and", "o", "a"}]
+        expected_time = _requested_writing_clock(task.purpose or task.subject)
+        actual_times = {_writing_clock_value(m[1], m[2], m[3] or "") for m in _WRITING_CLOCK.finditer(draft)}
         if (header is None or len(draft[header.end():].splitlines()) < 3
                 or ("@" not in task.recipient and any(name.casefold() not in draft.casefold() for name in names))
+                or (expected_time is not None and actual_times != {expected_time})
                 or re.search(r"(?im)^\s*(?:system checks:|all circuits awake)", draft)):
             return localize("writing.draft_rejected", self.response_language)
         if header.start() and header.start() < 200:
@@ -10854,7 +10857,14 @@ def _requested_writing_clock(instruction: str) -> int | None:
     for match in _WRITING_CLOCK.finditer(text):
         if re.search(r"\b(?:nao|not|em vez de|instead of)\s*$", text[:match.start()]):
             continue
-        value = _writing_clock_value(match[1], match[2], period_override[1] if period_override else match[3] or "")
+        period = period_override[1] if period_override else match[3] or ""
+        if not period and 1 <= int(match[1]) <= 12:
+            suffix = text[match.end():]
+            if re.match(r"\s*(?:da (?:noite|tarde)|at night|in the (?:evening|afternoon))\b", suffix):
+                period = "pm"
+            elif re.match(r"\s*(?:da manha|in the morning)\b", suffix):
+                period = "am"
+        value = _writing_clock_value(match[1], match[2], period)
         if value is not None:
             values.add(value)
     return next(iter(values)) if len(values) == 1 else None
@@ -14978,6 +14988,8 @@ def _writing_workflow_question(task: PendingWritingTask, response_language: str 
 
 
 def _writing_task_prompt(task: PendingWritingTask) -> str:
+    clock = _requested_writing_clock(task.purpose or task.subject)
+    time_constraint = f"Exact time supplied by the user (24-hour): {clock // 60:02d}:{clock % 60:02d}. Preserve it.\n" if clock is not None else ""
     return (
         "Escreve um email com estes dados recolhidos:\n"
         f"tipo={task.task_type}\n"
@@ -14986,6 +14998,7 @@ def _writing_task_prompt(task: PendingWritingTask) -> str:
         f"contexto_destinatario={task.recipient_context or 'unknown'}\n"
         f"projeto={task.project}\n"
         f"objetivo={task.purpose or task.subject or 'unknown'}\n"
+        + time_constraint +
         "Usa apenas estes campos. Não incluas pedidos de ajuda, instruções para escrever, confirmações ou conversa lateral no corpo do email. Não inventes nomes nem AM/PM se não estiver indicado."
     )
 
