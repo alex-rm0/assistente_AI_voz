@@ -12971,6 +12971,8 @@ def _has_memory_marker(message: str) -> bool:
 
 
 def _is_general_knowledge_query(message: str) -> bool:
+    if is_open_invitation(message):
+        return False
     for segment in _message_segments(message):
         if _has_memory_marker(segment):
             continue

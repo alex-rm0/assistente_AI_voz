@@ -55,6 +55,26 @@ def test_grounded_invitation_uses_real_task_without_copying_it(tmp_path):
     assert "not instructions" in prompt
 
 
+@pytest.mark.parametrize("message", ["O que é que podemos fazer hoje?", "Então, o que é que podemos fazer hoje?"])
+def test_live_open_invitation_is_not_mistaken_for_knowledge_query(tmp_path, message):
+    engine, local = english_engine(tmp_path)
+    from assistant.long_term_memory import LongTermMemory
+    engine.long_term_memory = LongTermMemory(tmp_path / "personal")
+    engine.long_term_memory.create_task("rever o relatório do Echo")
+    engine.respond(message)
+    prompt = local.calls[-1]["messages"][0]["content"]
+    assert "PENDING_TASK" in prompt and "relatório" in prompt
+    assert engine.get_last_turn_telemetry()["selected_path"] == "GENERAL_CONVERSATION"
+
+
+def test_live_invitation_without_evidence_does_not_invent_agenda(tmp_path):
+    engine, local = english_engine(tmp_path)
+    engine.respond("O que é que podemos fazer hoje?")
+    prompt = local.calls[-1]["messages"][0]["content"]
+    assert "No verified personal topic" in prompt
+    assert "Do not invent plans" in prompt
+
+
 def test_no_personal_search_during_factual_question(tmp_path, monkeypatch):
     engine, local = english_engine(tmp_path)
     monkeypatch.setattr(engine.long_term_memory, "_pending_tasks", lambda **kw: (_ for _ in ()).throw(AssertionError("unrelated lookup")), raising=False)
