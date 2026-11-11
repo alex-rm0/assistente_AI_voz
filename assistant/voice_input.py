@@ -1055,6 +1055,17 @@ class VoiceTranscriber:
             raise VoiceNoSpeechDetected("Nao detetei fala.")
         return text
 
+    def prewarm_stt(self) -> bool:
+        """Warm the GPU STT worker ahead of the first turn. No-op (False)
+        with the default openai-whisper STT. Blocking; raises on failure."""
+        if self.stt_provider != "faster-whisper":
+            return False
+        if self._stt_backend is None:
+            from assistant.stt_backend import FasterWhisperBackend
+            self._stt_backend = FasterWhisperBackend(model=self.model_name)
+        self._stt_backend.warmup()
+        return True
+
     def close(self) -> None:
         if self._stt_backend is not None:
             self._stt_backend.close()

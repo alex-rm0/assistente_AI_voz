@@ -89,6 +89,27 @@ class FasterWhisperBackend:
             print(f"[STT_BACKEND] provider=faster-whisper model={self.model} device=cuda transcription_ms={(time.perf_counter()-started)*1000:.0f}", flush=True)
             return result["result"]
 
+    def warmup(self):
+        """Start the worker and run one short silent transcription, so the
+        first real turn pays neither the model load nor the first CUDA
+        inference (~4.7 s + ~1.3 s). Blocking: call it off the UI thread.
+        Raises like transcribe() (no CUDA, out of memory, closed)."""
+        import tempfile
+        import wave
+
+        handle, name = tempfile.mkstemp(prefix="echo_stt_warmup_", suffix=".wav")
+        os.close(handle)
+        path = Path(name)
+        try:
+            with wave.open(str(path), "wb") as clip:
+                clip.setnchannels(1)
+                clip.setsampwidth(2)
+                clip.setframerate(16000)
+                clip.writeframes(b"\x00\x00" * 8000)  # 0.5 s of silence
+            self.transcribe(path, language="pt", initial_prompt="")
+        finally:
+            path.unlink(missing_ok=True)
+
     def _terminate(self):
         process, self.process = self.process, None
         if process is None:
