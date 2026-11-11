@@ -1871,6 +1871,7 @@ class EchoUIController(QObject):
                     "short_capture_after_barge_in",
                     approx_ms=int(float(outcome.get("speech_ms") or 0.0)),
                     min_speech_ms=getattr(getattr(self.voice_transcriber, "vad_config", None), "min_speech_ms", "n/a"),
+                    carried_over=getattr(self.voice_transcriber, "_barge_in_carryover", None) is not None,
                 )
             self._barge_in_recent = False
             self._log_voice("benign_retry")

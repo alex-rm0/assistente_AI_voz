@@ -332,6 +332,12 @@ def play_last_voice_input(debug_audio_path: Path | str = DEFAULT_DEBUG_AUDIO_PAT
 class VoiceTranscriber:
     """Records microphone audio and transcribes it with a local Whisper model."""
 
+    # A confirmed barge-in whose capture ends too short keeps its audio for
+    # this long: the next normal capture starts with it (pre-roll) and counts
+    # its speech, so the start of the user's sentence is not lost.
+    BARGE_IN_CARRYOVER_TTL_S = 5.0
+    _barge_in_carryover: tuple[list[Any], float, float] | None = None
+
     def __init__(
         self,
         model_name: str = "base",
@@ -711,6 +717,17 @@ class VoiceTranscriber:
         capture_ended_at = time.perf_counter()
         with lock:
             captured_frames = list(frames)
+        carried_ms = 0.0
+        carryover = self._barge_in_carryover
+        if not require_confirmation_before_recording and carryover is not None and tracker.speech_ms > 0:
+            self._barge_in_carryover = None
+            carried_frames, carried_ms, stashed_at = carryover
+            if capture_ended_at - stashed_at <= self.BARGE_IN_CARRYOVER_TTL_S:
+                captured_frames = carried_frames + captured_frames
+                _log_vad("barge_in_carryover_prepended", carried_speech_ms=int(carried_ms))
+            else:
+                carried_ms = 0.0
+        speech_ms = tracker.speech_ms + carried_ms
 
         _log_vad(
             "speech_ended",
@@ -721,7 +738,8 @@ class VoiceTranscriber:
         )
         self.last_vad_outcome = {
             "reason": reason,
-            "speech_ms": tracker.speech_ms,
+            "speech_ms": speech_ms,
+            "carried_over_speech_ms": carried_ms,
             "trailing_silence_ms": tracker.trailing_silence_ms,
             "total_capture_ms": tracker.total_ms,
             # Phase 7.6.2 (section 5): aggregate diagnostics -- the
@@ -759,13 +777,16 @@ class VoiceTranscriber:
             # Section 8: no real speech was ever detected -- never write a
             # WAV or invoke Whisper for pure silence.
             raise VoiceNoSpeechDetected("Nao detetei fala.")
-        if tracker.speech_ms < config.min_speech_ms:
+        if speech_ms < config.min_speech_ms:
             # Section 6: a brief noise burst crossed the loudness threshold
             # but never amounted to a real utterance -- benign, same as
             # manual MIC's "recording too short", never invokes Whisper.
+            if require_confirmation_before_recording:
+                self._barge_in_carryover = (captured_frames, speech_ms, capture_ended_at)
+                _log_vad("barge_in_carryover_kept", speech_ms=int(speech_ms))
             raise VoiceInputError(
                 "A fala detetada foi demasiado curta. "
-                f"Fala detetada: {tracker.speech_ms:.0f}ms; o minimo e {config.min_speech_ms}ms."
+                f"Fala detetada: {speech_ms:.0f}ms; o minimo e {config.min_speech_ms}ms."
             )
 
         temp_file = tempfile.NamedTemporaryFile(prefix="assistenteia_voice_", suffix=".wav", delete=False)
