@@ -81,14 +81,23 @@ def test_find_ollama_provider_in_plain_and_routed_llms() -> None:
     assert find_ollama_provider(None) is None
 
 
-def test_warmup_warms_stt_then_ollama(monkeypatch, capsys) -> None:
+def test_warmup_warms_ollama_first_then_stt(monkeypatch, capsys) -> None:
+    order: list[str] = []
     posts = _Posts()
-    monkeypatch.setattr(model_warmup.requests, "post", posts)
+
+    def recording_post(*args, **kwargs):
+        order.append("ollama")
+        return posts(*args, **kwargs)
+
+    monkeypatch.setattr(model_warmup.requests, "post", recording_post)
     transcriber = _Transcriber()
+    original = transcriber.prewarm_stt
+    transcriber.prewarm_stt = lambda: (order.append("stt"), original())[1]
 
     warmup = ModelWarmup(transcriber=transcriber, llm=_llm())
     warmup.run()
 
+    assert order == ["ollama", "stt"]
     assert transcriber.warmed == 1
     assert [call["keep_alive"] for call in posts.calls] == [-1]
     assert warmup.results == {"stt": "ready", "ollama": "ready"}
@@ -148,17 +157,23 @@ def _controller(transcriber, *, delay_ms: int = 20):
     return controller
 
 
-def test_controller_warms_models_after_ui_ready(monkeypatch) -> None:
+def test_controller_warms_ollama_at_once_and_stt_after_ui_ready(monkeypatch) -> None:
+    # Ollama is an external process (does not compete with the UI): warm it
+    # right away, so typed chats and early voice turns find it loaded. The
+    # GPU STT still waits for the UI to be ready plus the startup delay.
     posts = _Posts()
     monkeypatch.setattr(model_warmup.requests, "post", posts)
     transcriber = _Transcriber()
-    controller = _controller(transcriber)
+    controller = _controller(transcriber, delay_ms=150)
     try:
-        _run_until(lambda: False, timeout_ms=60)
-        assert transcriber.warmed == 0  # nothing before the UI is ready
-        controller.notify_ui_ready()
-        assert _run_until(lambda: transcriber.warmed == 1 and len(posts.calls) == 1, timeout_ms=2000)
+        assert _run_until(lambda: len(posts.calls) == 1, timeout_ms=1000)  # before the UI is ready
         assert posts.calls[0]["keep_alive"] == -1
+        assert transcriber.warmed == 0
+        controller.notify_ui_ready()
+        _run_until(lambda: False, timeout_ms=60)
+        assert transcriber.warmed == 0  # STT waits for the startup delay
+        assert _run_until(lambda: transcriber.warmed == 1, timeout_ms=2000)
+        assert len(posts.calls) == 1  # Ollama is not warmed twice
     finally:
         controller.shutdown()
 
@@ -181,7 +196,6 @@ def test_controller_close_unloads_ollama_without_blocking(monkeypatch) -> None:
     for thread in threading.enumerate():
         if thread.name == "EchoOllamaUnload":
             thread.join(timeout=2)
-
 
 # --- regression: no thread when there is nothing to warm ----------------------
 # A Python thread can run the garbage collector and destroy dead Qt wrappers

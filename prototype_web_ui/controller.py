@@ -443,21 +443,26 @@ class EchoUIController(QObject):
         self._tts_startup_prewarm_timer = QTimer(self)
         self._tts_startup_prewarm_timer.setSingleShot(True)
         self._tts_startup_prewarm_timer.timeout.connect(self._prewarm_tts)
-        # R2: GPU STT + Ollama warm-up on the same timer (assistant/model_warmup.py).
-        self._model_warmup: ModelWarmup | None = None
+        # R2 (assistant/model_warmup.py): Ollama is an external process that
+        # does not compete with the UI, so it warms right away (also for
+        # typed chats); the GPU STT warms on the same timer as Pocket.
+        engine = getattr(self.responder, "__self__", None)
+        self._model_warmup = ModelWarmup(transcriber=self.voice_transcriber, llm=getattr(engine, "llm", None))
         self._tts_startup_prewarm_timer.timeout.connect(self._prewarm_models)
+        # Started directly (a plain background thread, no Qt timer that could
+        # fire after this controller's C++ object is gone).
+        self._model_warmup.start_ollama()
 
     _TTS_STARTUP_PREWARM_DELAY_MS = 3000
 
     @Slot()
     def _prewarm_models(self) -> None:
-        # Background, once, never after shutdown began; failures are logged
-        # by ModelWarmup and the first turn pays the cold start as before.
-        if self._model_warmup is not None or self._shutdown_requested:
+        # Background, each model once, never after shutdown began; failures
+        # are logged by ModelWarmup and the first turn pays the cold start.
+        if self._shutdown_requested:
             return
-        engine = getattr(self.responder, "__self__", None)
-        self._model_warmup = ModelWarmup(transcriber=self.voice_transcriber, llm=getattr(engine, "llm", None))
-        self._model_warmup.start()
+        self._model_warmup.start_ollama()
+        self._model_warmup.start_stt()
 
     def _release_local_models(self) -> None:
         # App close, never waiting: stop a warm-up in flight and ask Ollama
