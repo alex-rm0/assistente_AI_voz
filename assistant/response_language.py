@@ -479,6 +479,14 @@ _STRINGS: dict[str, tuple[str, str]] = {
         "Não tenho memória suficiente para confirmar essa duração.",
         "I don't have enough memory to confirm that duration.",
     ),
+    "planner.resume_project": (
+        "Boa. Podemos retomar o projeto {project}. Eu começaria por rever onde ficámos, olhar para as tarefas pendentes e escolher um próximo passo pequeno.",
+        "Good. We can pick up the {project} project. I'd start by reviewing where we left off, looking at the pending tasks and choosing a small next step.",
+    ),
+    "planner.resume_no_email": (
+        "Não há nenhum email em curso. Queres começar um? Diz-me para quem é.",
+        "There's no email in progress. Do you want to start one? Tell me who it's for.",
+    ),
     "guard.activity_claim": (
         "Não sei o que estiveste a fazer. Posso dizer-te que janela tens aberta agora, se me perguntares.",
         "I don't know what you were doing. I can tell you which window you have open right now if you ask me.",

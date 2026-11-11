@@ -4,6 +4,8 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 
+from assistant.response_language import localize
+
 
 @dataclass(frozen=True)
 class PlannerAction:
@@ -58,6 +60,7 @@ def plan_user_request(
     last_session_summary: str = "",
     tools_available: str = "",
     presence_state: str = "ACTIVE_CONVERSATION",
+    response_language: str = "",
 ) -> PlannerResult:
     """Create a non-executing plan from user intent and local context."""
 
@@ -105,10 +108,12 @@ def plan_user_request(
             ],
             recommended_actions=[],
             needs_confirmation=False,
+            # An active or paused email task is resumed by the conversation's
+            # task routing before the agent runs: an email here has none.
             direct_response=(
-                f"Boa. Podemos retomar o projeto {related_project}. "
-                "Eu comecaria por rever onde ficamos, olhar para as tarefas pendentes "
-                "e escolher um proximo passo pequeno."
+                localize("planner.resume_no_email", response_language)
+                if re.search(r"\b(?:e-?mail|mail)\b", text)
+                else localize("planner.resume_project", response_language, project=related_project)
             ),
         )
 

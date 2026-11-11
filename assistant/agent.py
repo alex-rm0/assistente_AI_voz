@@ -279,6 +279,7 @@ class Agent:
             last_session_summary=context.session_summary,
             tools_available=tools_description,
             presence_state=context.presence_state,
+            response_language=context.response_language,
         )
 
     def _try_planner_recommended_action(
