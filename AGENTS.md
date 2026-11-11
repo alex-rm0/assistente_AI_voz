@@ -23,10 +23,10 @@ CLAUDE.md e AGENTS.md têm o mesmo conteúdo: altera sempre os dois.
   com outro agente: os tempos e a memória da GPU ficam contaminados.
 
 ## Trabalho paralelo
-- A worktree `../assistenteIA-par` (branch `stab/paralelo`) é dona, até ao
-  merge, de: `assistant/voice_input.py`, `assistant/stt_*.py`,
-  `assistant/wake_recognizer.py`, `prototype_web_ui/controller.py` e
-  `scripts/benchmark_stt.py`. Fora dela, não edites estes ficheiros.
+- O `stab/paralelo` foi integrado no main (merge `7741fc9`). Nenhuma
+  worktree é dona de ficheiros: todos se editam no main.
+- Antes de usar a GPU (benchmarks, STT em GPU), confirma com `nvidia-smi`
+  que nenhum outro agente a está a usar.
 
 ## Referências
 - KNOWN_ISSUES.md: problemas conhecidos e o seu estado.
