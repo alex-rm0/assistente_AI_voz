@@ -11677,9 +11677,6 @@ _UNGROUNDED_MEMORY_CLAIM_MARKERS = (
 # turn — this is the defense-in-depth backstop for phrasings that slip
 # through with tools_used=[] anyway.
 _UNGROUNDED_ACTIVITY_CLAIM_MARKERS = (
-    "i was just waiting for you",
-    "just the usual system checks",
-    "i was running system checks",
     "se nao me engano",
     "se não me engano",
     "estavas a trabalhar",
@@ -11699,16 +11696,34 @@ def _detect_ungrounded_memory_claim(response: str) -> str:
     return ""
 
 
+# English: Echo describing activity of its own, which it never has ("I've
+# been running some checks", "I was waiting for you"). Short first-person
+# past patterns rather than one conversation's exact phrases; "going/
+# wondering/hoping" are left out ("I was going to suggest..."). Plus the
+# recurring self-state filler "the usual system checks".
+_ECHO_OWN_ACTIVITY_PATTERNS = (
+    re.compile(r"\bi(?:'ve| have)? been (?:busy\b|\w+ing\b)"),
+    re.compile(r"\bi was (?:just )?(?!going\b|wondering\b|hoping\b)\w+ing\b"),
+    re.compile(r"\bi(?:'ve| have)? just (?:finished|completed|updated|checked|reviewed|organi[sz]ed|cleaned)\b"),
+    re.compile(r"\bi spent (?:the|my|some|all) \w+"),
+    re.compile(r"\b(?:usual|routine|regular) (?:system )?checks\b"),
+)
+
+
 def _detect_ungrounded_activity_claim(response: str) -> str:
     normalized = _normalize_text(response)
     for marker in _UNGROUNDED_ACTIVITY_CLAIM_MARKERS:
         if _normalize_text(marker) in normalized:
             return marker
+    english = normalized.replace("\u2019", "'")
+    for pattern in _ECHO_OWN_ACTIVITY_PATTERNS:
+        match = pattern.search(english)
+        if match:
+            return match.group(0)
     return ""
 
 
 _WORKSPACE_OPERATION_REQUEST_MARKERS = (
-    "open",
     "abre",
     "abrir",
     "mostra",
@@ -11736,9 +11751,17 @@ _WORKSPACE_OPERATION_SUCCESS_CLAIM_MARKERS = (
 )
 
 
+# English "open" only as a request to open ("open the...", "can you open",
+# "please open") -- not "what window is open?" or "open-source".
+_OPEN_REQUEST_RE = re.compile(r"^(?:please )?open\s|\b(?:can|could|would) you (?:please )?open\b|\bplease open\b")
+
+
 def _detect_ungrounded_workspace_operation_claim(user_message: str, response: str) -> str:
     normalized_message = _normalize_text(user_message)
-    if not contains_any_phrase(normalized_message, _WORKSPACE_OPERATION_REQUEST_MARKERS):
+    if not (
+        contains_any_phrase(normalized_message, _WORKSPACE_OPERATION_REQUEST_MARKERS)
+        or _OPEN_REQUEST_RE.search(normalized_message.strip())
+    ):
         return ""
     normalized_response = _normalize_text(response)
     for marker in _WORKSPACE_OPERATION_SUCCESS_CLAIM_MARKERS:
