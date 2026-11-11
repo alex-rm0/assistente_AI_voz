@@ -11974,6 +11974,17 @@ _OPEN_REQUEST_RE = re.compile(r"^(?:please )?open\s|\b(?:can|could|would) you (?
 
 
 def _detect_ungrounded_workspace_operation_claim(user_message: str, response: str) -> str:
+    # These are execution claims even when the user merely asks for the
+    # filename or why a card is visible. Quotes are content, not execution.
+    unquoted = re.sub(r'"[^"]*"|“[^”]*”|`[^`]*`', "", response)
+    normalized_unquoted = _normalize_text(unquoted).replace("’", "'")
+    write_claim = re.search(
+        r"\b(?:i(?:'ve| have)?\s+(?:saved|stored|created|added|written)|"
+        r"(?:it|the (?:task|file|email|note|draft))\s*(?:'s|is|was|has been)\s+(?:saved|stored|created|added))\b",
+        normalized_unquoted,
+    )
+    if write_claim:
+        return write_claim.group(0)
     normalized_message = _normalize_text(user_message)
     if not (
         contains_any_phrase(normalized_message, _WORKSPACE_OPERATION_REQUEST_MARKERS)
