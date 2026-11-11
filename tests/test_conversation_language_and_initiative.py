@@ -43,6 +43,27 @@ def test_unsourced_agenda_claim_is_blocked_without_extra_call(tmp_path):
     assert local.calls == []
 
 
+@pytest.mark.parametrize("claim", [
+    "Nothing in particular is scheduled for today. Would you like me to suggest some general tasks or activities?",
+    "Nothing is planned for today.",
+    "Your calendar is empty today.",
+])
+def test_live_agenda_variants_without_evidence_are_blocked(tmp_path, claim):
+    engine, local = english_engine(tmp_path)
+    response = engine._complete_turn("O que é que podemos fazer hoje?", claim,
+                                     "RESPONSE_COMPOSER", selected_path="GENERAL_CONVERSATION")
+    assert response != claim
+    assert engine._last_response_blocked
+    assert local.calls == []
+
+
+def test_explicit_empty_schedule_is_not_mistaken_for_invention(tmp_path):
+    engine, _ = english_engine(tmp_path)
+    claim = "Nothing is scheduled for today."
+    assert engine._complete_turn("I have nothing scheduled today.", claim,
+                                  "RESPONSE_COMPOSER", selected_path="GENERAL_CONVERSATION") == claim
+
+
 def test_grounded_invitation_uses_real_task_without_copying_it(tmp_path):
     engine, local = english_engine(tmp_path)
     from assistant.long_term_memory import LongTermMemory
