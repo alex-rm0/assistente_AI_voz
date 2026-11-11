@@ -2359,6 +2359,10 @@
         if (eyebrow) eyebrow.textContent = typeLabel(node.dataset.type);
         const close = node.querySelector(".workspace-object__close");
         if (close) close.setAttribute("aria-label", CLOSE_LABELS[uiLanguage]);
+        const obj = objects.get(node.dataset.id);
+        if (obj && obj.type === "writing_task" && obj.metadata.semanticPayload) {
+          fillBody(node.querySelector(".workspace-object__body"), obj);
+        }
         node.querySelectorAll(".workspace-object__actions button, .workspace-object__actions-secondary button").forEach((button) => {
           button.textContent = actionLabel(button.dataset.action);
         });

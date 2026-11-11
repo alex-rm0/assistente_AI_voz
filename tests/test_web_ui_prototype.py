@@ -3867,6 +3867,32 @@ def test_writing_card_renders_payload_as_text_not_html() -> None:
     assert "semanticPayload" in body and "textContent" in body
 
 
+def test_writing_card_relabels_existing_body_on_language_switch() -> None:
+    result = _run_workspace_harness_with_dom(
+        """
+        controller.upsertSemanticObject({id: "email-lang", kind: "writing_task", title: "Email", payload: {recipient: ""}});
+        controller.render();
+        function cards(root) {
+          return (root.children || []).flatMap((child) => [
+            ...(String(child.className).split(" ").includes("workspace-object") ? [child] : []), ...cards(child)]);
+        }
+        const nodes = cards(containerEl);
+        nodes.forEach((node) => { node.querySelectorAll = () => []; });
+        containerEl.querySelectorAll = () => nodes;
+        const card = nodes.find((node) => node.dataset.id === "email-lang");
+        const body = card.querySelector(".workspace-object__body");
+        const before = body.children.map((node) => node.textContent).join(" ");
+        controller.setLanguage("en-GB");
+        const after = body.children.map((node) => node.textContent).join(" ");
+        console.log(JSON.stringify({before, after, count: controller.listObjects().length, id: card.dataset.id}));
+        """,
+        {"left": 0, "top": 0, "right": 1328, "bottom": 860, "width": 1328, "height": 860},
+    )
+    assert result["before"].startswith("A aguardar ")
+    assert result["after"] == "Waiting for a recipient."
+    assert result["count"] == 1 and result["id"] == "email-lang"
+
+
 # --- Phase 3C: Cognitive Layout Baseline. The real Qt manual test showed
 # cards pinned to the top-left corner, a list rendered as a full-height
 # sidebar, and side_by_side surfaces stretched across the whole viewport
