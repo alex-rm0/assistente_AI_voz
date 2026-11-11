@@ -305,12 +305,25 @@ class ChatterboxLocalProvider:
         )
         self._model_load_ms = 0.0
         self._last_error = ""
-        self._device = self._select_device()
+        # Resolved lazily: _select_device() imports torch (~1.5 s), so only
+        # pay it when Chatterbox is really used (server start / synthesis).
+        self._resolved_device: str | None = None
         self._probe_cache: bool | None = None
         self._process: _ChatterboxServerProcess | None = None
         self._server_failed = False
         self._request_counter = 0
         self._lock = threading.Lock()
+
+    @property
+    def _device(self) -> str:
+        if self._resolved_device is None:
+            self._resolved_device = self._select_device()
+        return self._resolved_device
+
+    def _requested_device(self) -> str:
+        # Unresolved value ("auto" by default), shown in diagnostics until
+        # Chatterbox is used.
+        return str(self.env.get("ECHO_TTS_CHATTERBOX_DEVICE") or "auto").strip().lower()
 
     def is_available(self) -> bool:
         return self._dependency_available()
@@ -341,7 +354,7 @@ class ChatterboxLocalProvider:
             "model_load_ms": int(self._model_load_ms),
             "runtime_python": str(self.runtime_python),
             "runner_path": str(self.runner_path),
-            "device": self._device,
+            "device": self._resolved_device or self._requested_device(),
             "last_error": self._last_error,
             "discovered_voice_count": len(voices),
             "synthesizable_voice_count": len([voice for voice in voices if voice.available and voice.synthesizable]),
@@ -449,8 +462,10 @@ class ChatterboxLocalProvider:
             return False
         try:
             runner = self.command_runner or subprocess.run
+            # The probe only checks dependencies; an explicit device keeps
+            # the runner from importing torch just to resolve "auto".
             completed = runner(
-                [str(self.runtime_python), str(self.runner_path), "--probe", "--device", self._device],
+                [str(self.runtime_python), str(self.runner_path), "--probe", "--device", self._resolved_device or "cpu"],
                 check=False,
                 capture_output=True,
                 text=True,
