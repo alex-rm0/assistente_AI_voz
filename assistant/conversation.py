@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from assistant.agent import Agent, AgentContext, system_state_tool_intent
+from assistant.artifact_export import export_kind, presentation_to_text
 from assistant.addressable_content import (
     build_addressable_content,
     detect_content_operation,
@@ -1136,6 +1137,10 @@ class AssistantEngine:
         # enter the slot-aware PendingWritingTask workflow. ActiveTaskContext
         # may still own the broader workspace activity model, but email
         # execution state is not duplicated into a second compose_email task.
+        export_response = self._try_artifact_export(user_message)
+        if export_response is not None:
+            return self._complete_turn(user_message, export_response, "ARTIFACT_EXPORT", technical=True,
+                                       selected_path="ARTIFACT_EXPORT", tools_used=self._last_fast_tools_used)
         draft_response = self._try_writing_draft_followup(user_message)
         if draft_response is not None:
             return self._complete_turn(user_message, draft_response, "WRITING_WORKFLOW",
@@ -3781,9 +3786,12 @@ class AssistantEngine:
             # semantic object, so an existing task artifact can later
             # participate in representation transformation without a
             # second, parallel identity. Never affects the event below.
+            previous = self._work_session.objects.get(ctx.active_artifact_id)
             register_object(
                 self._work_session,
-                SemanticObject(id=ctx.active_artifact_id, kind="task_artifact", title=title, payload={"task_type": ctx.task_type, "status": ctx.status}, task_id=ctx.id),
+                SemanticObject(id=ctx.active_artifact_id, kind="task_artifact", title=title,
+                               payload={**(previous.payload if previous else {}), "task_type": ctx.task_type, "status": ctx.status,
+                                        "content": content, "presentation": presentation}, task_id=ctx.id),
             )
             self._queue_ui_event(
                 "task_artifact_updated",
@@ -3796,6 +3804,7 @@ class AssistantEngine:
                     "subtitle": _task_status_label(ctx.status, self.response_language),
                     "content": content,
                     "presentation": presentation,
+                    "saved_file": previous.payload.get("saved_file", "") if previous else "",
                 },
             )
             return
@@ -5261,6 +5270,49 @@ class AssistantEngine:
             self._turn_trace["semantic_association_count"] = len(candidates)
         labels = _criteria_label([obj.title for obj in candidates])
         return f"Associei {labels} a essa comparação."
+
+    def _try_artifact_export(self, user_message: str) -> str | None:
+        kind = export_kind(user_message)
+        if kind is None or kind == "compose_email" or not self.presence.can_use_tools():
+            return None
+        if self._active_document_context is not None and kind in {"", "document"}:
+            return None
+        if self._pending_writing_task is not None and not kind:
+            return None
+        tasks = ([self._active_task_context] if self._active_task_context is not None else []) + list(self._paused_task_stack)
+        tasks = [task for task in tasks if task.task_type != "compose_email"]
+        if not tasks:
+            return None
+        resolution = resolve_semantic_targets(user_message, self._work_session, "workspace_reference")
+        matched_ids = {match.task_id for match in resolution.matches}
+        candidates = [task for task in tasks if task.id in matched_ids]
+        if not candidates:
+            candidates = [task for task in tasks if task.task_type == kind] if kind else tasks[:1]
+        if len(candidates) != 1 or resolution.ambiguous:
+            return localize("writing.which_draft", self.response_language)
+        task = candidates[0]
+        if _contains_path_traversal(user_message) or re.search(r"\b[A-Za-z]:[\\/]|\\\\", user_message):
+            return localize("writing.save_failed", self.response_language)
+        output = _extract_output_txt_filename(user_message)
+        if not output:
+            match = re.search(r"\b(?:em|to|as|chamado|called)\s+([^\s,;]+\.txt)\b", user_message, re.I)
+            output = match[1] if match else ""
+        title = _generic_task_title(task, self.response_language)
+        view = cognitive_task_view_model(self._work_session, task, title=title, response_language=self.response_language)
+        obj = self._work_session.objects.get(task.active_artifact_id)
+        content = str(task.parameters.get("generated_draft") or (obj.payload.get("draft_content") if obj else "") or "")
+        if not content:
+            content = presentation_to_text(view, self.response_language)
+        if not output:
+            topic = task.parameters.get("destination") or task.parameters.get("topic") or ""
+            output = _automatic_export_filename(self.workspace_path, f"{title} {topic}")
+        result = self._create_workspace_txt(output, content, tools_used=("create_workspace_file",))
+        if not result.startswith("Criei o ficheiro"):
+            return localize("writing.save_failed", self.response_language)
+        if obj is not None:
+            obj.payload["saved_file"] = f"workspace/{output}"
+        self._update_task_artifact_ui(task)
+        return localize("writing.saved", self.response_language, path=f"workspace/{output}")
 
     def _try_writing_draft_followup(self, user_message: str) -> str | None:
         if not self.presence.can_use_tools():
