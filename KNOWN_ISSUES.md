@@ -210,3 +210,24 @@ foram corrigidos**. Cada entrada tem o sintoma, a evidência e o estado.
   curiosidade ("Did you want a simple fact or a more interesting
   curiosity?") em vez de a dizer.
 - **Estado:** aberto.
+
+## 11. Fecho da app durante o arranque do Pocket TTS
+
+- **Sintoma:** se a app fechar enquanto o prewarm do Pocket TTS (`9f86f03`)
+  ainda está a arrancar o servidor, a janela esconde-se logo, mas o
+  processo só sai quando o arranque acaba. Na bateria de 2026-11-11 foram
+  2993 ms (antes 54 ms), com o servidor a demorar 14 s; isolado demora
+  ~5–6 s. Com um servidor preso, a espera ia até ao timeout de carregamento
+  (60 s por omissão).
+- **Estado:** parcialmente corrigido.
+  - **Corrigido em `assistant/tts.py` (commit "fix: cancellable Pocket TTS
+    startup"):** `PocketTTSLocalProvider.shutdown()` fecha o processo em
+    arranque sem esperar pelo `_lock`. Quando o stdout do servidor acaba, o
+    `start()` falha logo em vez de esperar pelo timeout. Testes:
+    `tests/test_pocket_tts_cancellable_start.py`.
+  - **Falta, em `prototype_web_ui/controller.py` (atribuído à worktree
+    paralela `../assistenteIA-par`, que é dona do ficheiro até ao merge):**
+    `request_shutdown()` tem de parar o TTS manager
+    (`_shutdown_tts_manager()`) quando há um prewarm do TTS em curso. Hoje
+    o drain espera que o prewarm acabe sozinho, por isso a espera da
+    bateria mantém-se até essa parte entrar.
