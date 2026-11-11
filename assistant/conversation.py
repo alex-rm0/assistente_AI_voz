@@ -3395,6 +3395,8 @@ class AssistantEngine:
         normalized = _normalize_text(user_message).strip(" .!?")
         if not normalized:
             return None
+        if _asks_to_read_file(normalized) and re.search(r"\.(?:txt|md|pdf|docx)\b", user_message, re.I):
+            return None
         ctx_before = self._active_task_context
         had_active_task = ctx_before is not None and ctx_before.status not in ("completed", "cancelled", "paused")
         response = self._process_task_turn(user_message, normalized)
@@ -5300,6 +5302,12 @@ class AssistantEngine:
             return None
         if self._active_document_context is not None and kind in {"", "document"}:
             return self._export_document_content(user_message)
+        document = self._active_document_context
+        if kind == "compose_email" and document is not None and document.prepared_action == "compose_email" and self._pending_writing_task is None:
+            other_drafts = any(obj.kind == "writing_task" and obj.payload.get("draft_content") for obj in self._work_session.objects.values())
+            if not other_drafts or self._last_selected_path == "DOCUMENT_TASK":
+                return self._export_document_content(user_message)
+            return localize("artifact.which", self.response_language)
         active = self._active_task_context
         if kind == "compose_email" and (self._pending_writing_task is not None or active is None or active.task_type != "compose_email"):
             return None
@@ -5357,7 +5365,8 @@ class AssistantEngine:
         content = context.prepared_content if summary_requested else context.draft_content or context.prepared_content
         if not content:
             return localize("artifact.no_content", self.response_language)
-        title = Path(context.resolved_file).stem + " " + localize("artifact.summary" if summary_requested else "artifact.revised", self.response_language)
+        label = "email" if context.prepared_action == "compose_email" and not context.draft_content else localize("artifact.summary" if summary_requested else "artifact.revised", self.response_language)
+        title = Path(context.resolved_file).stem + " " + label
         output = _export_filename_for_request(self.workspace_path, user_message, title)
         tools = (("read_workspace_document",) if reloaded else ()) + ("create_workspace_file",)
         result = self._create_workspace_txt(output, content, tools_used=tools)
@@ -6365,7 +6374,7 @@ class AssistantEngine:
             )
         )
         self._last_fast_tools_used = ("workspace_search", "read_workspace_document")
-        document_action = request.action or ("summarize" if "summarize" in request.actions else "read")
+        document_action = "compose_email" if "compose_email" in request.actions else request.action or ("summarize" if "summarize" in request.actions else "read")
         if document_action != "read" and composed.strip():
             active_context.prepared_content = composed
             active_context.prepared_action = document_action

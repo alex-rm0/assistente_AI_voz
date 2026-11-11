@@ -254,3 +254,23 @@ def test_document_summary_is_also_the_content_sent_to_its_card(tmp_path):
     engine.respond("Resume o ficheiro notes.txt.")
     events = [json.loads(event) for event in engine.consume_ui_events()]
     assert any(event["type"] == "document_draft_ready" and event.get("content") == summary for event in events)
+
+
+@pytest.mark.parametrize("other_task", [False, True])
+def test_email_prepared_from_document_is_not_confused_with_an_older_email(tmp_path, other_task):
+    from tests.test_conversation_language_and_initiative import make_email_draft
+    engine, local, older_id, older_draft = make_email_draft(tmp_path)
+    if other_task:
+        engine.respond("Compara Samsung com Apple")
+    prepared = "Subject: Notes\n\nHi Ana,\n\nThe report is due on Friday.\n\nAlexandre"
+    (engine.workspace_path / "notes.txt").write_text("The report is due on Friday.", encoding="utf-8")
+    local.replies.append(prepared)
+    response = engine.respond("Lê o ficheiro notes.txt e escreve um email para a Ana com o resumo.")
+    assert prepared == response
+    calls = len(local.calls)
+    engine.respond("Guarda esse email num ficheiro.")
+    files = list(engine.workspace_path.glob("*.txt"))
+    exported = [p for p in files if p.name != "notes.txt"]
+    assert len(exported) == 1 and exported[0].read_text(encoding="utf-8") == prepared
+    assert engine._work_session.objects[older_id].payload["draft_content"] == older_draft
+    assert len(local.calls) == calls
