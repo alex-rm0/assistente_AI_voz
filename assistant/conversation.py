@@ -6980,7 +6980,7 @@ class AssistantEngine:
         if final_response_source in {"RESPONSE_COMPOSER", "AGENT_DIRECT", "COMPOSER_REGENERATED"} and not tools_used and not technical:
             activity_claim_reason = _detect_ungrounded_activity_claim(final_response)
             if activity_claim_reason:
-                final_response = localize("guard.activity_claim", self.response_language)
+                final_response = localize("guard.own_activity_claim" if activity_claim_reason.startswith("own:") else "guard.activity_claim", self.response_language)
                 final_response_source = "ACTIVITY_CLAIM_BLOCKED"
                 self._last_response_blocked = True
                 if self._turn_trace is not None:
@@ -12154,7 +12154,7 @@ def _detect_ungrounded_activity_claim(response: str) -> str:
     for pattern in _ECHO_OWN_ACTIVITY_PATTERNS:
         match = pattern.search(english)
         if match:
-            return match.group(0)
+            return "own:" + match.group(0)  # Echo's own state, not the user's
     return ""
 
 

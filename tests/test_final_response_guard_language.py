@@ -87,6 +87,19 @@ GUARDS = {
             "en-GB": "I don't know what you were doing. I can tell you which window you have open right now if you ask me.",
         },
     ),
+    # Voice test 11/11: Echo describing its own state ("I've been running
+    # some checks") got the reply meant for claims about the user.
+    "own_activity_claim": (
+        "Por que paraste de responder?",
+        "I've been running some checks.",
+        "RESPONSE_COMPOSER",
+        "GENERAL_CONVERSATION",
+        "ACTIVITY_CLAIM_BLOCKED",
+        {
+            "pt-PT": "Nada de especial do meu lado.",
+            "en-GB": "Nothing much on my side.",
+        },
+    ),
     "workspace_claim": (
         "abre samasung",
         "Samsung está a abrir agora.",
