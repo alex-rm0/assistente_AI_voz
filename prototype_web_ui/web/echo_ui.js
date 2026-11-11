@@ -2180,6 +2180,7 @@
           kind: event.kind,
           title: event.title,
           taskId: event.task_id,
+          payload: event.payload,
         });
         return true;
       // Phase 3B (Cognitive Workspace Blueprint v2): REPRESENTATION

@@ -822,6 +822,14 @@
       const f = fields || {};
       if (!f.id) return null;
       const existing = objects.get(f.id);
+      const obj = existing || createObject({id: f.id, type: f.kind || "object", title: f.title || "", workspaceRole: "reference"});
+      if (f.taskId) obj.metadata.taskId = f.taskId;
+      if (f.payload && typeof f.payload === "object") {
+        obj.metadata.semanticPayload = {...f.payload};
+        if ((f.kind || obj.type) === "writing_task") {
+          obj.content = String(f.payload.draft_content || f.payload.purpose || "");
+        }
+      }
       if (existing) {
         if (f.title) existing.title = f.title;
         if (f.kind) existing.type = f.kind;
@@ -829,9 +837,7 @@
         scheduleRender();
         return existing;
       }
-      const created = createObject({id: f.id, type: f.kind || "object", title: f.title || "", workspaceRole: "reference"});
-      if (f.taskId) created.metadata.taskId = f.taskId;
-      return created;
+      return obj;
     }
 
     // --- Excerpts / sub-objects (Passo 3.2, section 9) -------------------
@@ -2188,6 +2194,23 @@
     function fillBody(host, obj) {
       while (host.firstChild || (host.children && host.children.length)) {
         host.removeChild(host.firstChild || host.children[0]);
+      }
+      if (obj.type === "writing_task" && obj.metadata.semanticPayload) {
+        const payload = obj.metadata.semanticPayload;
+        const english = uiLanguage === "en-GB";
+        const lines = payload.draft_content ? [String(payload.draft_content)] : [
+          payload.recipient ? `${english ? "To" : "Para"}: ${payload.recipient}` : (english ? "Waiting for a recipient." : "A aguardar destinatário."),
+          payload.purpose || "",
+        ];
+        if (payload.saved_file) lines.push(`${english ? "Saved to" : "Guardado em"}: ${payload.saved_file}`);
+        lines.filter(Boolean).forEach((line) => {
+          const paragraph = document.createElement("p");
+          paragraph.className = "workspace-object__text";
+          paragraph.style.whiteSpace = "pre-wrap";
+          paragraph.textContent = line;
+          host.appendChild(paragraph);
+        });
+        return;
       }
       const presentation = obj && obj.metadata ? obj.metadata.presentation : null;
       if (presentation && Array.isArray(presentation.sections)) {

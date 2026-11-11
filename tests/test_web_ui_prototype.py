@@ -3838,6 +3838,33 @@ def test_semantic_object_upserted_event_wired_in_echo_ui() -> None:
     case_block = ui_js[ui_js.index('case "semantic_object_upserted"'):ui_js.index('case "representation_changed"')]
     assert "objects.upsertSemanticObject(" in case_block
     assert "event.id" in case_block and "event.kind" in case_block and "event.title" in case_block
+    assert "payload: event.payload" in case_block
+
+
+def test_writing_semantic_payload_updates_same_card_without_losing_content() -> None:
+    result = _run_workspace_harness(
+        """
+        const first = controller.upsertSemanticObject({id: "email-one", kind: "writing_task", title: "Email", taskId: "task-one",
+          payload: {recipient: "Francisca and Carina", purpose: "Meeting this week", status: "collecting"}});
+        const collecting = first.content;
+        controller.upsertSemanticObject({id: "email-one", kind: "writing_task", title: "Email", taskId: "task-one",
+          payload: {recipient: "Francisca and Carina", draft_content: "Subject: Meeting\\n\\nHello Carina,", saved_file: "workspace/meeting.txt"}});
+        console.log(JSON.stringify({same: first === controller.getObject("email-one"), count: controller.listObjects().length,
+          collecting, draft: first.content, payload: first.metadata.semanticPayload, task: first.metadata.taskId}));
+        """
+    )
+    assert result["same"] and result["count"] == 1
+    assert "Meeting this week" in result["collecting"]
+    assert result["draft"] == "Subject: Meeting\n\nHello Carina,"
+    assert result["payload"]["saved_file"] == "workspace/meeting.txt"
+    assert result["task"] == "task-one"
+
+
+def test_writing_card_renders_payload_as_text_not_html() -> None:
+    source = WORKSPACE_JS_PATH.read_text(encoding="utf-8")
+    body = source[source.index("function fillBody("):source.index("function buildCognitiveTaskProjection(")]
+    assert 'obj.type === "writing_task"' in body
+    assert "semanticPayload" in body and "textContent" in body
 
 
 # --- Phase 3C: Cognitive Layout Baseline. The real Qt manual test showed
