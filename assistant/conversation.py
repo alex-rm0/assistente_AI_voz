@@ -13242,7 +13242,7 @@ def _looks_like_incomplete_writing_request(normalized_message: str) -> bool:
         return True
     return bool(
         re.search(
-            r"\b(?:ajuda|ajuda me|preciso|quero|podes|consegues)\b.*\b(?:num|no|com um|com o|para um|para o)?\s*(?:email|mail|mensagem)\b",
+            r"\b(?:ajuda|ajuda me|preciso|quero|podes|consegues)\b.*\b(?:escrever|redigir|preparar|mandar|enviar|compor|criar|fazer|responder)\b.*\b(?:email|mail|mensagem)\b|\bajuda(?: me)? (?:num|no|com um|com o|com uma) (?:email|mail|mensagem)\b",
             text,
         )
     )

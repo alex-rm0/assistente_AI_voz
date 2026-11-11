@@ -33,8 +33,22 @@ def test_email_request_opens_the_email_task(tmp_path: Path, message: str) -> Non
     assert _route(tmp_path, message) == ("WRITING_TASK", True)
 
 
-@pytest.mark.parametrize("message", ["recebi um mail", "o mail do João é engraçado"])
+@pytest.mark.parametrize(
+    "message",
+    [
+        "recebi um mail",
+        "o mail do João é engraçado",
+        # A request verb about an email, but not to write one.
+        "I need to check my email",
+        "help me find an email from João",
+        "I want to read my emails",
+        "preciso de ler o mail do João",
+        "queria ver os mails de hoje",
+    ],
+)
 def test_talking_about_an_email_is_not_a_request(tmp_path: Path, message: str) -> None:
+    # Other routes may answer (a read can go to the workspace search); the
+    # email-writing task must not open.
     path, pending = _route(tmp_path, message)
-    assert path == "GENERAL_CONVERSATION"
+    assert path != "WRITING_TASK"
     assert not pending
