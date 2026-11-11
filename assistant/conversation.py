@@ -119,10 +119,12 @@ from assistant.personal_assistant import (
 )
 from assistant.personal_model import PersonalModel, infer_category
 from assistant.presence_decision import (
+    REASON_VAGUE_ACTION_REFERENCE,
     PersonalCandidate,
     PreferredAddress,
     PresenceDecision,
     compute_presence_decision,
+    vague_action_kind,
 )
 from assistant.presence_manager import PresenceManager, PresenceState
 from assistant.proactive_suggestions import next_proactive_suggestion
@@ -1611,6 +1613,12 @@ class AssistantEngine:
         proactive_response = self._try_proactive_suggestion_question(user_message)
         if proactive_response is not None:
             return self._complete_turn(user_message, proactive_response, "RESPONSE_COMPOSER", selected_path="GENERAL_CONVERSATION")
+
+        vague_action_response = self._try_vague_action_clarification(user_message)
+        if vague_action_response is not None:
+            return self._complete_turn(
+                user_message, vague_action_response, "FAST_ROUTE", selected_path="VAGUE_ACTION_CLARIFICATION"
+            )
 
         # Local memory questions are answered before tool routing so the LLM
         # cannot confuse "lembras-te da pasta?" with "lista a pasta".
@@ -6861,6 +6869,30 @@ class AssistantEngine:
             )
         except Exception as exc:  # pragma: no cover - shadow diagnostics must never break a turn
             self._turn_trace.setdefault("presence_shadow_error", str(exc))
+
+    def _try_vague_action_clarification(self, user_message: str) -> str | None:
+        """A vague action request with nothing to refer to ("Marca isso",
+        "Send it") gets a fixed, localized question instead of the composer,
+        which asked generic questions or claimed to have done the action.
+        Decided by the Presence (VAGUE_ACTION_REFERENCE), which only does
+        so when there is no active task to refer to. Fail-closed like the
+        rest of the Presence: any error leaves the turn to the usual paths."""
+        task = self._active_task_context
+        try:
+            decision = compute_presence_decision(
+                user_message=user_message,
+                response_language=self.response_language,
+                active_task_present=task is not None,
+                active_task_unresolved=bool(task is not None and task.missing_information),
+                active_task_dense=bool(task is not None and task.status in {"working", "reviewing"}),
+                is_restart=False,
+            )
+        except Exception:
+            return None
+        if REASON_VAGUE_ACTION_REFERENCE not in decision.reason_codes:
+            return None
+        kind = vague_action_kind(user_message) or "other"
+        return localize(f"clarify.vague_action.{kind}", self.response_language)
 
     def _presence_question_discipline_instruction(self, user_message: str, source: str) -> str:
         """Phase 8.1 (sections 3/5/10/11): the FIRST activated Presence

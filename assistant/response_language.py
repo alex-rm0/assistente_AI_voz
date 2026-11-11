@@ -208,6 +208,14 @@ def looks_mixed_for_language(response: str, language: str) -> bool:
 _STRINGS: dict[str, tuple[str, str]] = {
     # --- assistant/tools.py: context-observer tool result headers -------
     "tool.windows_detected_header": ("Janelas detetadas:", "Open windows detected:"),
+    # Vague action request with nothing to refer to ("Marca isso"): fixed
+    # clarifying question, no LLM (presence_decision.vague_action_kind).
+    "clarify.vague_action.mark": ("O que queres que marque?", "What would you like me to mark?"),
+    "clarify.vague_action.send": ("O que queres que envie?", "What would you like me to send?"),
+    "clarify.vague_action.save": ("O que queres que guarde?", "What would you like me to save?"),
+    "clarify.vague_action.open": ("O que queres que abra?", "What would you like me to open?"),
+    "clarify.vague_action.do": ("O que queres que faça?", "What would you like me to do?"),
+    "clarify.vague_action.other": ("A que te referes?", "What are you referring to?"),
     "tool.no_system_context": (
         "Consigo tentar observar o computador, mas ainda não tenho dados suficientes. "
         "Experimenta mudar de janela ou aguardar alguns segundos.",
