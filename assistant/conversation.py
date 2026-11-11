@@ -378,6 +378,7 @@ class WorkSession:
     content_focus: dict[str, object] = field(default_factory=dict)
     prepared_output: dict[str, str] = field(default_factory=dict)
     last_export: str = ""
+    export_focus: tuple[str, str] | None = None
 
 
 def _local_ollama_semantic_extractor(llm) -> SemanticExtractor | None:
@@ -1845,6 +1846,7 @@ class AssistantEngine:
         self._paused_task_stack = []
         self._work_session.prepared_output.clear()
         self._work_session.last_export = ""
+        self._work_session.export_focus = None
         self.active_contexts = []
         self.last_context_debug = ""
         self.last_cognitive_reasoning = None
@@ -5300,21 +5302,24 @@ class AssistantEngine:
         kind = export_kind(user_message)
         if kind is None or not self.presence.can_use_tools():
             return None
-        if self._active_document_context is not None and kind in {"", "document"}:
+        focus_kind, focus_id = self._work_session.export_focus or ("", "")
+        if not kind and focus_kind == "writing":
+            return None
+        if self._active_document_context is not None and (kind == "document" or (not kind and focus_kind == "document")):
             return self._export_document_content(user_message)
         document = self._active_document_context
         if kind == "compose_email" and document is not None and document.prepared_action == "compose_email" and self._pending_writing_task is None:
             other_drafts = any(obj.kind == "writing_task" and obj.payload.get("draft_content") for obj in self._work_session.objects.values())
-            if not other_drafts or self._last_selected_path == "DOCUMENT_TASK":
+            if not other_drafts or focus_kind == "document":
                 return self._export_document_content(user_message)
             return localize("artifact.which", self.response_language)
         active = self._active_task_context
         if kind == "compose_email" and (self._pending_writing_task is not None or active is None or active.task_type != "compose_email"):
             return None
-        if self._pending_writing_task is not None and not kind:
+        if self._pending_writing_task is not None and not kind and focus_kind != "task":
             return None
         prepared = self._work_session.prepared_output
-        if not kind and prepared and self._last_selected_path == "TEXT_SUMMARIZATION":
+        if not kind and prepared and focus_kind == "summary":
             output = _export_filename_for_request(self.workspace_path, user_message, prepared["title"])
             result = self._create_workspace_txt(output, prepared["content"], tools_used=("create_workspace_file",))
             return localize("writing.saved", self.response_language, path=f"workspace/{output}") if result.startswith("Criei o ficheiro") else localize("writing.save_failed", self.response_language)
@@ -5324,6 +5329,8 @@ class AssistantEngine:
         resolution = resolve_semantic_targets(user_message, self._work_session, "workspace_reference")
         matched_ids = {match.task_id for match in resolution.matches}
         candidates = [task for task in tasks if task.id in matched_ids]
+        if not kind and focus_kind == "task" and not candidates:
+            candidates = [task for task in tasks if task.id == focus_id]
         if not candidates:
             candidates = [task for task in tasks if task.task_type == kind] if kind else tasks[:1]
         if len(candidates) != 1 or resolution.ambiguous:
@@ -6837,6 +6844,18 @@ class AssistantEngine:
         )
         if has_mojibake_markers(final_response):
             debug_text_encoding("assistant_engine_final_response", final_response)
+        if not self._last_response_blocked:
+            # Semantic export ownership survives language changes and social turns;
+            # an interrupted workflow must not reclaim another activity's output.
+            path = selected_path or source
+            if path == "DOCUMENT_TASK" and self._active_document_context is not None:
+                self._work_session.export_focus = ("document", self._active_document_context.resolved_file)
+            elif path.startswith("TASK_") and self._active_task_context is not None:
+                self._work_session.export_focus = ("task", self._active_task_context.id)
+            elif path == "WRITING_TASK" and self._pending_writing_task is not None:
+                self._work_session.export_focus = ("writing", self._pending_writing_task.active_artifact_id)
+            elif path == "TEXT_SUMMARIZATION":
+                self._work_session.export_focus = ("summary", "current")
         if selected_path == "TEXT_SUMMARIZATION" and not self._last_response_blocked:
             self._work_session.prepared_output = {"content": final_response, "title": localize("artifact.summary", self.response_language)}
         if remember and not self._last_response_blocked:
@@ -9159,13 +9178,21 @@ class AssistantEngine:
             # The open task card is rendered in the response language, so
             # re-send it (same artifact/task id) instead of waiting for the
             # next task turn.
-            if self._active_task_context is not None and self._active_task_context.active_artifact_id:
-                self._update_task_artifact_ui(self._active_task_context)
-            pending = self._pending_writing_task
-            if pending is not None and pending.active_artifact_id in self._work_session.objects:
-                obj = self._work_session.objects[pending.active_artifact_id]
-                obj.title = localize("writing.recipient_title", self.response_language, recipient=pending.recipient) if pending.recipient else localize("writing.preparation", self.response_language)
-                self._queue_semantic_object_sync(obj)
+            tasks = ([self._active_task_context] if self._active_task_context is not None else []) + self._paused_task_stack
+            seen = set()
+            for task in tasks:
+                if task.active_artifact_id and task.id not in seen:
+                    seen.add(task.id)
+                    self._update_task_artifact_ui(task)
+            for obj in self._work_session.objects.values():
+                if obj.kind != "writing_task":
+                    continue
+                recipient = str(obj.payload.get("recipient") or "")
+                key = "writing.recipient_title" if recipient else "writing.preparation"
+                automatic_titles = {localize(key, language, recipient=recipient) for language in (PORTUGUESE_PT, ENGLISH_GB)}
+                if obj.title in automatic_titles:
+                    obj.title = localize(key, self.response_language, recipient=recipient)
+                    self._queue_semantic_object_sync(obj)
             return command.confirmation
 
         return None

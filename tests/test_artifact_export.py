@@ -274,3 +274,52 @@ def test_email_prepared_from_document_is_not_confused_with_an_older_email(tmp_pa
     assert len(exported) == 1 and exported[0].read_text(encoding="utf-8") == prepared
     assert engine._work_session.objects[older_id].payload["draft_content"] == older_draft
     assert len(local.calls) == calls
+
+
+def test_export_active_trip_does_not_resume_an_interrupted_email(tmp_path):
+    engine, _, local, _ = make_engine(tmp_path, mode="local")
+    engine.respond("Preciso de ajuda para escrever um email.")
+    email = engine._pending_writing_task
+    before = (email.active_artifact_id, email.recipient, email.purpose)
+    engine.respond("Vamos também preparar umas férias em Estocolmo.")
+    engine.respond("Responde em inglês.")
+    response = engine.respond("Guarda esse plano num ficheiro.")
+    files = list(engine.workspace_path.glob("*.txt"))
+    assert len(files) == 1 and "Estocolmo" in files[0].read_text(encoding="utf-8")
+    assert (email.active_artifact_id, email.recipient, email.purpose) == before
+    assert local.calls == []
+
+
+def test_export_new_task_does_not_save_a_stale_document_draft(tmp_path):
+    engine, _, local, _ = make_engine(tmp_path, mode="local")
+    (engine.workspace_path / "notes.txt").write_text("Original text.", encoding="utf-8")
+    engine.respond("Lê o ficheiro notes.txt.")
+    engine._active_document_context.draft_content = "Older document draft."
+    engine.respond("Vamos preparar umas férias em Estocolmo.")
+    engine.respond("Responde em inglês.")
+    engine.respond("Guarda esse plano num ficheiro.")
+    outputs = [p for p in engine.workspace_path.glob("*.txt") if p.name != "notes.txt"]
+    assert len(outputs) == 1 and "Estocolmo" in outputs[0].read_text(encoding="utf-8")
+    assert local.calls == []
+
+
+def test_language_switch_refreshes_all_open_cards_not_only_active_task(tmp_path):
+    import json
+    from assistant.representation import SemanticObject
+    engine, _, local, _ = make_engine(tmp_path, mode="local")
+    engine.respond("Vamos preparar umas férias em Estocolmo.")
+    trip = engine._active_task_context
+    engine.respond("Compara Samsung com Apple.")
+    comparison = engine._active_task_context
+    email = SemanticObject(id="older-email", kind="writing_task", title="Email para Ana", payload={"recipient": "Ana", "draft_content": "Subject: Original\n\nHello Ana."})
+    engine._work_session.objects[email.id] = email
+    engine.consume_ui_events()
+    engine.respond("Responde em inglês.")
+    events = [json.loads(event) for event in engine.consume_ui_events()]
+    updated = {event["id"]: event for event in events if event["type"] == "task_artifact_updated"}
+    assert trip.active_artifact_id in updated and comparison.active_artifact_id in updated
+    assert updated[trip.active_artifact_id]["title"] == "Holiday planning"
+    assert email.title == "Email to Ana"
+    assert email.payload["draft_content"] == "Subject: Original\n\nHello Ana."
+    assert engine._active_task_context is comparison
+    assert local.calls == []
