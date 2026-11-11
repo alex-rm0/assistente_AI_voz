@@ -13231,14 +13231,14 @@ def _looks_like_incomplete_writing_request(normalized_message: str) -> bool:
     text = normalized_message.replace("-", " ").strip(" .,!?:;")
     if re.search(r"\b(?:acrescenta|adiciona|cria)\s+(?:mais\s+um|outro)\s+(?:e mail|email|mail)\b", text):
         return True
-    if not re.search(r"\b(?:preciso|quero|ajuda|ajuda me|podes|consegues)\b", text):
+    if not re.search(r"\b(?:preciso|quero|queria|gostava|ajuda|ajudas|ajuda me|podes|consegues|help me|i need to|i want to)\b", text):
         return False
     if _extract_writing_batch_count(text) > 1 and re.search(r"\b(?:escrever|redigir|preparar)\b", text) and re.search(
         r"\b(?:emails?|e mails?|mails?|mensagens?)\b",
         text,
     ):
         return True
-    if any(marker in text for marker in ("escrever um email", "escrever um mail", "redigir um email", "redigir um mail", "preparar um email", "preparar um mail", "escrever uma mensagem")):
+    if any(marker in text for marker in ("escrever um email", "escrever um mail", "redigir um email", "redigir um mail", "preparar um email", "preparar um mail", "escrever uma mensagem", "write an email", "write an e mail", "write a mail")):
         return True
     return bool(
         re.search(
