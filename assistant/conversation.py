@@ -193,6 +193,7 @@ class PendingWritingTask:
     ttl: int = 4
     batch_total: int = 1
     batch_remaining_after_current: int = 0
+    proposed_recipient_correction: tuple[str, str] | None = None
 
 
 @dataclass
@@ -2040,6 +2041,7 @@ class AssistantEngine:
         recipient_correction = re.match(r"^(?:n[aã]o,\s*(?:é|e)\s+para|corrige o destinat[aá]rio para|the recipient is|actually,? (?:it's|it is) for)\s+(?:o\s+|a\s+)?(.+)", user_message.strip(), flags=re.I)
         if recipient_correction:
             task.recipient = recipient_correction[1].strip(" .,!?:;")
+            task.proposed_recipient_correction = None
             _refresh_pending_writing_task_state(task)
             self._ensure_pending_writing_artifact(task)
             self._record_writing_workflow_trace(task)
@@ -2049,6 +2051,22 @@ class AssistantEngine:
                 self._turn_trace["writing_followup_rejected"] = True
                 self._turn_trace["writing_followup_rejected_reason"] = "explicit_non_writing_activity_or_command"
             return None
+        spelling = re.search(r"\b([\wÀ-ÿ-]+)\s+(?:é|e)\s+com\s+(?:a letra\s+)?([A-Za-z])\b", user_message, re.I)
+        if spelling and len(re.findall(r"\b" + re.escape(spelling[1]) + r"\b", task.recipient, re.I)) == 1:
+            task.proposed_recipient_correction = (spelling[1], spelling[2].upper() + spelling[1][1:])
+        proposal = task.proposed_recipient_correction
+        if proposal:
+            confirmation = re.fullmatch(r"(?:sim|exatamente|isso|certo|correto)(?:[\W]+(?:quero que corrijas|corrige|por favor))*", normalized.strip(" .!?"))
+            if confirmation:
+                task.recipient = re.sub(r"\b" + re.escape(proposal[0]) + r"\b", proposal[1], task.recipient, count=1, flags=re.I)
+                task.proposed_recipient_correction = None
+                self._ensure_pending_writing_artifact(task)
+                self._record_writing_workflow_trace(task)
+                return _writing_workflow_question(task, self.response_language)
+            if _is_negative_confirmation(user_message):
+                task.proposed_recipient_correction = None
+                return _writing_workflow_question(task, self.response_language)
+            return localize("writing.confirm_spelling", self.response_language, old=proposal[0], new=proposal[1])
         if not _looks_like_writing_followup(normalized, task):
             task.ttl -= 1
             if task.ttl <= 0:
@@ -2066,7 +2084,9 @@ class AssistantEngine:
         if not _is_writing_execute_confirmation(normalized):
             return _writing_workflow_question(task, self.response_language)
 
-        self._pending_writing_task = None
+        return self._compose_pending_writing_draft(task)
+
+    def _compose_pending_writing_draft(self, task: PendingWritingTask) -> str:
         draft = self.response_composer.compose(
             ComposerRequest(
                 intent="writing_task",
@@ -2075,12 +2095,23 @@ class AssistantEngine:
                 fallback=_writing_task_local_fallback(task),
                 intent_instruction=(
                     "Escreve diretamente o email pedido. Usa apenas os factos recolhidos no workflow. "
-                    "Nao assumas projeto, destinatario, apoio ou contexto que nao esteja indicado."
+                    "Nao assumas projeto, destinatario, apoio ou contexto que nao esteja indicado. "
+                    "Return only the email, with a Subject/Assunto line, greeting and body. "
+                    "Do not append assistant commentary, system checks or conversational personality."
                 ),
                 response_language=self.response_language,
                 language_instruction=self._language_instruction(),
             )
         )
+        header = re.search(r"(?im)^\s*(?:subject|assunto):", draft)
+        names = [name for name in re.findall(r"\w+", task.recipient) if name.casefold() not in {"e", "and", "o", "a"}]
+        if (header is None or len(draft[header.end():].splitlines()) < 3
+                or ("@" not in task.recipient and any(name.casefold() not in draft.casefold() for name in names))
+                or re.search(r"(?im)^\s*(?:system checks:|all circuits awake)", draft)):
+            return localize("writing.draft_rejected", self.response_language)
+        if header.start() and header.start() < 200:
+            draft = draft[header.start():].lstrip()
+        self._pending_writing_task = None
         obj = self._work_session.objects[task.active_artifact_id]
         obj.payload["draft_content"] = draft
         obj.payload["draft_revision"] = 1
@@ -5234,18 +5265,40 @@ class AssistantEngine:
         if _is_topic_shift_request(user_message):
             return None
         text = _normalize_text(user_message)
-        save_request = bool(re.search(r"\b(?:guarda|guardar|grava|gravar|save|cria|criar)\b", text))
+        save_request = bool(re.search(r"\b(?:guarda|guardar|guardes|grava|gravar|save|cria|criar)\b", text))
         draft_reference = bool(re.search(r"\b(?:rascunho|email|e-mail|mail|draft)\b", text))
+        pending = self._pending_writing_task
+        drafts = [obj for obj in self._work_session.objects.values()
+                  if obj.kind == "writing_task" and obj.payload.get("draft_content")]
+        current_obj = self._work_session.objects.get(pending.active_artifact_id) if pending else (drafts[0] if len(drafts) == 1 else None)
+        if current_obj is not None:
+            if re.match(r"^(?:qual (?:e )?o nome d[oa] (?:ficheiro|fecheiro)|what is the (?:file ?name|name of the file))", text):
+                path = current_obj.payload.get("saved_file")
+                return localize("writing.saved", self.response_language, path=path) if path else localize("writing.not_saved", self.response_language)
+            if re.search(r"\b(?:porque|por que)\b.*\b(?:task|tarefa)\b.*\b(?:ecra|screen|visible)\b", text):
+                return localize("writing.task_still_open", self.response_language)
+        if (current_obj is not None and re.search(r"\b(?:isso|isto|it|that)\b", text)
+                and re.search(r"\b(?:ficheiro|fecheiro|file|workspace)\b", text)):
+            draft_reference = True
         correction = bool(re.match(r"^(?:desculpa|corrige|altera|deixaste|entao.*deixaste|a reuniao e|change|correct|the meeting is)\b", text)
                           and (draft_reference or re.search(r"\b(?:reuniao|meeting|hora|time|am|pm|destinatario|recipient|assunto|subject|saudacao|greeting)\b", text)))
         if self._active_task_context is not None and self._active_task_context.task_type != "compose_email" and not draft_reference:
             return None
         if not ((save_request and draft_reference) or correction):
             return None
-        if self._pending_writing_task is not None:
-            return None
-        drafts = [obj for obj in self._work_session.objects.values()
-                  if obj.kind == "writing_task" and obj.payload.get("draft_content")]
+        if pending is not None:
+            if not save_request:
+                return None
+            if pending.proposed_recipient_correction:
+                old, new = pending.proposed_recipient_correction
+                return localize("writing.confirm_spelling", self.response_language, old=old, new=new)
+            if pending.missing_fields:
+                return _writing_workflow_question(pending, self.response_language)
+            self._record_writing_workflow_trace(pending)
+            result = self._compose_pending_writing_draft(pending)
+            if self._pending_writing_task is not None:
+                return result
+            drafts = [self._work_session.objects[pending.active_artifact_id]]
         if not drafts:
             return None
         self._last_fast_tools_used = ()
@@ -5259,7 +5312,7 @@ class AssistantEngine:
                 self._pending_document_task = {"current_step": "awaiting_output_name", "content": draft,
                                                "writing_artifact_id": obj.id, "tools_used": ()}
                 return localize("writing.output_name", self.response_language)
-            return self._save_writing_draft_file(output, draft)
+            return self._save_writing_draft_file(output, draft, obj)
         # An afternoon correction alone does not identify an exact clock time.
         if (re.search(r"\b(?:tarde|afternoon)\b", text)
                 and not re.search(r"\b(?:pm|\d{1,2}(?:h|:|\.))", text)):
@@ -5290,8 +5343,11 @@ class AssistantEngine:
         self._queue_semantic_object_sync(obj)
         return updated
 
-    def _save_writing_draft_file(self, output: str, content: str) -> str:
+    def _save_writing_draft_file(self, output: str, content: str, obj: SemanticObject | None = None) -> str:
         result = self._create_workspace_txt(output, content, tools_used=("create_workspace_file",))
+        if obj is not None and result.startswith("Criei o ficheiro"):
+            obj.payload["saved_file"] = f"workspace/{output}"
+            self._queue_semantic_object_sync(obj)
         if normalize_response_language(self.response_language) == ENGLISH_GB:
             return localize("writing.saved", self.response_language, path=f"workspace/{output}") if result.startswith("Criei o ficheiro") else localize("writing.save_failed", self.response_language)
         return result
@@ -5452,7 +5508,7 @@ class AssistantEngine:
                 obj = self._work_session.objects.get(str(pending["writing_artifact_id"]))
                 if obj is None or not obj.payload.get("draft_content"):
                     return localize("writing.save_failed", self.response_language)
-                return self._save_writing_draft_file(output, str(obj.payload["draft_content"]))
+                return self._save_writing_draft_file(output, str(obj.payload["draft_content"]), obj)
             return self._create_workspace_txt(output, content, tools_used=tools + ("create_workspace_file",))
         if pending.get("current_step") == "awaiting_create_confirmation":
             if not _is_positive_document_confirmation(normalized):
@@ -13009,6 +13065,8 @@ def _writing_request_kind(message: str) -> str:
 
 def _looks_like_incomplete_writing_request(normalized_message: str) -> bool:
     text = normalized_message.replace("-", " ").strip(" .,!?:;")
+    if re.search(r"\b(?:acrescenta|adiciona|cria)\s+(?:mais\s+um|outro)\s+(?:e mail|email|mail)\b", text):
+        return True
     if not re.search(r"\b(?:preciso|quero|ajuda|ajuda me|podes|consegues)\b", text):
         return False
     if _extract_writing_batch_count(text) > 1 and re.search(r"\b(?:escrever|redigir|preparar)\b", text) and re.search(

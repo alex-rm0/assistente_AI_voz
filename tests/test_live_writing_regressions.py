@@ -39,3 +39,93 @@ def test_email_body_is_not_mistaken_for_assistant_execution(tmp_path):
     engine, _ = english_engine(tmp_path)
     email = "Subject: Update\n\nHi Ana,\n\nI've saved the note in a workspace.\n\nAlexandre"
     assert engine._complete_turn("Escreve o email.", email, "WRITING_WORKFLOW", technical=True, selected_path="WRITING_TASK") == email
+
+
+def collected_email(engine):
+    engine.respond("Por acaso preciso ajudar a escrever um mail?")
+    artifact = engine._pending_writing_task.active_artifact_id
+    engine.respond("Francisca e Karina")
+    engine.respond("Queria perguntar se podem vir à reunião desta semana que é às 9h30 da noite.")
+    return artifact
+
+
+def test_name_spelling_correction_stays_in_workflow(tmp_path):
+    engine, local = english_engine(tmp_path)
+    artifact = collected_email(engine)
+    response = engine.respond("Escreveste mal Karina. Karina é com C.")
+    assert "Carina" in response
+    assert engine._pending_writing_task.recipient == "Francisca e Karina"
+    response = engine.respond("Exatamente. Quero que corrijas, por favor.")
+    assert engine._pending_writing_task.recipient == "Francisca e Carina"
+    assert engine._pending_writing_task.active_artifact_id == artifact
+    assert engine._work_session.objects[artifact].payload["recipient"] == "Francisca e Carina"
+    assert engine.get_last_turn_telemetry()["selected_path"] == "WRITING_TASK"
+    assert local.calls == []
+
+
+def test_real_log_flow_saves_canonical_email_and_adds_another(tmp_path):
+    draft = "Subject: Meeting this week\n\nDear Francisca and Carina,\n\nCan you attend the meeting this week at 9:30 PM?\n\nBest regards,\nAlexandre"
+    engine, local = english_engine(tmp_path, [draft])
+    artifact = collected_email(engine)
+    engine.respond("Escreveste mal Karina. Karina é com C.")
+    engine.respond("Exatamente. Quero que corrijas, por favor.")
+    response = engine.respond("Agora preciso que guardes isso num fecheiro, num workspace, por favor.")
+    assert "name" in response
+    assert engine._work_session.objects[artifact].payload["draft_content"] == draft
+    assert len(local.calls) == 1
+    response = engine.respond("Pode ser reuniao_semana.txt.")
+    assert "Saved" in response
+    assert (engine.workspace_path / "reuniao_semana.txt").read_text(encoding="utf-8") == draft
+    assert engine._last_fast_tools_used == ("create_workspace_file",)
+    response = engine.respond("Qual é o nome do fecheiro?")
+    assert "reuniao_semana.txt" in response
+    response = engine.respond("Porquê que aparece ainda a task no ecrã? Obrigado.")
+    assert "open" in response
+    assert "schedule" not in response
+    engine.respond("Então acrescenta mais um e-mail para ver como é que fica no ecrã.")
+    assert engine._pending_writing_task.active_artifact_id != artifact
+    assert len([obj for obj in engine._work_session.objects.values() if obj.kind == "writing_task"]) == 2
+    assert engine._work_session.objects[artifact].payload["draft_content"] == draft
+    assert len(local.calls) == 1
+
+
+def test_failed_draft_generation_never_writes_a_file(tmp_path):
+    engine, _ = english_engine(tmp_path, ["I've saved the email in the workspace."])
+    artifact = collected_email(engine)
+    response = engine.respond("Guarda isso num ficheiro chamado teste.txt")
+    assert "couldn't" in response
+    assert not (engine.workspace_path / "teste.txt").exists()
+    assert engine._pending_writing_task.active_artifact_id == artifact
+    assert not engine._work_session.objects[artifact].payload.get("draft_content")
+
+
+def test_recipient_spelling_proposal_can_be_declined(tmp_path):
+    engine, local = english_engine(tmp_path)
+    artifact = collected_email(engine)
+    engine.respond("Karina é com C.")
+    engine.respond("Não.")
+    assert engine._pending_writing_task.recipient == "Francisca e Karina"
+    assert engine._pending_writing_task.proposed_recipient_correction is None
+    assert engine._pending_writing_task.active_artifact_id == artifact
+    assert local.calls == []
+
+
+def test_failed_save_has_no_success_receipt(tmp_path):
+    draft = "Subject: Meeting\n\nHi Francisca and Karina,\n\nCan you attend this week?\n\nAlexandre"
+    engine, _ = english_engine(tmp_path, [draft])
+    artifact = collected_email(engine)
+    engine.respond("Guarda isso num ficheiro.")
+    engine.respond("existing.txt")
+    before = (engine.workspace_path / "existing.txt").read_text(encoding="utf-8")
+    engine.respond("Guarda o rascunho em existing.txt")
+    assert (engine.workspace_path / "existing.txt").read_text(encoding="utf-8") == before
+    assert engine._work_session.objects[artifact].payload["saved_file"] == "workspace/existing.txt"
+
+
+def test_machine_footer_does_not_become_email_content(tmp_path):
+    draft = "Subject: Meeting\n\nHi Francisca and Karina,\n\nCan you attend?\n\nAlexandre\n\nSystem checks: All circuits awake."
+    engine, _ = english_engine(tmp_path, [draft])
+    artifact = collected_email(engine)
+    engine.respond("Guarda isso num ficheiro.")
+    assert engine._pending_writing_task is not None
+    assert not engine._work_session.objects[artifact].payload.get("draft_content")
