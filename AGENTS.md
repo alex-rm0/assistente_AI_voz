@@ -8,6 +8,10 @@ CLAUDE.md e AGENTS.md têm o mesmo conteúdo: altera sempre os dois.
 - Teste que falha primeiro, depois a correção.
 - Se a correção passar de 3 ficheiros, pára e mostra o plano antes.
 - Um commit por correção. Sem push.
+- conversation.py não cresce: código novo vai para um módulo próprio sempre
+  que possível (ex.: assistant/artifact_export.py). Cada correção deve manter
+  ou reduzir o tamanho do ficheiro; se tiver de crescer, o relatório explica
+  porquê.
 
 ## Política de idioma
 - `response_language` é fixo: só muda com um comando explícito
@@ -25,6 +29,8 @@ CLAUDE.md e AGENTS.md têm o mesmo conteúdo: altera sempre os dois.
 ## Trabalho paralelo
 - O `stab/paralelo` foi integrado no main (merge `7741fc9`). Nenhuma
   worktree é dona de ficheiros: todos se editam no main.
+- Um agente de cada vez no mesmo working tree. Trabalho em paralelo exige
+  worktree própria.
 - Antes de usar a GPU (benchmarks, STT em GPU), confirma com `nvidia-smi`
   que nenhum outro agente a está a usar.
 
