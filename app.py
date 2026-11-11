@@ -29,7 +29,7 @@ from assistant.secret_storage import WindowsCredentialManagerSecretStorage, reso
 from assistant.task_research import OllamaSemanticExtractor
 from assistant.tts import TTSManager
 from assistant.tool_registry import tool_registry
-from assistant.voice_input import MicrophoneCheckError, check_microphone, check_voice_runtime
+from assistant.voice_input import check_voice_runtime
 
 # Importing assistant.tools registers all built-in tools automatically.
 import assistant.tools  # noqa: F401
@@ -123,19 +123,9 @@ def main() -> int:
     voice_min_record_seconds = float(voice_config.get("min_record_seconds", 2.0))
     voice_preroll_ms = int(voice_config.get("preroll_ms", 500))
     voice_ready_delay_ms = int(voice_config.get("ready_delay_ms", 200))
-    if voice_requested and not voice_missing:
-        try:
-            voice_microphone_message = check_microphone(
-                sample_rate=voice_sample_rate,
-                input_device=voice_input_device,
-                auto_select=voice_auto_select_input,
-                silent_rms_threshold=voice_silent_rms_threshold,
-                channels=voice_channels,
-                probe_duration=voice_probe_duration,
-            )
-            voice_microphone_ok = True
-        except MicrophoneCheckError as exc:
-            voice_microphone_message = str(exc)
+    # Device probing stays on the explicit microphone-test/capture path.
+    # Startup checks dependencies only; a slow or unavailable device must
+    # not delay creation of the desktop UI.
     voice_runtime_enabled = voice_requested and not voice_missing
     voice_status = (
         "Voz pronta"

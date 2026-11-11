@@ -225,9 +225,9 @@ foram corrigidos**. Cada entrada tem o sintoma, a evidência e o estado.
     arranque sem esperar pelo `_lock`. Quando o stdout do servidor acaba, o
     `start()` falha logo em vez de esperar pelo timeout. Testes:
     `tests/test_pocket_tts_cancellable_start.py`.
-  - **Falta, em `prototype_web_ui/controller.py` (atribuído à worktree
-    paralela `../assistenteIA-par`, que é dona do ficheiro até ao merge):**
-    `request_shutdown()` tem de parar o TTS manager
-    (`_shutdown_tts_manager()`) quando há um prewarm do TTS em curso. Hoje
-    o drain espera que o prewarm acabe sozinho, por isso a espera da
-    bateria mantém-se até essa parte entrar.
+  - **Implementado no worktree paralelo, pendente de integração no main:**
+    `request_shutdown()` para o TTS manager quando há um prewarm em curso.
+    O prewarm automático espera pela UI pronta e mais 3000 ms; a entrada
+    explícita em STANDBY/conversa continua imediata. O teste do microfone
+    saiu do caminho de arranque. Medições e limites do teste estão em
+    `docs/STARTUP_SHUTDOWN_TIMINGS.md` (fecho durante prewarm: 4190 -> 58 ms).

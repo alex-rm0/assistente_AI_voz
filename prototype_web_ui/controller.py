@@ -438,8 +438,19 @@ class EchoUIController(QObject):
         # _wake_prewarm_thread: set when started, cleared when finished.
         self._tts_prewarm_thread: QThread | None = None
         self._tts_prewarm_started_at: float | None = None
+        self._ui_ready_received = False
+        self._tts_startup_prewarm_timer = QTimer(self)
+        self._tts_startup_prewarm_timer.setSingleShot(True)
+        self._tts_startup_prewarm_timer.timeout.connect(self._prewarm_tts)
+
+    _TTS_STARTUP_PREWARM_DELAY_MS = 3000
+
+    def notify_ui_ready(self) -> None:
+        if self._ui_ready_received or self._shutdown_requested:
+            return
+        self._ui_ready_received = True
         if self.voice_available:
-            QTimer.singleShot(0, self._prewarm_tts)
+            self._tts_startup_prewarm_timer.start(self._TTS_STARTUP_PREWARM_DELAY_MS)
 
     @Slot(str)
     def submitMessage(self, text: str) -> None:
@@ -766,7 +777,9 @@ class EchoUIController(QObject):
         if thread is not None:
             thread.deleteLater()
 
+    @Slot()
     def _prewarm_tts(self) -> None:
+        self._tts_startup_prewarm_timer.stop()
         # Starts the TTS manager's long-lived worker (Pocket server) off the
         # UI thread so the first spoken reply / wake ack does not wait for
         # its start-up. Duck-typed (a TTS double without prewarm() is
@@ -1415,6 +1428,7 @@ class EchoUIController(QObject):
         if self._shutdown_requested:
             return
         self._shutdown_requested = True
+        self._tts_startup_prewarm_timer.stop()
         self._shutdown_started_at = time.perf_counter()
         _log_shutdown(event="started")
         self._stop_voice_conversation(reason="app_shutdown")
@@ -1425,10 +1439,10 @@ class EchoUIController(QObject):
         if self._wake_prewarm_thread is not None:
             _log_shutdown(component="wake_prewarm", event="stop_requested")
         if self._tts_prewarm_thread is not None:
-            # A Pocket server start can't be cancelled (stopping the manager
-            # would block on the provider's lock until it is ready) -- it is
-            # drained like any other worker, with the window already hidden.
+            # Pocket startup is cancellable: stopping the manager closes the
+            # in-flight subprocess and releases the prewarm worker promptly.
             _log_shutdown(component="tts_prewarm", event="stop_requested")
+            self._shutdown_tts_manager()
         if self._voice_worker is not None:
             self._voice_worker.stop()
             _log_shutdown(component="voice_worker", event="stop_requested")
