@@ -171,6 +171,9 @@ def estimate_cost(provider: str, model: str, input_tokens: int | None, output_to
     )
 
 
+OLLAMA_KEEP_ALIVE = -1  # never expire while the app is open
+
+
 class OllamaProvider:
     """ModelProvider implementation over Ollama's /api/chat and /api/embeddings."""
 
@@ -200,7 +203,15 @@ class OllamaProvider:
         # using the provider's configured self.timeout_seconds, unchanged.
         resolved_timeout = timeout_seconds if timeout_seconds is not None else self.timeout_seconds
         url = f"{self.base_url.rstrip('/')}/api/chat"
-        payload: dict[str, Any] = {"model": resolved_model, "messages": messages, "stream": False}
+        payload: dict[str, Any] = {
+            "model": resolved_model,
+            "messages": messages,
+            "stream": False,
+            # Keep the model loaded while the app is open (Ollama's default
+            # unloads it after 5 min idle and the next turn pays ~4 s); the
+            # app unloads it on close (assistant/model_warmup.py).
+            "keep_alive": OLLAMA_KEEP_ALIVE,
+        }
         if response_format is not None:
             payload["format"] = response_format
         options: dict[str, Any] = {}
