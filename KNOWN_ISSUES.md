@@ -1,5 +1,11 @@
 # Problemas conhecidos
 
+Atualização de 2026-11-11: a ronda de correções do email, cartão e grounding da
+conversa está registada em [LIVE_CONVERSATION_STABILIZATION.md](docs/LIVE_CONVERSATION_STABILIZATION.md).
+Baseline dessa ronda: **2086 passed, 1 xfailed**. As notas históricas abaixo
+mantêm a data e o estado da respetiva observação; não são uma lista atualizada
+de todas as correções posteriores.
+
 Data: 2026-10-21
 Estado dos testes: pytest: 1808 passed
 
