@@ -1,0 +1,10 @@
+{
+  "completed_at": "2026-11-12T09:00:00+00:00",
+  "contract": "ActionResult",
+  "contract_version": "1.0",
+  "error": null,
+  "outcome": "succeeded",
+  "output": {},
+  "request_id": "req-1",
+  "undo_reference": "undo:m-42"
+}

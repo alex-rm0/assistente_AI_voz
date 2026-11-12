@@ -1,0 +1,25 @@
+{
+  "action_type": "email.archive_newsletter",
+  "contract": "ActionRequest",
+  "contract_version": "1.0",
+  "id": "req-1",
+  "parameters": {
+    "message_id": "m-42"
+  },
+  "policy": {
+    "action_type": "email.archive_newsletter",
+    "authorized_at": "2026-11-12T09:00:00+00:00",
+    "authorized_by": "alexandre",
+    "autonomy_level": 3,
+    "contract": "ActionPolicy",
+    "contract_version": "1.0",
+    "external_effect": true,
+    "max_autonomy_level": 3,
+    "reversible": true,
+    "risk_class": "low"
+  },
+  "privacy_class": "RESTRICTED",
+  "requested_at": "2026-11-12T09:00:00+00:00",
+  "requested_by": "echo.digest",
+  "source_channel": "echo_os"
+}

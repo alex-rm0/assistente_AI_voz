@@ -1,0 +1,14 @@
+{
+  "attention_decision_id": "dec-1",
+  "content_ref": null,
+  "contract": "OutgoingNotification",
+  "contract_version": "1.0",
+  "created_at": "2026-11-12T09:00:00+00:00",
+  "id": "ntf-1",
+  "in_reply_to_message_id": null,
+  "priority": "high",
+  "privacy_class": "PUBLIC",
+  "recipient": "alexandre",
+  "target_channel": "telegram",
+  "text": "example.org is down"
+}

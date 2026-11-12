@@ -1,0 +1,30 @@
+{
+  "attachments": [
+    {
+      "contract": "AttachmentRef",
+      "contract_version": "1.0",
+      "id": "a1",
+      "media_type": "image/png",
+      "name": "capture.png",
+      "reference": "workspace:capture-a1.png"
+    }
+  ],
+  "contract": "IncomingMessage",
+  "contract_version": "1.0",
+  "id": "msg-1",
+  "metadata": {
+    "avg_logprob": -0.31,
+    "capture_id": "c-9",
+    "capture_mode": "active",
+    "compression_ratio": 1.4,
+    "modality": "voice",
+    "no_speech_probability": 0.02,
+    "session_id": "s-3",
+    "stt_model": "turbo"
+  },
+  "privacy_class": "PERSONAL",
+  "received_at": "2026-11-12T09:00:00+00:00",
+  "sender_id": "alexandre",
+  "source_channel": "echo_os",
+  "text": "Arquiva as newsletters de hoje"
+}

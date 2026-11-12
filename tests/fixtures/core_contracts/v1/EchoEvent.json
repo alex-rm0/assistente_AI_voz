@@ -1,0 +1,25 @@
+{
+  "confidence": 0.9,
+  "contract": "EchoEvent",
+  "contract_version": "1.0",
+  "dedupe_key": "site:example.org:down",
+  "id": "evt-1",
+  "importance": "high",
+  "observed_at": "2026-11-12T09:00:30+00:00",
+  "occurred_at": "2026-11-12T09:00:00+00:00",
+  "payload": {
+    "checks": [
+      {
+        "ok": false
+      }
+    ],
+    "http_status": 503
+  },
+  "privacy_class": "PUBLIC",
+  "related_project_id": null,
+  "related_task_id": null,
+  "source": "watcher.sites",
+  "status": "active",
+  "subject": "https://example.org",
+  "type": "site.down"
+}

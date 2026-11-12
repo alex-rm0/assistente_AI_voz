@@ -1,0 +1,10 @@
+{
+  "contract": "AttentionDecision",
+  "contract_version": "1.0",
+  "decided_at": "2026-11-12T09:00:00+00:00",
+  "decision": "INTERRUPT",
+  "deliver_after": null,
+  "event_id": "evt-1",
+  "id": "dec-1",
+  "reason": "site down for a watched project"
+}

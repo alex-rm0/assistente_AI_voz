@@ -1,0 +1,12 @@
+{
+  "action_type": "email.archive_newsletter",
+  "authorized_at": null,
+  "authorized_by": null,
+  "autonomy_level": 2,
+  "contract": "ActionPolicy",
+  "contract_version": "1.0",
+  "external_effect": true,
+  "max_autonomy_level": 3,
+  "reversible": true,
+  "risk_class": "low"
+}
