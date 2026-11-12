@@ -44,6 +44,7 @@ class EchoOSWindow(QWebEngineView):
         model_runtime: Any | None = None,
         voice_available: bool = False,
         voice_model: str = "base",
+        voice_stt_settings: dict | None = None,
         voice_language: str = "pt",
         voice_sample_rate: int = 44100,
         voice_input_device: str | int | None = "default",
@@ -69,6 +70,7 @@ class EchoOSWindow(QWebEngineView):
         voice_transcriber = (
             VoiceTranscriber(
                 model_name=voice_model,
+                stt_settings=voice_stt_settings,
                 language=voice_language or "pt",
                 # Phase 7.5 (section 10/12): input_language for the NEW
                 # Voice-Conversation-Mode VAD path is deliberately threaded

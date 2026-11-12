@@ -52,6 +52,10 @@
   "voice": {
     "enabled": true,
     "model": "medium",
+    "stt_provider": "faster-whisper",
+    "stt_model": "large-v3-turbo",
+    "stt_python": ".venv_stt_bench/Scripts/python.exe",
+    "stt_hf_home": ".hf_cache",
     "language": "pt",
     "input_device": "default",
     "auto_select_input": true,

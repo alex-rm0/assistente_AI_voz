@@ -13,9 +13,10 @@ from pathlib import Path
 
 class FasterWhisperBackend:
     def __init__(self, *, python=None, model="large-v3-turbo", process_factory=None,
-                 load_timeout=60, transcription_timeout=45):
-        root = Path(__file__).resolve().parents[1]
-        self.python = Path(python or os.environ.get("ECHO_STT_PYTHON") or root / ".venv_stt_bench/Scripts/python.exe")
+                 load_timeout=60, transcription_timeout=45, hf_home=None):
+        from assistant.stt_config import project_path
+        self.python = project_path(python or os.environ.get("ECHO_STT_PYTHON") or ".venv_stt_bench/Scripts/python.exe")
+        self.hf_home = project_path(hf_home or os.environ.get("HF_HOME") or ".hf_cache")
         self.model = model
         self.process_factory = process_factory or subprocess.Popen
         self.load_timeout = load_timeout
@@ -58,7 +59,7 @@ class FasterWhisperBackend:
             raise RuntimeError("Runtime STT GPU não encontrado. Configura ECHO_STT_PYTHON.")
         self.responses = queue.Queue()
         env = dict(os.environ, PYTHONIOENCODING="utf-8")
-        env.setdefault("HF_HOME", str(Path.cwd() / ".hf_cache"))
+        env["HF_HOME"] = str(self.hf_home)
         self.process = self.process_factory(
             [str(self.python), "-u", str(Path(__file__).with_name("stt_runner.py")), "--model", self.model],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,

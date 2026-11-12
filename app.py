@@ -349,6 +349,7 @@ def main() -> int:
             model_runtime=model_runtime,
             voice_available=voice_runtime_enabled,
             voice_model=voice_config.get("model", "base"),
+            voice_stt_settings=voice_config,
             voice_language=voice_config.get("language", "pt"),
             voice_sample_rate=voice_sample_rate,
             voice_input_device=voice_input_device,

@@ -359,14 +359,15 @@ class VoiceTranscriber:
         standby_vad_config: VadConfig | None = None,
         wake_recognizer: WakeRecognizer | None = None,
         stt_provider: str | None = None,
+        stt_settings: dict | None = None,
     ) -> None:
-        self.model_name = model_name
-        self.stt_provider = stt_provider or os.environ.get("ECHO_STT_PROVIDER", "openai-whisper")
+        from assistant.stt_config import resolve_stt_config
+        self.stt_config = resolve_stt_config(stt_settings, provider=stt_provider, cpu_model=model_name)
+        self.model_name = self.stt_config.model
+        self.stt_provider = self.stt_config.provider
         self._stt_backend = None
         if self.stt_provider not in {"openai-whisper", "faster-whisper"}:
             raise VoiceInputError("ECHO_STT_PROVIDER deve ser openai-whisper ou faster-whisper.")
-        if self.stt_provider == "faster-whisper":
-            self.model_name = os.environ.get("ECHO_STT_MODEL", "large-v3-turbo")
         self.language = language
         # Phase 7.5 (section 10): a SEPARATE concept from `language` above --
         # `language` is the legacy field manual MIC's record_and_transcribe()
@@ -1044,7 +1045,7 @@ class VoiceTranscriber:
             if self.stt_provider == "faster-whisper":
                 if self._stt_backend is None:
                     from assistant.stt_backend import FasterWhisperBackend
-                    self._stt_backend = FasterWhisperBackend(model=self.model_name)
+                    self._stt_backend = FasterWhisperBackend(model=self.model_name, python=self.stt_config.python, hf_home=self.stt_config.hf_home)
                 result = self._stt_backend.transcribe(audio_path, language=whisper_language, initial_prompt=prompt)
             else:
                 import whisper
@@ -1083,7 +1084,7 @@ class VoiceTranscriber:
             return False
         if self._stt_backend is None:
             from assistant.stt_backend import FasterWhisperBackend
-            self._stt_backend = FasterWhisperBackend(model=self.model_name)
+            self._stt_backend = FasterWhisperBackend(model=self.model_name, python=self.stt_config.python, hf_home=self.stt_config.hf_home)
         self._stt_backend.warmup()
         return True
 
