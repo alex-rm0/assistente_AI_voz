@@ -277,7 +277,8 @@ def test_n_pt_input_en_gb_output(tmp_path: Path) -> None:
 
     reply = engine.respond("como estas")
 
-    assert reply in not_measured_replies("en-GB")
+    assert any(reply.startswith(line) for line in not_measured_replies("en-GB"))
+    assert reply.count("?") <= 1
     assert "estou" not in reply.lower()
 
 
@@ -288,7 +289,8 @@ def test_o_en_input_pt_pt_output(tmp_path: Path) -> None:
 
     reply = engine.respond("how are you")
 
-    assert reply in not_measured_replies("pt-PT")
+    assert any(reply.startswith(line) for line in not_measured_replies("pt-PT"))
+    assert reply.count("?") <= 1
 
 
 # --- P/Q: deterministic error --------------------------------------------------

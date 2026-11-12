@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING
 
 from assistant.agent import Agent, AgentContext, system_state_tool_intent
 from assistant.turn_input import TurnInput, respond_to_turn
-from assistant.system_health import wellbeing_reply
 from assistant.action_claims import detect_ungrounded_workspace_operation_claim as _detect_ungrounded_workspace_operation_claim, unsupported_send_claim, send_not_executed_response, unsupported_draft_edit_claim
 from assistant.artifact_export import export_kind, presentation_to_text
 from assistant.writing_corrections import try_recipient_correction
@@ -126,7 +125,7 @@ from assistant.personal_assistant import (
     generate_task_summary,
 )
 from assistant.personal_model import PersonalModel, infer_category
-from assistant.conversation_guidance import grounded_guidance, is_open_invitation, remove_repeated_service_question, unsupported_plan_claim
+from assistant.conversation_guidance import grounded_guidance, is_open_invitation, remove_repeated_service_question, unsupported_plan_claim, social_wellbeing_reply
 from assistant.presence_decision import (
     REASON_VAGUE_ACTION_REFERENCE,
     PersonalCandidate,
@@ -6570,7 +6569,7 @@ class AssistantEngine:
             return f"Microfone indisponivel: {exc}"
 
     def _try_pure_social_turn(self, user_message: str) -> str | None:
-        wellbeing = wellbeing_reply(user_message, self.response_language, getattr(self, "system_health", None))
+        wellbeing = social_wellbeing_reply(self, user_message)
         if wellbeing is not None or not is_pure_social_turn(user_message):
             return wellbeing
         text = " ".join(re.sub(r"[,.!?:;]+", " ", _normalize_text(user_message).strip(" .,!?:;")).split())

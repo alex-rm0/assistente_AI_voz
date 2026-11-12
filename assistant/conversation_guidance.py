@@ -5,6 +5,39 @@ import json
 import re
 import unicodedata
 
+from assistant.system_health import wellbeing_reply
+
+
+def social_wellbeing_reply(engine, message):
+    """Reciprocate a social check-in, not every turn or a closed exchange."""
+    reply = wellbeing_reply(message, engine.response_language, getattr(engine, "system_health", None))
+    if reply is None:
+        return None
+    history = engine._recent_conversation_history(message)
+    assistants = [item.get("content", "") for item in history if item.get("role") == "assistant"]
+    if assistants:
+        reply = re.sub(r"^(?:Good morning|Good afternoon|Good evening|Bom dia|Boa tarde|Boa noite)\.\s*", "", reply)
+    if any("?" in item for item in assistants[-3:]):
+        return reply
+    session = engine._work_session
+    active = session.active_task
+    kind = getattr(active, "task_type", "")
+    if session.writing_context is not None:
+        kind = "compose_email"
+    english = engine.response_language == "en-GB"
+    questions = {
+        "compose_email": ("Queres retomar o email ou preferes só conversar?", "Would you like to pick up the email, or just chat?"),
+        "plan_trip": ("Queres continuar a pensar na viagem ou preferes só conversar?", "Shall we pick up the trip planning, or just chat?"),
+        "generic_comparison": ("Queres retomar a comparação ou preferes só conversar?", "Shall we pick up the comparison, or just chat?"),
+    }
+    if kind in questions:
+        question = questions[kind][1 if english else 0]
+    else:
+        variants = (("E tu, como estás?", "And you, how are you?"),
+                    ("E tu, como vão as coisas?", "And you, how are things?"))
+        question = variants[len(assistants) % len(variants)][1 if english else 0]
+    return f"{reply} {question}"
+
 
 def normalize(text):
     return "".join(c for c in unicodedata.normalize("NFKD", text.casefold()) if not unicodedata.combining(c))

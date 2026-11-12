@@ -149,7 +149,8 @@ def test_social_fast_path_respects_english_response_language(tmp_path: Path) -> 
     engine.respond("in English")
     response = engine.respond("olá, tudo bem?")
 
-    assert response in not_measured_replies("en-GB")
+    assert any(response.startswith(line) for line in not_measured_replies("en-GB"))
+    assert response.count("?") <= 1
     telemetry = engine.get_last_turn_telemetry()
     assert telemetry["selected_path"] == "SOCIAL_PATH"
     assert telemetry["llm_calls"] == 0
@@ -184,7 +185,8 @@ def test_social_fast_path_respects_portuguese_response_language(tmp_path: Path) 
     engine.respond("responde em português")
     response = engine.respond("how are you?")
 
-    assert response in not_measured_replies("pt-PT")
+    assert any(response.startswith(line) for line in not_measured_replies("pt-PT"))
+    assert response.count("?") <= 1
     assert engine.get_last_turn_telemetry()["llm_calls"] == 0
 
 
