@@ -6,6 +6,7 @@ import traceback
 import json
 import threading
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 
 import shiboken6
@@ -17,6 +18,7 @@ from assistant.response_language import localize
 from assistant.tts import TTSError, play_audio_file
 from assistant.voice_input import VoiceInputError, VoiceNoSpeechDetected, VoiceTranscriber, check_voice_runtime
 from assistant.voice_wake import classify_voice_wake_intent, wake_acknowledgement_text
+from assistant.turn_input import CaptureScope, TurnInput
 
 
 class _WakeRecognizerPrewarmThread(QThread):
@@ -44,10 +46,11 @@ class EchoRequestWorker(QObject):
     failed = Signal(str)
     progress = Signal(str)
 
-    def __init__(self, responder: Callable[[str], str], message: str) -> None:
+    def __init__(self, responder: Callable[[str], str], message: str, *, turn_input: TurnInput | None = None) -> None:
         super().__init__()
         self.responder = responder
         self.message = message
+        self.turn_input = turn_input or TurnInput.typed(message)
 
     @Slot()
     def run(self) -> None:
@@ -56,7 +59,9 @@ class EchoRequestWorker(QObject):
         if callable(set_listener):
             set_listener(self.progress.emit)
         try:
-            self.finished.emit(str(self.responder(self.message) or ""))
+            respond_turn = getattr(owner, "respond_turn", None)
+            response = respond_turn(self.turn_input) if callable(respond_turn) else self.responder(self.message)
+            self.finished.emit(str(response or ""))
         except Exception as exc:
             print("[ECHO ERROR] stage=EchoRequestWorker.run")
             print("[ECHO ERROR] type=", type(exc).__name__)
@@ -70,7 +75,7 @@ class EchoRequestWorker(QObject):
 
 
 class EchoVoiceWorker(QObject):
-    transcriptionReady = Signal(str)
+    transcriptionReady = Signal(object)
     failed = Signal(str)
     statusChanged = Signal(str)
     # Phase 7.6 (section 8/9): emitted exactly once, from the audio-capture
@@ -80,7 +85,7 @@ class EchoVoiceWorker(QObject):
     # signal here. Only meaningful when mode == "barge_in".
     speechConfirmed = Signal()
 
-    def __init__(self, transcriber: VoiceTranscriber, *, mode: str = "manual") -> None:
+    def __init__(self, transcriber: VoiceTranscriber, *, mode: str = "manual", session_id=None) -> None:
         super().__init__()
         self.transcriber = transcriber
         self.stop_event = threading.Event()
@@ -95,12 +100,19 @@ class EchoVoiceWorker(QObject):
         # instead of crashing -- no fake needs to be updated just to keep
         # working.
         self.mode = mode
+        self.session_id = session_id
+        from uuid import uuid4
+        self.capture_id = uuid4().hex
 
     def stop(self) -> None:
         self.stop_event.set()
 
     @Slot()
     def run(self) -> None:
+        with CaptureScope(session_id=self.session_id, mode=self.mode, capture_id=self.capture_id) as capture:
+            self._run_capture(capture)
+
+    def _run_capture(self, capture) -> None:
         try:
             vad_method = getattr(self.transcriber, "record_and_transcribe_vad", None)
             wake_method = getattr(self.transcriber, "record_and_transcribe_wake", None)
@@ -138,10 +150,10 @@ class EchoVoiceWorker(QObject):
             else:
                 text = self.transcriber.record_and_transcribe(self.stop_event, self.statusChanged.emit)
             self.statusChanged.emit("Concluído.")
-            self.transcriptionReady.emit(text)
+            self.transcriptionReady.emit(capture.finish(text))
         except VoiceNoSpeechDetected:
             self.statusChanged.emit("Não detetei fala.")
-            self.transcriptionReady.emit("")
+            self.transcriptionReady.emit(capture.finish(""))
         except Exception as exc:
             self.failed.emit(_bounded_voice_error(exc))
 
@@ -485,7 +497,13 @@ class EchoUIController(QObject):
 
     @Slot(str)
     def submitMessage(self, text: str) -> None:
+        self._submit_turn(TurnInput.typed(text))
+
+    def _submit_turn(self, turn: TurnInput) -> None:
+        text = turn.text
         message = (text or "").strip()
+        if message != turn.text:
+            turn = replace(turn, text=message)
         _lifecycle_trace("REQUEST_BEGIN")
         _debug_ui(f"[Echo UI] message_submitted={message}")
         self._thread_debug("submitMessage")
@@ -524,7 +542,7 @@ class EchoUIController(QObject):
         _debug_ui("[Echo UI] request_started=true")
 
         self._thread = QThread(self)
-        self._worker = EchoRequestWorker(self.responder, message)
+        self._worker = EchoRequestWorker(self.responder, message, turn_input=turn)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run, Qt.ConnectionType.QueuedConnection)
         self._worker.finished.connect(self._handle_response, Qt.ConnectionType.QueuedConnection)
@@ -607,7 +625,7 @@ class EchoUIController(QObject):
         self._voice_worker_barge_in_confirmed = False
         worker_mode = current_mode if current_mode != "off" else "manual"
         self._voice_thread = QThread(self)
-        self._voice_worker = EchoVoiceWorker(self.voice_transcriber, mode=worker_mode)
+        self._voice_worker = EchoVoiceWorker(self.voice_transcriber, mode=worker_mode, session_id=self._voice_session_id)
         self._voice_worker.moveToThread(self._voice_thread)
         self._voice_thread.started.connect(self._voice_worker.run, Qt.ConnectionType.QueuedConnection)
         self._voice_worker.statusChanged.connect(self._handle_voice_status, Qt.ConnectionType.QueuedConnection)
@@ -1807,11 +1825,18 @@ class EchoUIController(QObject):
             clean_status = localize(key, self._response_language())
         self.uiEvent.emit(_json_payload({"type": "voice_status", "status": clean_status}))
 
-    @Slot(str)
-    def _handle_voice_transcription(self, text: str) -> None:
+    @Slot(object)
+    def _handle_voice_transcription(self, text) -> None:
         self._thread_debug("_handle_voice_transcription")
-        clean = str(text or "").strip()
-        if self._is_voice_worker_stale():
+        if isinstance(text, TurnInput):
+            capture = text
+        else:
+            capture = TurnInput(text=str(text or ""), source="voice", capture_mode=self._voice_worker_mode,
+                                session_id=str(self._voice_session_id))
+        clean = capture.text.strip()
+        expected_capture = getattr(self._voice_worker, "capture_id", None)
+        if (self._is_voice_worker_stale() or (isinstance(text, TurnInput) and expected_capture is not None and capture.capture_id != expected_capture)
+                or (capture.session_id is not None and capture.session_id != str(self._voice_session_id))):
             # Section 3: this worker belongs to a session/mode that was
             # already stopped or superseded -- a late result (even a
             # genuine transcript) must never reach the composer/UI or
@@ -1819,7 +1844,7 @@ class EchoUIController(QObject):
             self._log_voice("stale_callback_ignored", context="transcription")
             self._settle_idle_if_nothing_pending()
             return
-        if self._voice_worker_mode == "standby":
+        if capture.capture_mode == "standby":
             # Phase 7.6 (section 5): STANDBY never emits voiceTranscriptionReady
             # or touches the composer/response area -- the transcript is
             # purely a wake/ignore decision, not conversational content.
@@ -1853,7 +1878,7 @@ class EchoUIController(QObject):
         self._barge_in_recent = False
         self._log_voice("transcript_ready", chars=len(clean))
         self._start_voice_turn_timing()
-        self.submitMessage(clean)
+        self._submit_turn(capture)
 
     @Slot(str)
     def _handle_voice_error(self, error: str) -> None:
@@ -2034,7 +2059,7 @@ class EchoUIController(QObject):
         self._voice_worker_is_barge_in = True
         self._voice_worker_barge_in_confirmed = False
         self._voice_thread = QThread(self)
-        self._voice_worker = EchoVoiceWorker(self.voice_transcriber, mode="barge_in")
+        self._voice_worker = EchoVoiceWorker(self.voice_transcriber, mode="barge_in", session_id=self._voice_worker_session_id)
         self._voice_worker.moveToThread(self._voice_thread)
         self._voice_thread.started.connect(self._voice_worker.run, Qt.ConnectionType.QueuedConnection)
         self._voice_worker.speechConfirmed.connect(self._handle_barge_in_confirmed, Qt.ConnectionType.QueuedConnection)

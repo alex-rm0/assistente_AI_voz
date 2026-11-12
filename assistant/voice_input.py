@@ -23,6 +23,7 @@ from assistant.audio_device import (
     resolve_input_device,
 )
 from assistant.wake_recognizer import WakeRecognizer
+from assistant.turn_input import record_stt_evidence
 from assistant.voice_wake import assess_fast_wake_transcript, classify_voice_wake_intent
 
 
@@ -944,6 +945,9 @@ class VoiceTranscriber:
             self._keep_wake_miss_audio()
         if fallback_reason != "near_wake":
             audio_path.unlink(missing_ok=True)
+            if fast_assessment == "wake":
+                record_stt_evidence(model=fast_result.model, avg_logprob=fast_result.avg_logprob,
+                                    no_speech_probability=fast_result.no_speech_prob)
             return fast_result.transcript if fast_assessment == "wake" else ""
 
         medium_cold_load = self._model is None
@@ -1010,6 +1014,8 @@ class VoiceTranscriber:
         )
 
     def _log_stt_decision(self, decision: VoiceSttDecision) -> None:
+        record_stt_evidence(model=self.model_name, avg_logprob=decision.avg_logprob,
+                            no_speech_probability=decision.no_speech_probability, compression_ratio=decision.compression_ratio)
         diagnostics = self.last_audio_diagnostics
         print(
             "[VOICE_STT] "

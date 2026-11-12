@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from assistant.agent import Agent, AgentContext, system_state_tool_intent
+from assistant.turn_input import TurnInput, respond_to_turn
 from assistant.action_claims import detect_ungrounded_workspace_operation_claim as _detect_ungrounded_workspace_operation_claim, unsupported_send_claim, send_not_executed_response, unsupported_draft_edit_claim
 from assistant.artifact_export import export_kind, presentation_to_text
 from assistant.writing_corrections import try_recipient_correction
@@ -756,23 +757,11 @@ class AssistantEngine:
         except Exception:
             pass
 
-    def respond(self, user_message: str) -> str:
-        """Public entry point: never lets an internal exception reach the UI.
+    def respond(self, user_message: str | TurnInput) -> str:
+        """Accept text or capture-owned metadata, with the same error boundary."""
+        return respond_to_turn(self, user_message)
 
-        respond() is called directly from GUI worker threads (see
-        prototype_web_ui/controller.py and ui/main_window.py), which show
-        whatever this returns — or a generic "Não consegui responder" if it
-        raises. Any of the many _try_*/cognition/agent code paths below can
-        legitimately fail (a transient Ollama hiccup, an edge case in a
-        cognition module, an empty model completion), so the entire turn is
-        guarded here rather than trusting every call site downstream to
-        catch its own errors.
-        """
-        self.begin_request()
-        try:
-            return self._respond_inner(user_message)
-        except Exception as exc:  # noqa: BLE001 - last-resort turn guard, see docstring
-            return self._handle_unexpected_error(user_message, exc)
+    respond_turn = respond
 
     def _handle_unexpected_error(self, user_message: str, exc: Exception) -> str:
         if isinstance(exc, ProviderConfigurationError):
