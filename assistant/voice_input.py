@@ -383,34 +383,14 @@ class VoiceTranscriber:
         # Conversation Mode, and must never be derived from response_language.
         self.input_language = input_language
         self.vad_config = vad_config or VadConfig()
-        # Phase 7.6 (section 9/10) / 7.6.2 (section 6) / 7.6.3 (section 9):
-        # deliberately more conservative than `vad_config`, so ordinary
-        # TTS-speaker bleed into the mic or a cough/keyboard click doesn't
-        # get mistaken for a genuine interruption -- but now calibrated
-        # against REAL evidence instead of synthetic estimates.
-        #
-        # History: Phase 7.6's initial 0.035/250ms was a pure guess and
-        # never confirmed on real hardware. Phase 7.6.2's 0.02/180ms was a
-        # reasoned-but-still-unmeasured halfway adjustment -- a real
-        # session then reported a concrete monitor_summary:
-        #   peak_rms=0.00665 threshold=0.02 candidate_entered=false
-        # i.e. the user's actual speech-over-Anna peak (0.00665) never
-        # even reached the 0.02 floor, let alone sustained it -- the
-        # threshold, not the duration, was the confirmed blocker (a
-        # candidate never even started).
-        #
-        # Fix: speech_rms_threshold is now a FLOOR (0.0045 -- below the one
-        # real observed peak, comfortably above pure silence) combined with
-        # an adaptive baseline (3x the recent ambient/TTS-bleed RMS) via
-        # adaptive_multiplier, so the effective threshold rises on its own
-        # in a louder room/speaker setup instead of requiring a single
-        # fixed number to be correct for every real environment (section
-        # 10). speech_start_min_ms is left at 180ms unchanged -- the
-        # evidence points at the threshold, not the duration, and section
-        # 11 explicitly says this may already be reasonable.
+        # 12/11: a 200ms candidate stopped TTS, then its 240ms capture was
+        # rejected against min_speech_ms=300. Do not interrupt for audio
+        # that cannot yet be a usable utterance. Keep the adaptive volume
+        # floor: raising it previously lost real quiet speech (RMS .00665).
+        # RMS + duration remains a heuristic, not speech/noise separation.
         self.barge_in_vad_config = barge_in_vad_config or VadConfig(
             speech_rms_threshold=0.0045,
-            speech_start_min_ms=180,
+            speech_start_min_ms=max(300, self.vad_config.min_speech_ms),
             trailing_silence_ms=self.vad_config.trailing_silence_ms,
             min_speech_ms=self.vad_config.min_speech_ms,
             max_utterance_ms=self.vad_config.max_utterance_ms,

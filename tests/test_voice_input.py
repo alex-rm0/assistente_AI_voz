@@ -5,6 +5,7 @@ import threading
 import wave
 from pathlib import Path
 from types import SimpleNamespace
+import pytest
 
 from assistant.voice_input import (
     DEFAULT_INITIAL_PROMPT,
@@ -903,7 +904,7 @@ def test_standby_n_barge_in_and_active_vad_configs_unaffected_by_standby_change(
     assert transcriber.barge_in_vad_config.trailing_silence_ms == transcriber.vad_config.trailing_silence_ms
     assert transcriber.barge_in_vad_config.trailing_silence_ms == 900
     assert transcriber.barge_in_vad_config.speech_rms_threshold == 0.0045
-    assert transcriber.barge_in_vad_config.speech_start_min_ms == 180
+    assert transcriber.barge_in_vad_config.speech_start_min_ms == 300
 
 
 def test_standby_wake_timing_records_stt_ms_on_last_vad_outcome(monkeypatch, tmp_path: Path) -> None:
@@ -966,7 +967,7 @@ def test_barge_in_h_lower_volume_real_user_speech_can_confirm(monkeypatch, tmp_p
     settle window (section 10) learns a near-silent baseline first -- the
     same way it would in real use -- rather than the degenerate case of
     "user speech present from the very first monitored instant"."""
-    plan = [(QUIET, 5), (PLAUSIBLE_SPEECH, 6), (QUIET, 3)]
+    plan = [(QUIET, 5), (PLAUSIBLE_SPEECH, 8), (QUIET, 3)]
     transcriber = _vad_transcriber(monkeypatch, tmp_path, plan)
     assert transcriber.barge_in_vad_config.speech_rms_threshold < 0.035  # confirms the adjustment took effect
     confirmed: list[bool] = []
@@ -1049,7 +1050,7 @@ def test_barge_in_j_candidate_duration_accumulation_tracked_correctly(monkeypatc
     baseline, not the speech level itself -- see test H's docstring for
     why "speech present from the very first monitored instant" is an
     unrealistic scenario that the settle window is not meant to handle."""
-    plan = [(QUIET, 5), (PLAUSIBLE_SPEECH, 3), (QUIET, 2), (PLAUSIBLE_SPEECH, 6), (QUIET, 3)]
+    plan = [(QUIET, 5), (PLAUSIBLE_SPEECH, 3), (QUIET, 2), (PLAUSIBLE_SPEECH, 8), (QUIET, 3)]
     transcriber = _vad_transcriber(monkeypatch, tmp_path, plan)
 
     audio_path = transcriber.record_until_speech_complete(
@@ -1075,7 +1076,7 @@ def test_barge_in_l_confirmed_interruption_reaches_whisper_once(monkeypatch, tmp
     invokes Whisper exactly once on the completed utterance."""
     fake_whisper = _FakeWhisperModule(result={"text": "wait that's not what I meant"})
     monkeypatch.setitem(sys.modules, "whisper", fake_whisper)
-    plan = [(QUIET, 5), (PLAUSIBLE_SPEECH, 6), (QUIET, 3)]
+    plan = [(QUIET, 5), (PLAUSIBLE_SPEECH, 8), (QUIET, 3)]
     transcriber = _vad_transcriber(monkeypatch, tmp_path, plan)
 
     text = transcriber.record_and_transcribe_vad(
@@ -1096,7 +1097,7 @@ def test_barge_in_i_exact_real_observed_peak_rms_can_confirm(monkeypatch, tmp_pa
     (peak_rms=0.00665) -- sustained realistically (with a quiet lead-in) --
     now confirms under the recalibrated default barge_in_vad_config, where
     it previously (0.02 floor) could not."""
-    plan = [(QUIET, 5), (REAL_OBSERVED_PEAK, 6), (QUIET, 3)]
+    plan = [(QUIET, 5), (REAL_OBSERVED_PEAK, 8), (QUIET, 3)]
     transcriber = _vad_transcriber(monkeypatch, tmp_path, plan)
     confirmed: list[bool] = []
 
@@ -1135,6 +1136,28 @@ def test_barge_in_k_short_noise_spike_still_rejected_under_new_default(monkeypat
         raise AssertionError("Expected a benign no-content outcome for a brief spike")
     except (VoiceNoSpeechDetected, VoiceInputError):
         pass
+
+
+@pytest.mark.parametrize("burst_blocks", [5, 6, 7])
+def test_barge_in_does_not_stop_tts_for_burst_shorter_than_usable_speech(monkeypatch, tmp_path, burst_blocks):
+    """The real log confirmed at 200ms, then threw away a 240ms capture."""
+    plan = [(QUIET, 5), (10000, burst_blocks), (QUIET, 50)]
+    transcriber = _vad_transcriber(monkeypatch, tmp_path, plan)
+    confirmed = []
+    with pytest.raises((VoiceNoSpeechDetected, VoiceInputError)):
+        transcriber.record_until_speech_complete(
+            threading.Event(), vad_config=transcriber.barge_in_vad_config,
+            on_speech_confirmed=lambda: confirmed.append(True),
+            require_confirmation_before_recording=True)
+    assert confirmed == []
+    assert transcriber.last_vad_outcome["confirmed"] is False
+    assert transcriber._barge_in_carryover is None
+
+
+def test_barge_in_default_confirmation_waits_for_usable_speech():
+    transcriber = VoiceTranscriber()
+    assert transcriber.barge_in_vad_config.speech_start_min_ms >= transcriber.barge_in_vad_config.min_speech_ms
+    assert transcriber.vad_config.speech_start_min_ms == 120
 
 
 # --- Phase 7.6.6: STANDBY wake fast path (section 3/9/16 D-I) ---------------
