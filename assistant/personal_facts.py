@@ -77,9 +77,12 @@ def _normalize(text: str) -> str:
 
 
 def unknown_reply(response_language: str) -> str:
+    # TODO(R3 step 6, memory with confirmation): once Echo can store a fact when
+    # asked, offer it here ("tell me and I'll remember it"). Until then the reply
+    # promises nothing, and the composer prompt tells the model the same.
     if normalize_response_language(response_language) == ENGLISH_GB:
-        return "I'm afraid I don't know that — tell me and I'll remember it, if you like."
-    return "Receio não saber isso — diz-me e eu guardo, se quiseres."
+        return "I'm afraid I don't know that."
+    return "Receio não saber isso."
 
 
 def missing_personal_fact_reply(user_message: str, evidence: list[str], response_language: str) -> str | None:
