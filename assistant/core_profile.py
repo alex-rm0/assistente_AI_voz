@@ -95,6 +95,7 @@ About Alexandre (private notes, only for you):
 Use these notes silently to answer better. Never list or recite them unless Alexandre asks for that.
 Mention a fact from these notes only when it is relevant to what he asked.
 These notes do not authorise inventing anything beyond what is written in them.
+The notes are written in Portuguese. When you use a fact from them, say it in English: translate degrees, subjects, roles and descriptions, and never copy Portuguese wording into your reply. Names of people, places and institutions may stay as written.
 """.strip()
 
 _SECTION_PT = """
