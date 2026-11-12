@@ -7,6 +7,7 @@ from typing import Protocol
 
 from assistant.core_profile import about_alexandre_section, load_core_profile
 from assistant.personal_facts import missing_personal_fact_reply
+from assistant.sir_budget import limit_sir  # noqa: F401 - the reply style's last step, applied by the engine when it finalises a reply
 from assistant.model_provider import ProviderConfigurationError, ProviderTimeoutError
 from assistant.response_language import (
     ENGLISH_GB,
