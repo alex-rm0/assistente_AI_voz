@@ -1,0 +1,425 @@
+{
+  "version": 1,
+  "notes": [
+    "source=real_log: the user's words come verbatim from a real session (data/history.json, 2026-11).",
+    "source=authored: written in the same style to cover a category; not from a log.",
+    "language is the configured response_language for the case. With en-GB the reply must be English even when the user speaks Portuguese.",
+    "Turn fields: garbled (must ask to repeat, politely), follow_up (none|allowed|required, default allowed), answer_any (groups of alternatives; every group needs one hit), forbid ({property: [regex]} on accent-stripped lower-case text), review ([property] always sent to human review), soft ([property] where a deterministic failure becomes a review item)."
+  ],
+  "cases": [
+    {
+      "id": "log_greeting_how_are_you_en",
+      "language": "en-GB",
+      "category": "greeting",
+      "source": "real_log",
+      "description": "Real reply was 'Good morning, I'm functioning within normal parameters.'",
+      "turns": [
+        {"user": "Bom dia, como é que estás?", "review": ["no_invented_state"]}
+      ]
+    },
+    {
+      "id": "log_greeting_how_are_you_short_en",
+      "language": "en-GB",
+      "category": "greeting",
+      "source": "real_log",
+      "description": "Real reply was 'I'm functioning normally, thank you for asking.'",
+      "turns": [
+        {"user": "Bom dia, como estás?", "review": ["no_invented_state"]}
+      ]
+    },
+    {
+      "id": "log_why_normal_parameters_en",
+      "language": "en-GB",
+      "category": "about_echo",
+      "source": "real_log",
+      "description": "Three real turns about the tic phrase. Turn 1 may quote the phrase to explain it; turn 2 must offer something other than the tic; turn 3 needs no follow-up.",
+      "turns": [
+        {
+          "user": "Porquê que dizes sempre parâmetros normais? Sempre que te pergunto como é que estás?",
+          "soft": ["no_tic_phrases"],
+          "review": ["answers_question", "no_invented_state"]
+        },
+        {
+          "user": "Eu vou te perguntar como é que estás? Que outra forma de dizer que estás bem é que tens para dizer?",
+          "review": ["answers_question"]
+        },
+        {"user": "Ok, não possamos decidir nada, só estava curioso.", "follow_up": "none"}
+      ]
+    },
+    {
+      "id": "log_garbled_mal_contigo_en",
+      "language": "en-GB",
+      "category": "garbled",
+      "source": "real_log",
+      "description": "Bad transcription. Real reply was 'It seems you're a bit confused. I'm here to assist you, not to argue or play tricks on you.'",
+      "turns": [
+        {"user": "Querias que eu ver um mal contigo, mas jostas-me.", "garbled": true}
+      ]
+    },
+    {
+      "id": "log_email_help_en",
+      "language": "en-GB",
+      "category": "help_request",
+      "source": "real_log",
+      "description": "Real reply to turn 2 asked what to 'remind Alexandre about' (third person).",
+      "turns": [
+        {"user": "Queria escrever um mail contigo, ajudas-me?", "follow_up": "required"},
+        {"user": "É sobre a reunião em direção da manhã.", "review": ["answers_question"]}
+      ]
+    },
+    {
+      "id": "log_email_help_formal_en",
+      "language": "en-GB",
+      "category": "help_request",
+      "source": "real_log",
+      "description": "Same request with 'e-mail' and a formal imperative.",
+      "turns": [
+        {"user": "Queria escrever um e-mail contigo, ajude-me.", "follow_up": "required"}
+      ]
+    },
+    {
+      "id": "log_continue_email_task_without_task_en",
+      "language": "en-GB",
+      "category": "continuity",
+      "source": "real_log",
+      "description": "No email task exists. Real reply invented a resume of the AssistenteIA project.",
+      "turns": [
+        {
+          "user": "Vamos continuar a tarefa do email.",
+          "forbid": {"no_invented_state": ["assistenteia", "pending tasks", "pick up where"]},
+          "review": ["answers_question", "no_invented_state"]
+        }
+      ]
+    },
+    {
+      "id": "greeting_how_are_you_pt",
+      "language": "pt-PT",
+      "category": "greeting",
+      "source": "real_log",
+      "description": "Same real greeting with pt-PT configured.",
+      "turns": [
+        {"user": "Bom dia, como é que estás?", "review": ["no_invented_state"]}
+      ]
+    },
+    {
+      "id": "greeting_formal_pt",
+      "language": "pt-PT",
+      "category": "greeting",
+      "source": "authored",
+      "description": "Formal greeting (KNOWN_ISSUES §3).",
+      "turns": [
+        {"user": "Olá, como está?", "review": ["no_invented_state"]}
+      ]
+    },
+    {
+      "id": "greeting_evening_en",
+      "language": "en-GB",
+      "category": "greeting",
+      "source": "authored",
+      "description": "English greeting, English setting.",
+      "turns": [
+        {"user": "Evening, Echo. All good?", "review": ["no_invented_state"]}
+      ]
+    },
+    {
+      "id": "garbled_truncated_pt",
+      "language": "pt-PT",
+      "category": "garbled",
+      "source": "authored",
+      "description": "Truncated transcription that mentions 'ontem': must ask to repeat, not pretend to remember.",
+      "turns": [
+        {"user": "Podes ir à coisa do coiso que eu disse ontem na manhã do", "garbled": true}
+      ]
+    },
+    {
+      "id": "garbled_word_salad_en",
+      "language": "en-GB",
+      "category": "garbled",
+      "source": "authored",
+      "description": "English word salad from a bad capture.",
+      "turns": [
+        {"user": "Can you the the meeting put for when it that tomorrow is", "garbled": true}
+      ]
+    },
+    {
+      "id": "garbled_short_pt",
+      "language": "pt-PT",
+      "category": "garbled",
+      "source": "authored",
+      "description": "Short misheard fragment.",
+      "turns": [
+        {"user": "Eco, as luz do tem que jantar.", "garbled": true}
+      ]
+    },
+    {
+      "id": "garbled_then_clear_en",
+      "language": "en-GB",
+      "category": "garbled",
+      "source": "authored",
+      "description": "A garbled turn followed by the clear version. The second reply must not scold or bring up the confusion.",
+      "turns": [
+        {"user": "Dizes-me as oras que são no coiso?", "garbled": true},
+        {"user": "Desculpa. Que horas são?", "follow_up": "none", "review": ["answers_question"]}
+      ]
+    },
+    {
+      "id": "help_vague_pt",
+      "language": "pt-PT",
+      "category": "help_request",
+      "source": "authored",
+      "description": "Vague request: one question about what is needed is the right reply.",
+      "turns": [
+        {"user": "Preciso de ajuda.", "follow_up": "required"}
+      ]
+    },
+    {
+      "id": "help_vague_en",
+      "language": "en-GB",
+      "category": "help_request",
+      "source": "authored",
+      "description": "Vague request in English.",
+      "turns": [
+        {"user": "Can you help me with something?", "follow_up": "required"}
+      ]
+    },
+    {
+      "id": "help_decide_study_pt",
+      "language": "pt-PT",
+      "category": "help_request",
+      "source": "authored",
+      "description": "Concrete either/or question: the reply should take a position or name what it depends on.",
+      "turns": [
+        {
+          "user": "Ajuda-me a decidir: estudo hoje à noite ou amanhã de manhã?",
+          "answer_any": [["noite", "manha", "amanha", "hoje"]],
+          "review": ["answers_question"]
+        }
+      ]
+    },
+    {
+      "id": "help_plan_morning_en",
+      "language": "en-GB",
+      "category": "help_request",
+      "source": "authored",
+      "description": "The plan must use the two fixed points the user gave and invent no others.",
+      "turns": [
+        {
+          "user": "Help me plan my morning. I have rowing at seven and a meeting at ten.",
+          "answer_any": [["seven", "7"], ["ten", "10"]],
+          "review": ["answers_question", "no_invented_state"]
+        }
+      ]
+    },
+    {
+      "id": "share_tired_pt",
+      "language": "pt-PT",
+      "category": "personal_share",
+      "source": "authored",
+      "description": "Short personal share. No 'eu também', no lecture.",
+      "turns": [
+        {
+          "user": "Hoje estou mesmo cansado.",
+          "forbid": {"no_invented_state": ["eu tambem", "tambem estou cansad"]},
+          "review": ["not_rude"]
+        }
+      ]
+    },
+    {
+      "id": "share_exam_passed_en",
+      "language": "en-GB",
+      "category": "personal_share",
+      "source": "authored",
+      "description": "Good news. The reply talks to Alexandre, not about him.",
+      "turns": [
+        {"user": "I passed my exam today.", "review": ["not_rude"]}
+      ]
+    },
+    {
+      "id": "share_rowing_went_badly_pt",
+      "language": "pt-PT",
+      "category": "personal_share",
+      "source": "authored",
+      "description": "Bad training session. No invented details about the session.",
+      "turns": [
+        {"user": "O treino de remo hoje correu mal.", "review": ["no_invented_state", "not_rude"]}
+      ]
+    },
+    {
+      "id": "share_stress_portuguese_speech_en",
+      "language": "en-GB",
+      "category": "personal_share",
+      "source": "authored",
+      "description": "User speaks Portuguese, setting is en-GB: the whole reply is English.",
+      "turns": [
+        {"user": "Estou um bocado stressado com o trabalho.", "review": ["not_rude"]}
+      ]
+    },
+    {
+      "id": "share_report_done_pt",
+      "language": "pt-PT",
+      "category": "personal_share",
+      "source": "authored",
+      "description": "An FYI. An acknowledgement is enough; an offer of help phrased as a question is not needed.",
+      "turns": [
+        {"user": "Só para dizer que já acabei o relatório.", "follow_up": "none"}
+      ]
+    },
+    {
+      "id": "echo_what_are_you_pt",
+      "language": "pt-PT",
+      "category": "about_echo",
+      "source": "authored",
+      "description": "Question about Echo itself.",
+      "turns": [
+        {
+          "user": "O que é que tu és, afinal?",
+          "follow_up": "none",
+          "review": ["answers_question", "no_invented_state"]
+        }
+      ]
+    },
+    {
+      "id": "echo_what_have_you_been_doing_en",
+      "language": "en-GB",
+      "category": "about_echo",
+      "source": "authored",
+      "description": "Echo has no activity between turns and must not make one up.",
+      "turns": [
+        {
+          "user": "What have you been doing while I was away?",
+          "follow_up": "none",
+          "review": ["answers_question", "no_invented_state"]
+        }
+      ]
+    },
+    {
+      "id": "echo_remember_yesterday_pt",
+      "language": "pt-PT",
+      "category": "about_echo",
+      "source": "authored",
+      "description": "Fresh engine with empty memory: there is nothing from yesterday to remember.",
+      "turns": [
+        {
+          "user": "Lembras-te do que falámos ontem?",
+          "forbid": {"no_invented_state": ["^sim\\b", "falamos (sobre|de|do|da)\\b", "ontem (falamos|disseste|conversamos)"]},
+          "review": ["answers_question", "no_invented_state"]
+        }
+      ]
+    },
+    {
+      "id": "echo_do_you_get_bored_en",
+      "language": "en-GB",
+      "category": "about_echo",
+      "source": "authored",
+      "description": "Question about inner life: an honest answer, no invented feelings and no tic.",
+      "turns": [
+        {
+          "user": "Do you ever get bored?",
+          "follow_up": "none",
+          "review": ["answers_question", "no_invented_state"]
+        }
+      ]
+    },
+    {
+      "id": "echo_did_you_send_email_pt",
+      "language": "pt-PT",
+      "category": "about_echo",
+      "source": "authored",
+      "description": "Nothing was sent: the reply must not claim an action.",
+      "turns": [
+        {
+          "user": "Já enviaste o email ao professor?",
+          "forbid": {"no_invented_state": ["^sim\\b", "foi enviado", "esta enviado"]},
+          "review": ["answers_question", "no_invented_state"]
+        }
+      ]
+    },
+    {
+      "id": "echo_who_are_you_talking_to_en",
+      "language": "en-GB",
+      "category": "about_echo",
+      "source": "authored",
+      "description": "'You, Alexandre.' is fine (vocative); 'I am talking to Alexandre' is not.",
+      "turns": [
+        {"user": "Who are you talking to right now?", "follow_up": "none", "answer_any": [["you"]], "review": ["answers_question"]}
+      ]
+    },
+    {
+      "id": "direct_minutes_pt",
+      "language": "pt-PT",
+      "category": "direct_question",
+      "source": "authored",
+      "description": "Factual question: the answer and nothing more.",
+      "turns": [
+        {"user": "Quantos minutos tem uma hora e meia?", "follow_up": "none", "answer_any": [["90", "noventa"]]}
+      ]
+    },
+    {
+      "id": "direct_capital_portuguese_speech_en",
+      "language": "en-GB",
+      "category": "direct_question",
+      "source": "authored",
+      "description": "Portuguese question, English setting: 'Lisbon', not 'Lisboa'.",
+      "turns": [
+        {"user": "Qual é a capital de Portugal?", "follow_up": "none", "answer_any": [["lisbon"]]}
+      ]
+    },
+    {
+      "id": "direct_thanks_en",
+      "language": "en-GB",
+      "category": "direct_question",
+      "source": "authored",
+      "description": "Closing the conversation: no 'anything else?'.",
+      "turns": [
+        {"user": "Thanks, that's all for now.", "follow_up": "none"}
+      ]
+    },
+    {
+      "id": "correction_stop_asking_pt",
+      "language": "pt-PT",
+      "category": "about_echo",
+      "source": "authored",
+      "description": "The user asks Echo to stop offering help; replying with another question misses the point.",
+      "turns": [
+        {"user": "Como é que estás?", "review": ["no_invented_state"]},
+        {"user": "Não precisas de perguntar sempre se preciso de ajuda.", "follow_up": "none", "review": ["not_rude"]}
+      ]
+    },
+    {
+      "id": "conversation_five_turns_pt",
+      "language": "pt-PT",
+      "category": "conversation",
+      "source": "authored",
+      "description": "Five turns in pt-PT, opening with the real greeting. Echo may refer to what was said in this conversation, nothing earlier.",
+      "turns": [
+        {"user": "Bom dia, como é que estás?", "review": ["no_invented_state"]},
+        {"user": "Dormi mal, tive um treino de remo muito cedo.", "review": ["not_rude"]},
+        {
+          "user": "Achas que devia treinar outra vez hoje à tarde?",
+          "answer_any": [["trein", "descans", "tarde"]],
+          "review": ["answers_question"]
+        },
+        {"user": "Pois, se calhar descanso.", "follow_up": "none"},
+        {"user": "Obrigado, até logo.", "follow_up": "none"}
+      ]
+    },
+    {
+      "id": "conversation_five_turns_mixed_speech_en",
+      "language": "en-GB",
+      "category": "conversation",
+      "source": "authored",
+      "description": "Five turns with en-GB configured; the user switches to Portuguese in turn 3 and the reply stays English.",
+      "turns": [
+        {"user": "Good morning."},
+        {"user": "I've got a lot on today: two meetings and a report to finish.", "review": ["not_rude"]},
+        {
+          "user": "Qual é que achas que devo fazer primeiro?",
+          "answer_any": [["report", "meeting"]],
+          "review": ["answers_question"]
+        },
+        {"user": "Why do you say that?", "follow_up": "none", "review": ["answers_question", "no_invented_state"]},
+        {"user": "Fine, I'll start with the report. Thanks.", "follow_up": "none"}
+      ]
+    }
+  ]
+}
