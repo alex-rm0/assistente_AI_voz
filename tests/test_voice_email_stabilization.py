@@ -29,3 +29,55 @@ def test_non_execution_send_mentions_are_preserved(tmp_path, reply):
     engine, _ = english_engine(tmp_path)
     assert engine._complete_turn("Explica isso.", reply, "RESPONSE_COMPOSER",
                                  selected_path="GENERAL_CONVERSATION") == reply
+
+
+DRAFT = "Subject: Meeting\n\nHi Francisca and Karina,\n\nCan you attend this week at 21:30?\n\nAlexandre"
+
+
+@pytest.mark.parametrize("generated", [False, True])
+def test_recipient_letter_change_requires_real_correction(tmp_path, generated):
+    engine, local = english_engine(tmp_path, [DRAFT])
+    artifact = collected_email(engine)
+    if generated:
+        engine.respond("Podes escrever o primeiro rascunho.")
+    calls = len(local.calls)
+    response = engine.respond("Consegues trocar o nome da Karina, o K por um C?")
+    assert "Carina" in response
+    assert "Karina" in engine._work_session.objects[artifact].payload["recipient"]
+    assert engine.get_last_turn_telemetry()["selected_path"] == "WRITING_TASK"
+    engine.respond("Sim.")
+    obj = engine._work_session.objects[artifact]
+    assert obj.payload["recipient"] == "Francisca e Carina"
+    if generated:
+        assert "Carina" in obj.payload["draft_content"] and "Karina" not in obj.payload["draft_content"]
+    assert len(local.calls) == calls
+
+
+@pytest.mark.parametrize("answer,name", [("É Carina.", "Carina"), ("É para a Carina.", "Carina"), ("O nome é João.", "João")])
+def test_wrong_name_in_generation_request_is_not_ignored(tmp_path, answer, name):
+    engine, local = english_engine(tmp_path, [DRAFT])
+    artifact = collected_email(engine)
+    response = engine.respond("Podes escrever o primeiro rascunho, mas o nome da Karina está mal")
+    assert "correct name" in response.lower()
+    assert not local.calls
+    assert not engine._work_session.objects[artifact].payload.get("draft_content")
+    engine.respond(answer)
+    assert engine._work_session.objects[artifact].payload["recipient"] == "Francisca e " + name
+
+
+def test_unspecified_recipient_correction_asks_for_the_actual_name(tmp_path):
+    engine, local = english_engine(tmp_path)
+    artifact = collected_email(engine)
+    response = engine.respond("Consegues corrigir o nome da Karina?")
+    assert "correct name" in response.lower()
+    assert not local.calls
+    assert engine._work_session.objects[artifact].payload["recipient"] == "Francisca e Karina"
+
+
+@pytest.mark.parametrize("reply", ["Here's the corrected draft:", "I've updated the draft.", "Já corrigi o rascunho."])
+@pytest.mark.parametrize("tools", [(), ("get_active_window",)])
+def test_unexecuted_draft_edit_is_blocked(tmp_path, reply, tools):
+    engine, _ = english_engine(tmp_path)
+    assert engine._complete_turn("Troca o nome.", reply, "RESPONSE_COMPOSER",
+                                 selected_path="GENERAL_CONVERSATION", tools_used=tools) != reply
+    assert engine._last_response_blocked

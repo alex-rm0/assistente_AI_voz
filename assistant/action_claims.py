@@ -35,7 +35,16 @@ _SUCCESS = ("i opened", "esta a abrir", "abri", "ja abri", "minimizei", "minimiz
 _OPEN_REQUEST_RE = re.compile(r"^(?:please )?open\s|\b(?:can|could|would) you (?:please )?open\b|\bplease open\b")
 
 
+def unsupported_draft_edit_claim(response):
+    return re.search(
+        r"\b(?:here(?:'s| is) the (?:corrected|updated|revised) draft|"
+        r"i(?:'ve| have)?\s+(?:corrected|updated|revised|edited)\s+(?:the |your )?(?:draft|email)|"
+        r"(?:corrigi|alterei|atualizei)\s+(?:o |teu )?(?:rascunho|email))\b", unquoted_text(response))
+
+
 def detect_ungrounded_workspace_operation_claim(user_message, response):
+    if unsupported_draft_edit_claim(response):
+        return "draft_edit_without_execution"
     write_claim = re.search(
         r"\b(?:i(?:'ve| have)?\s+(?:saved|stored|created|added|written)|"
         r"(?:it|the (?:task|file|email|note|draft))\s*(?:'s|is|was|has been)\s+(?:saved|stored|created|added))\b",

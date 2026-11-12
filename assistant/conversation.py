@@ -15,8 +15,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from assistant.agent import Agent, AgentContext, system_state_tool_intent
-from assistant.action_claims import detect_ungrounded_workspace_operation_claim as _detect_ungrounded_workspace_operation_claim, unsupported_send_claim, send_not_executed_response
+from assistant.action_claims import detect_ungrounded_workspace_operation_claim as _detect_ungrounded_workspace_operation_claim, unsupported_send_claim, send_not_executed_response, unsupported_draft_edit_claim
 from assistant.artifact_export import export_kind, presentation_to_text
+from assistant.writing_corrections import try_recipient_correction
 from assistant.addressable_content import (
     build_addressable_content,
     detect_content_operation,
@@ -2065,22 +2066,6 @@ class AssistantEngine:
                 self._turn_trace["writing_followup_rejected"] = True
                 self._turn_trace["writing_followup_rejected_reason"] = "explicit_non_writing_activity_or_command"
             return None
-        spelling = re.search(r"\b([\wÀ-ÿ-]+)\s+(?:é|e)\s+com\s+(?:a letra\s+)?([A-Za-z])\b", user_message, re.I)
-        if spelling and len(re.findall(r"\b" + re.escape(spelling[1]) + r"\b", task.recipient, re.I)) == 1:
-            task.proposed_recipient_correction = (spelling[1], spelling[2].upper() + spelling[1][1:])
-        proposal = task.proposed_recipient_correction
-        if proposal:
-            confirmation = re.fullmatch(r"(?:sim|exatamente|isso|certo|correto)(?:[\W]+(?:quero que corrijas|corrige|por favor))*", normalized.strip(" .!?"))
-            if confirmation:
-                task.recipient = re.sub(r"\b" + re.escape(proposal[0]) + r"\b", proposal[1], task.recipient, count=1, flags=re.I)
-                task.proposed_recipient_correction = None
-                self._ensure_pending_writing_artifact(task)
-                self._record_writing_workflow_trace(task)
-                return _writing_workflow_question(task, self.response_language)
-            if _is_negative_confirmation(user_message):
-                task.proposed_recipient_correction = None
-                return _writing_workflow_question(task, self.response_language)
-            return localize("writing.confirm_spelling", self.response_language, old=proposal[0], new=proposal[1])
         if not _looks_like_writing_followup(normalized, task):
             task.ttl -= 1
             if task.ttl <= 0:
@@ -5386,6 +5371,9 @@ class AssistantEngine:
             return None
         if _is_topic_shift_request(user_message):
             return None
+        correction_response = try_recipient_correction(self, user_message)
+        if correction_response is not None:
+            return correction_response
         text = _normalize_text(user_message)
         save_request = bool(re.search(r"\b(?:guarda|guardar|guardes|grava|gravar|save|cria|criar)\b", text))
         draft_reference = bool(re.search(r"\b(?:rascunho|email|e-mail|mail|draft)\b", text))
@@ -6988,6 +6976,11 @@ class AssistantEngine:
                 if self._turn_trace is not None:
                     self._turn_trace["response_grounded"] = False
                     self._turn_trace["grounding_sources"] = []
+
+        if final_response_source in {"RESPONSE_COMPOSER", "AGENT_DIRECT", "COMPOSER_REGENERATED"} and not technical and unsupported_draft_edit_claim(final_response):
+            final_response = "I haven't changed the draft. What should I correct?" if self.response_language == "en-GB" else "Não alterei o rascunho. O que devo corrigir?"
+            final_response_source = "DRAFT_EDIT_CLAIM_BLOCKED"
+            self._last_response_blocked = True
 
         if final_response_source in {"RESPONSE_COMPOSER", "AGENT_DIRECT", "COMPOSER_REGENERATED"} and not tools_used and not technical:
             workspace_claim_reason = _detect_ungrounded_workspace_operation_claim(user_message, final_response)
