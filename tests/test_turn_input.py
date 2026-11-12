@@ -55,6 +55,28 @@ def test_engine_receives_the_exact_envelope_and_resets_afterwards(tmp_path, monk
     assert current_turn_input() is None
 
 
+@pytest.mark.parametrize("enforce", [False, True])
+def test_a_failing_clarity_observer_never_changes_the_turn(tmp_path, monkeypatch, capsys, enforce):
+    """The observer is shadow work: a bug in it must not turn a voice turn
+    into the internal-error reply. The turn runs as if it had not been observed."""
+    import assistant.speech_clarity as speech_clarity
+    from tests.test_automatic_routing_regressions import make_engine
+    engine, *_ = make_engine(tmp_path, mode="local")
+    engine.speech_clarity_enforce = enforce
+    received = []
+    monkeypatch.setattr(engine, "_respond_inner", lambda text: received.append(text) or "ok")
+
+    def broken_observer(*args, **kwargs):
+        raise RuntimeError("observer bug")
+    monkeypatch.setattr(speech_clarity, "protection_for_turn", broken_observer)
+    capture = capture_transcription(lambda: "Qual é a capital de França?", session_id="s", mode="active")
+
+    assert engine.respond_turn(capture) == "ok"
+    assert received == ["Qual é a capital de França?"]
+    assert "[SPEECH_CLARITY] status=error type=RuntimeError" in capsys.readouterr().out
+    assert current_turn_input() is None
+
+
 def test_real_transcriber_reports_wake_then_active_evidence_without_reuse(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from assistant.voice_input import VoiceTranscriber
