@@ -18,7 +18,7 @@ from assistant.agent import Agent, AgentContext, system_state_tool_intent
 from assistant.turn_input import TurnInput, respond_to_turn
 from assistant.action_claims import detect_ungrounded_workspace_operation_claim as _detect_ungrounded_workspace_operation_claim, unsupported_send_claim, send_not_executed_response, unsupported_draft_edit_claim
 from assistant.artifact_export import export_kind, presentation_to_text
-from assistant.writing_corrections import try_recipient_correction
+from assistant.writing_corrections import try_recipient_correction, extract_contextual_writing_recipient as _extract_contextual_writing_recipient
 from assistant.writing_continuity import is_email_resume_request, try_written_email_reference, writing_workflow_question as _writing_workflow_question
 from assistant.writing_requests import incomplete_writing_request
 from assistant.writing_presentation import clean_new_email_subject, remove_unsolicited_greeting, is_writing_language_feedback as _is_writing_language_feedback
@@ -14966,25 +14966,6 @@ def _extract_pending_writing_request(message: str) -> str:
         if candidate:
             return candidate
     return ""
-
-
-def _extract_contextual_writing_recipient(message: str) -> str:
-    raw = str(message or "").strip(" \t\r\n.,!?;:")
-    if not raw:
-        return ""
-    normalized = _normalize_text(raw)
-    if any(marker in normalized for marker in ("professor", "patrocinador", "cliente", "colega")):
-        return ""
-    match = re.search(r"^(?:(?:o\s+)?e-?mail\s+)?(?:é\s+|e\s+)?para\s+(?:o\s+|a\s+)?(.+)$", raw, flags=re.IGNORECASE)
-    candidate = match.group(1).strip(" \t\r\n.,!?;:") if match else raw
-    if not candidate:
-        return ""
-    candidate_norm = _normalize_text(candidate)
-    if candidate_norm in {"um", "uma", "o", "a", "isso", "isto", "email", "mail"}:
-        return ""
-    if len(candidate.split()) > 6:
-        return ""
-    return candidate[0].upper() + candidate[1:] if candidate and candidate[0].islower() else candidate
 
 
 def _extract_contextual_writing_purpose(message: str) -> str:

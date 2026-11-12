@@ -49,6 +49,36 @@ def collected_email(engine):
     return artifact
 
 
+@pytest.mark.parametrize("separator", [". ", ", ", " "])
+def test_first_recipient_answer_with_spelling_correction_stays_in_workflow(tmp_path, separator):
+    engine, local = english_engine(tmp_path)
+    engine.respond("Cheguei agora da reunião de direção. Queria já preparar um mail contigo.")
+    task = engine._pending_writing_task
+    artifact = task.active_artifact_id
+    response = engine.respond("Francisca e Karina" + separator + "Karina é com C.")
+    assert engine._pending_writing_task is task
+    assert task.active_artifact_id == artifact
+    assert task.recipient == "Francisca e Carina"
+    assert task.awaiting_field == "purpose"
+    assert engine.get_last_turn_telemetry()["selected_path"] == "WRITING_TASK"
+    assert "comment" not in response.lower()
+    assert engine._work_session.objects[artifact].payload["recipient"] == task.recipient
+    engine.respond("O email é para saber se vêm à reunião da próxima semana.")
+    assert not task.missing_fields
+    assert "próxima semana" in (task.subject or task.purpose)
+    assert engine._work_session.objects[artifact].payload["status"] == "ready_to_draft"
+    assert local.calls == []
+
+
+@pytest.mark.parametrize("message", [
+    "Francisca e Karina. Joana é com C.",
+    "Francisca e Karina. Abre o terminal.",
+])
+def test_compound_recipient_does_not_invent_a_correction_or_store_an_instruction(message):
+    from assistant.conversation import _extract_contextual_writing_recipient
+    assert _extract_contextual_writing_recipient(message) == ""
+
+
 @pytest.mark.parametrize("message", [
     "Pois é, preciso que corrijas umas coisas no email. Consegues abrir a tarefa?",
     "Quero pegar na tarefa do mail. Abro uma tarefa com o mail.",

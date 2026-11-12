@@ -1,8 +1,37 @@
-"""Confirmed recipient corrections against the current canonical email."""
+"""Recipient intake and confirmed corrections against the canonical email."""
 import re
 
 from assistant.response_language import localize
 from assistant.text_matching import normalize_for_matching
+
+
+def extract_contextual_writing_recipient(message):
+    raw = str(message or "").strip(" \t\r\n.,!?;:")
+    if not raw:
+        return ""
+    normalized = normalize_for_matching(raw)
+    if any(marker in normalized for marker in ("professor", "patrocinador", "cliente", "colega")):
+        return ""
+    spelling = re.fullmatch(
+        r"(.+?)[,.;!?\s]+([\wÀ-ÿ-]+)\s+(?:é|e)\s+com\s+(?:a letra\s+)?([A-Za-z])", raw, re.I)
+    if spelling:
+        head, name, letter = spelling.groups()
+        recipient = extract_contextual_writing_recipient(head)
+        if not recipient or not re.search(r"\b" + re.escape(name) + r"\b", recipient, re.I):
+            return ""
+        return re.sub(r"\b" + re.escape(name) + r"\b", lambda _: letter.upper() + name[1:], recipient, flags=re.I)
+    match = re.search(r"^(?:(?:o\s+)?e-?mail\s+)?(?:é\s+|e\s+)?para\s+(?:o\s+|a\s+)?(.+)$", raw, flags=re.I)
+    candidate = match.group(1).strip(" \t\r\n.,!?;:") if match else raw
+    if not candidate or normalize_for_matching(candidate) in {"um", "uma", "o", "a", "isso", "isto", "email", "mail"}:
+        return ""
+    if len(candidate.split()) > 6:
+        return ""
+    # Names/addresses, not a second sentence of instructions. Initials remain valid.
+    if not re.fullmatch(r"[\wÀ-ÿ'@+,-]+(?:\.[\wÀ-ÿ@+-]+)*\.?", candidate.replace(" ", "")):
+        return ""
+    if re.search(r"\b\w{2,}\.[\s]+\w", candidate):
+        return ""
+    return candidate[0].upper() + candidate[1:] if candidate[0].islower() else candidate
 
 
 def email_objects(session):
