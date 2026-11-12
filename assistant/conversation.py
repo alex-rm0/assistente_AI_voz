@@ -7244,8 +7244,7 @@ class AssistantEngine:
                 guidance = "Do not invent personal plans or preferences when no verified topic is available."
         instruction = localize("composer.question_discipline.suppress_optional_followup", self.response_language)
         instruction += (
-            "\nA light machine-like personality is welcome in social replies (for example, systems online or circuits awake). "
-            "Vary the phrasing and react to the person; do not repeat a stock line or claim to have run diagnostics. "
+            "\nVary the phrasing and react to the person; do not repeat a stock line. "
             "If recent assistant turns already asked questions, acknowledge or respond without another optional interview question. "
             "Do not ask the user to explain an improvement they just said they cannot explain."
         )
