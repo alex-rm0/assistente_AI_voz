@@ -10,7 +10,7 @@ from assistant.writing_corrections import current_email_object, email_objects
 def is_email_resume_request(message):
     text = normalize_for_matching(message)
     return _email_reference(text) and bool(
-        re.search(r"\b(?:continuar|continua|continuamos|retoma|retomar|volta|voltar|pegar|resume|continue|pick up|back to)\b", text)
+        re.search(r"\b(?:continuar|continua|continuamos|retoma|retome|retomar|volta|volte|voltar|pegar|resume|continue|pick up|back to)\b", text)
         or (re.search(r"\b(?:abre|abrir|abro|open)\b", text)
             and re.search(r"\b(?:tarefa|task|rascunho|draft)\b", text)))
 
@@ -26,6 +26,9 @@ def is_email_read_request(message):
 
 
 def try_written_email_reference(engine, message, *, read_only=False):
+    clarification = clarify_pending_email_purpose(engine, message) if not read_only else None
+    if clarification is not None:
+        return clarification
     read = is_email_read_request(message)
     if (read_only and not read) or not (read or is_email_resume_request(message)) or not engine.presence.can_use_tools():
         return None
@@ -46,6 +49,36 @@ def try_written_email_reference(engine, message, *, read_only=False):
     engine._queue_semantic_object_sync(obj)
     session.export_focus = ("writing", obj.id)
     return draft
+
+
+def clarify_pending_email_purpose(engine, message):
+    session = engine._work_session
+    task = session.writing_context
+    if task is None or task.missing_fields or not engine.presence.can_use_tools():
+        return None
+    if session.active_task is not None and session.active_task.task_type != "compose_email":
+        return None
+    focus = getattr(session.attention, "focus_object_id", "")
+    if focus and focus != task.active_artifact_id:
+        return None
+    match = re.fullmatch(r"(?:n[aã]o[,\s]+)?((?:apenas|s[oó])\s+(?:quero\s+)?(?:perguntar|pedir|dizer|confirmar)\s+.+?)[.!?]*", message.strip(), re.I)
+    if not match:
+        return None
+    existing = task.purpose or task.subject
+    ignored = {"email", "mail", "perguntar", "pedir", "dizer", "confirmar", "apenas", "quero", "para", "sobre", "isso", "isto", "elas", "eles", "saber", "podem", "pode", "podes", "queria"}
+    topic_words = {word for word in re.findall(r"\w{4,}", normalize_for_matching(existing)) if word not in ignored}
+    words = set(re.findall(r"\w+", normalize_for_matching(message)))
+    if not (topic_words & words or words & {"email", "mail"}):
+        return None
+    clarification = match[1].rstrip(" .!?")
+    if normalize_for_matching(clarification) not in normalize_for_matching(existing):
+        task.purpose = f"{existing} {clarification}".strip()
+        if message not in task.known_facts:
+            task.known_facts.append(message)
+    task.ttl = 4
+    engine._ensure_pending_writing_artifact(task)
+    engine._record_writing_workflow_trace(task)
+    return writing_workflow_question(task, engine.response_language)
 
 
 def writing_workflow_question(task, response_language="pt-PT"):

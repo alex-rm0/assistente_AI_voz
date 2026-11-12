@@ -79,6 +79,65 @@ def test_compound_recipient_does_not_invent_a_correction_or_store_an_instruction
     assert _extract_contextual_writing_recipient(message) == ""
 
 
+@pytest.mark.parametrize("recipient", ["João d’Ávila", "Ana-Maria", "João M. Carvalho", "ana.silva+equipa@example.com"])
+def test_recipient_intake_preserves_names_initials_and_addresses(recipient):
+    from assistant.conversation import _extract_contextual_writing_recipient
+    assert _extract_contextual_writing_recipient(recipient).casefold() == recipient.casefold()
+
+
+@pytest.mark.parametrize("voice", [False, True])
+def test_exact_voice_log_email_flow_keeps_canonical_fields_until_generation_and_save(tmp_path, voice):
+    from assistant.turn_input import TurnInput
+    draft = "Subject: Meeting next week\n\nDear Francisca and Carina,\n\nCan you attend the meeting next week?\n\nBest regards,\nAlexandre"
+    engine, local = english_engine(tmp_path, [draft])
+    engine.respond("Cheguei agora da reunião de direção. Queria já preparar um mail contigo.")
+    task = engine._pending_writing_task
+    artifact = task.active_artifact_id
+    for message in (
+        "Francisca e Karina. Karina é com C.",
+        "O email é para saber se vêm à reunião da próxima semana.",
+        "Volte então à preparação do email.",
+        "Não, apenas perguntar se elas podem vir à reunião.",
+    ):
+        incoming = TurnInput(text=message, source="voice", capture_id=message[:15], session_id="log-12-11",
+                             capture_mode="active", stt_model="large-v3-turbo", avg_logprob=-0.3) if voice else message
+        engine.respond(incoming)
+        telemetry = engine.get_last_turn_telemetry()
+        assert telemetry["selected_path"] in {"WRITING_TASK", "TASK_RESUME"}
+        assert telemetry["llm_calls"] == 0
+        assert engine._pending_writing_task is task
+        assert task.active_artifact_id == artifact
+        assert "Volte" not in (task.subject + task.purpose)
+    assert task.recipient == "Francisca e Carina"
+    assert "próxima semana" in task.subject + task.purpose
+    assert "apenas perguntar" in task.subject + task.purpose
+    response = engine.respond("Podes escrever o rascunho.")
+    assert response == draft
+    assert len(local.calls) == 1
+    assert engine.get_last_turn_telemetry()["selected_path"] == "WRITING_TASK"
+    assert engine._work_session.objects[artifact].payload["draft_content"] == draft
+    response = engine.respond("Guarda o rascunho num ficheiro na workspace.")
+    filename = engine._work_session.objects[artifact].payload["saved_file"].removeprefix("workspace/")
+    assert (engine.workspace_path / filename).read_text(encoding="utf-8") == draft
+    assert filename in response
+    assert len(local.calls) == 1
+
+
+@pytest.mark.parametrize("message", [
+    "Não quero escrever o email.", "Não, apenas comparar Samsung com Apple.",
+    "Não, apenas preparar umas férias.",
+    "Não, apenas perguntar que horas são.",
+])
+def test_purpose_clarification_does_not_capture_negation_or_other_activities(tmp_path, message):
+    from assistant.writing_continuity import clarify_pending_email_purpose
+    engine, _ = english_engine(tmp_path)
+    collected_email(engine)
+    task = engine._pending_writing_task
+    before = (task.subject, task.purpose, list(task.known_facts))
+    assert clarify_pending_email_purpose(engine, message) is None
+    assert (task.subject, task.purpose, task.known_facts) == before
+
+
 @pytest.mark.parametrize("message", [
     "Pois é, preciso que corrijas umas coisas no email. Consegues abrir a tarefa?",
     "Quero pegar na tarefa do mail. Abro uma tarefa com o mail.",

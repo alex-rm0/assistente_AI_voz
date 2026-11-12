@@ -27,7 +27,7 @@ def extract_contextual_writing_recipient(message):
     if len(candidate.split()) > 6:
         return ""
     # Names/addresses, not a second sentence of instructions. Initials remain valid.
-    if not re.fullmatch(r"[\wÀ-ÿ'@+,-]+(?:\.[\wÀ-ÿ@+-]+)*\.?", candidate.replace(" ", "")):
+    if not re.fullmatch(r"[\wÀ-ÿ'’@+,-]+(?:\.[\wÀ-ÿ@+-]+)*\.?", candidate.replace(" ", "")):
         return ""
     if re.search(r"\b\w{2,}\.[\s]+\w", candidate):
         return ""
