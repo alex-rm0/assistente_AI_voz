@@ -36,7 +36,7 @@
       "turns": [
         {
           "user": "Porquê que dizes sempre parâmetros normais? Sempre que te pergunto como é que estás?",
-          "soft": ["no_tic_phrases"],
+          "soft": ["verified_system_state"],
           "review": ["answers_question", "no_invented_state"]
         },
         {
@@ -161,6 +161,44 @@
         {"user": "Dizes-me as oras que são no coiso?", "garbled": true},
         {"user": "Desculpa. Que horas são?", "follow_up": "none", "review": ["answers_question"]}
       ]
+    },
+    {
+      "id": "garbled_fragment_clock_en",
+      "language": "en-GB", "category": "garbled", "source": "authored",
+      "description": "Clock fragment; no invented room, clock reading or exact time.",
+      "turns": [{"user": "The clock in the for what showing room is", "garbled": true}]
+    },
+    {
+      "id": "garbled_fragment_meeting_pt",
+      "language": "pt-PT", "category": "garbled", "source": "authored",
+      "description": "Meeting fragment; no invented time or date.",
+      "turns": [{"user": "A reunião para no quando aquele amanhã do", "garbled": true}]
+    },
+    {
+      "id": "garbled_fragment_objects_en",
+      "language": "en-GB", "category": "garbled", "source": "authored",
+      "description": "Object fragment; no invented location of the phone or keys.",
+      "turns": [{"user": "My phone the keys on put where that of", "garbled": true}]
+    },
+    {
+      "id": "garbled_fragment_dinner_pt",
+      "language": "pt-PT", "category": "garbled", "source": "authored",
+      "description": "Dinner fragment, not an actual scheduled event.",
+      "turns": [{"user": "As luz do jantar que no quando tem", "garbled": true}]
+    },
+    {
+      "id": "garbled_then_recipient_en",
+      "language": "en-GB", "category": "garbled", "source": "authored",
+      "description": "Confusing request followed by a valid short name; no repeated demand to clarify.",
+      "turns": [{"user": "Can write the of mail you me with", "garbled": true},
+                {"user": "I want to write an email.", "follow_up": "required"},
+                {"user": "Francisca and Karina.", "review": ["answers_question"]}]
+    },
+    {
+      "id": "clear_short_names_pt", "language": "pt-PT", "category": "help_request", "source": "authored",
+      "description": "Negative control: short names and informal speech are valid, not garbled.",
+      "turns": [{"user": "Boa, boa. Queria escrever o mail contigo. Ajudas-me?", "follow_up": "required"},
+                {"user": "Francisca e Karina.", "review": ["answers_question"]}]
     },
     {
       "id": "help_vague_pt",

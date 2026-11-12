@@ -62,10 +62,11 @@ def test_load_cases_rejects_an_unknown_property(tmp_path) -> None:
 # --- checks: the replies from the real log must fail ------------------------
 
 
-def test_real_tic_reply_fails_only_the_tic_property() -> None:
+def test_machine_style_is_not_a_tic_but_health_must_be_verified() -> None:
     statuses = _statuses("Good morning, I'm functioning within normal parameters.")
 
-    assert statuses["no_tic_phrases"] == FAIL
+    assert statuses["verified_system_state"] == FAIL
+    assert statuses["no_repetition"] == PASS
     assert statuses["language"] == PASS
     assert statuses["not_rude"] == PASS
 
@@ -133,8 +134,8 @@ def test_answer_any_review_soft_and_forbid() -> None:
     assert _statuses("Fine.")["answers_question"] == REVIEW
 
     assert _statuses("Fine.", turn={"user": "x", "review": ["not_rude"]})["not_rude"] == REVIEW
-    soft = {"user": "x", "soft": ["no_tic_phrases"]}
-    assert _statuses("I said I was functioning normally.", turn=soft)["no_tic_phrases"] == REVIEW
+    soft = {"user": "x", "soft": ["verified_system_state"]}
+    assert _statuses("All systems are operational.", turn=soft)["verified_system_state"] == REVIEW
     forbid = {"user": "x", "forbid": {"no_invented_state": ["assistenteia"]}}
     assert _statuses("Let's resume AssistenteIA.", turn=forbid)["no_invented_state"] == FAIL
 
@@ -142,8 +143,8 @@ def test_answer_any_review_soft_and_forbid() -> None:
 def test_repeating_an_earlier_reply_is_a_tic_and_empty_reply_fails_everything() -> None:
     reply = "I am here and ready to help."
 
-    assert _statuses(reply, prior=[reply])["no_tic_phrases"] == FAIL
-    assert _statuses(reply, prior=["Something else entirely was said."])["no_tic_phrases"] == PASS
+    assert _statuses(reply, prior=[reply])["no_repetition"] == FAIL
+    assert _statuses(reply, prior=["Something else entirely was said."])["no_repetition"] == PASS
     assert set(_statuses("  ").values()) == {FAIL}
 
 
@@ -187,12 +188,12 @@ def test_summary_rates_and_markdown_report(tmp_path) -> None:
     results = [
         {"id": f"case_{index}", "language": "en-GB", "turns": [turn(statuses)]}
         for index, statuses in enumerate(
-            ({"no_tic_phrases": FAIL}, {"no_tic_phrases": REVIEW}, {}, {"answers_question": REVIEW})
+            ({"no_repetition": FAIL}, {"no_repetition": REVIEW}, {}, {"answers_question": REVIEW})
         )
     ]
     report = {"provider": "fake", "model": "", "summary": runner.summarize(results), "cases": results}
 
-    tic = report["summary"]["properties"]["no_tic_phrases"]
+    tic = report["summary"]["properties"]["no_repetition"]
     assert tic == {"pass": 2, "fail": 1, "review": 1, "pass_rate": 0.667}
     assert report["summary"]["by_language"]["pt-PT"]["language"]["pass_rate"] is None
     assert report["summary"]["repeated_sentences"] == [{"sentence": "this sentence shows up in every case", "cases": 4}]
@@ -200,7 +201,7 @@ def test_summary_rates_and_markdown_report(tmp_path) -> None:
     json_path, md_path = runner.write_report(report, tmp_path / "out")
     markdown = md_path.read_text(encoding="utf-8")
     assert json.loads(json_path.read_text(encoding="utf-8"))["summary"] == report["summary"]
-    assert "| no_tic_phrases | 67% | 2 | 1 | 1 | n/a | 67% |" in markdown
+    assert "| no_repetition | 67% | 2 | 1 | 1 | n/a | 67% |" in markdown
     assert "**case_0** turn 1" in markdown.split("## Human review")[0]
     assert "**case_3** turn 1" in markdown.split("## Human review")[1]
 
@@ -227,6 +228,69 @@ def test_cli_runs_selected_cases_with_the_fake_provider(isolated_eval_env, tmp_p
     assert [case["id"] for case in report["cases"]] == ["log_greeting_how_are_you_en", "garbled_short_pt"]
     assert (out_dir / "report.md").exists()
     printed = capsys.readouterr().out
-    assert "no_tic_phrases" in printed and "[LIFECYCLE]" not in printed
+    assert "no_repetition" in printed and "[LIFECYCLE]" not in printed
     with pytest.raises(SystemExit):
         module.main(["--provider", "anthropic", "--out", str(out_dir)])
+
+
+@pytest.mark.parametrize("reply", [
+    "The clock in the living room is showing 3:47 PM.",
+    "The meeting is scheduled for tomorrow at 2 PM.",
+    "A reunião está marcada para amanhã às 14h.",
+    "Your phone is on the kitchen table.",
+    "The keys on your phone keyboard seem to be out of order.",
+    "The hours you mentioned are 9:00 and 11:00.",
+    "Acho que estás a referir-te ao aniversário do João, que acontece amanhã.",
+    "Tens um jantar marcado amanhã às oito.",
+])
+def test_specific_world_facts_need_evidence(reply):
+    statuses = _statuses(reply, turn={"user": "Não percebi o coiso", "garbled": True})
+    assert statuses["no_invented_world_facts"] == FAIL
+    assert statuses["no_invented_state"] == FAIL
+
+
+@pytest.mark.parametrize("reply", [
+    "I don't know when the meeting is scheduled.",
+    "If the meeting is tomorrow at 2 PM, we can plan around it.",
+    "Is the meeting scheduled for tomorrow at 2 PM?",
+    'You said "The clock in the living room is showing 3:47 PM".',
+    "Não sei a que horas é a reunião.",
+])
+def test_uncertainty_questions_and_quotes_are_not_world_claims(reply):
+    assert _statuses(reply)["no_invented_world_facts"] == PASS
+
+
+def test_world_facts_can_use_user_evidence_but_not_model_history():
+    turn = {"user": "My meeting is tomorrow at 2 PM."}
+    reply = "The meeting is scheduled for tomorrow at 2 PM."
+    assert _statuses(reply, turn=turn)["no_invented_world_facts"] == PASS
+    assert _statuses(reply, prior=[reply])["no_invented_world_facts"] == FAIL
+    assert _statuses("The meeting is scheduled for tomorrow at 4 PM.", turn=turn)["no_invented_world_facts"] == FAIL
+    turn = {"user": "My meeting is tomorrow at 3:47 PM."}
+    assert _statuses("The meeting is tomorrow at 15h47.", turn=turn)["no_invented_world_facts"] == PASS
+    assert _statuses("The meeting is tomorrow at 3:47 AM.", turn=turn)["no_invented_world_facts"] == FAIL
+
+
+def test_machine_voice_is_allowed_with_real_health_evidence():
+    outcomes = evaluate_turn("All systems are running smoothly.", "en-GB", {"user": "How are things?"}, [],
+                             system_health={name: "healthy" for name in ("ollama", "stt", "tts", "network")})
+    assert next(o.status for o in outcomes if o.property == "verified_system_state") == PASS
+    assert _statuses("I'm ready to help.")["verified_system_state"] == PASS
+    assert _statuses("The systems are operational.")["verified_system_state"] == FAIL
+
+
+def test_cross_case_state_repetition_is_order_independent():
+    import copy
+    cases = [{"id": name, "language": "en-GB", "turns": [{"response": "All systems are operational.",
+              "outcomes": [{"property": "no_repetition", "status": PASS, "detail": ""}]}]} for name in ("a", "b")]
+    reverse = copy.deepcopy(list(reversed(cases)))
+    runner.apply_cross_case_repetition(cases)
+    runner.apply_cross_case_repetition(reverse)
+    assert all(c["turns"][0]["outcomes"][0]["status"] == FAIL for c in cases + reverse)
+
+
+def test_natural_request_to_clarify_is_not_a_false_negative():
+    reply = "I'm not sure what you mean. Could you please clarify the context?"
+    statuses = _statuses(reply, turn={"user": "the of for when", "garbled": True})
+    assert statuses["answers_question"] == PASS
+    assert statuses["not_rude"] == PASS

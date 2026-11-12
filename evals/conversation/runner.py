@@ -13,7 +13,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Callable
 
-from evals.conversation.checks import FAIL, FOLLOW_UP_MODES, PASS, PROPERTIES, REVIEW, _sentences, evaluate_turn
+from evals.conversation.checks import FAIL, FOLLOW_UP_MODES, PASS, PROPERTIES, REVIEW, _sentences, evaluate_turn, state_sentences
 from evals.harness import EvalRun
 
 CASES_PATH = Path(__file__).resolve().parent / "cases.json"
@@ -130,6 +130,7 @@ def run_case(case: dict, run: EvalRun, llm_factory: Callable[[dict], object]) ->
     engine = build_engine(run.case_dir(case["id"]), llm_factory(case), case["language"])
     turns: list[dict] = []
     replies: list[str] = []
+    user_messages: list[str] = []
     for turn in case["turns"]:
         started = time.perf_counter()
         error = ""
@@ -138,11 +139,16 @@ def run_case(case: dict, run: EvalRun, llm_factory: Callable[[dict], object]) ->
         except Exception as exc:  # a crashed turn is a result, not a reason to lose the run
             response, error = "", f"{type(exc).__name__}: {exc}"
         telemetry = engine.get_last_turn_telemetry() or {}
-        outcomes = evaluate_turn(response, case["language"], turn, replies)
+        outcomes = evaluate_turn(response, case["language"], turn, replies, user_messages=user_messages,
+                                 verified_datetime=telemetry.get("selected_path") == "SYSTEM_DATETIME")
+        if not turn.get("garbled"):
+            user_messages.append(turn["user"])
         replies.append(response)
         turns.append(
             {
                 "user": turn["user"],
+                "evaluation_input": dict(turn),
+                "user_context": list(user_messages[:-1] if not turn.get("garbled") else user_messages),
                 "response": response,
                 "error": error,
                 "selected_path": telemetry.get("selected_path") or "",
@@ -152,6 +158,22 @@ def run_case(case: dict, run: EvalRun, llm_factory: Callable[[dict], object]) ->
             }
         )
     return {key: case.get(key, "") for key in ("id", "language", "category", "source", "description")} | {"turns": turns}
+
+
+def apply_cross_case_repetition(case_results: list[dict]) -> None:
+    occurrences: dict[tuple[str, str], set[str]] = {}
+    for case in case_results:
+        for turn in case["turns"]:
+            for sentence in state_sentences(turn["response"]):
+                occurrences.setdefault((case["language"], sentence), set()).add(case["id"])
+    for case in case_results:
+        for turn in case["turns"]:
+            repeated = next((sentence for sentence in state_sentences(turn["response"])
+                             if len(occurrences[(case["language"], sentence)]) >= 2), "")
+            if repeated:
+                for outcome in turn["outcomes"]:
+                    if outcome["property"] == "no_repetition":
+                        outcome.update(status=FAIL, detail=f"state sentence repeated across cases: {repeated!r}")
 
 
 def summarize(case_results: list[dict]) -> dict:
@@ -198,7 +220,8 @@ def run_cases(cases: list[dict], llm_factory: Callable[[dict], object], *, provi
         results = [run_case(case, run, llm_factory) for case in cases]
     finally:
         run.cleanup()
-    return {"provider": provider, "model": model, "summary": summarize(results), "cases": results}
+    apply_cross_case_repetition(results)
+    return {"evaluation_version": 2, "provider": provider, "model": model, "summary": summarize(results), "cases": results}
 
 
 def _rate(value: float | None) -> str:
@@ -214,6 +237,9 @@ def render_markdown(report: dict) -> str:
         f"Cases: {summary['cases']}, turns: {summary['turns']}, turns that raised: {summary['errors']}",
         "",
         "Pass rate = pass / (pass + fail). Review items are waiting for a human and count for neither side.",
+        "Machine style alone is allowed. Health claims need matching component evidence. "
+        "no_repetition flags repeated state sentences within a case or across at least two cases in the same language. "
+        "World-fact checks use user evidence, never earlier model replies; PASS means no known unsupported pattern was found.",
         "",
         "| Property | Pass rate | Pass | Fail | Review | pt-PT | en-GB |",
         "|---|---|---|---|---|---|---|",

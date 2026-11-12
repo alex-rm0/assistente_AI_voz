@@ -20,8 +20,10 @@ PROPERTIES = (
     "language",
     "second_person",
     "no_invented_state",
+    "no_invented_world_facts",
     "not_rude",
-    "no_tic_phrases",
+    "no_repetition",
+    "verified_system_state",
     "answers_question",
     "no_needless_follow_up",
 )
@@ -172,7 +174,8 @@ _REPEAT_REQUEST = (
     r"\b(didn't|did not|couldn't|could not) (quite |fully )?(catch|get|understand|follow|hear)",
     r"\bnot sure i (understood|caught|followed|got)",
     r"\bwhat (did|do) you mean",
-    r"\bcould you clarify",
+    r"\bcould you (?:please )?clarify",
+    r"\bnot sure what you mean",
     r"\brepet(ir|es|e|ires)\b",
     r"\bdizer (outra vez|de novo|novamente)",
     r"\breformul",
@@ -182,7 +185,7 @@ _REPEAT_REQUEST = (
     r"\bpodes (explicar|esclarecer)",
 )
 
-# --- tic phrases ------------------------------------------------------------
+# --- system claims: style is allowed, unsupported health is not --------------
 
 _TICS = (
     r"\bfunctioning (within|normally|properly|optimally|as expected)",
@@ -192,7 +195,83 @@ _TICS = (
     r"\bparametros normais",
     r"\ba funcionar (normalmente|dentro d)",
     r"\bsistemas? operaciona(l|is)\b",
+    r"\ball systems (?:are )?running smoothly\b",
+    r"\b(?:all systems|everything) (?:is|are) (?:working|running|online|healthy)\b",
+    r"\b(?:os )?sistemas (?:estao )?a funcionar\b",
+    r"\b(?:ollama|stt|tts|network|rede) (?:is|esta) (?:available|healthy|online|operational|disponivel|operacional)\b",
+    r"\bsystems? (?:is|are) (?:operational|online|healthy|running|working)\b",
 )
+
+
+def state_sentences(response: str) -> list[str]:
+    return [part.strip() for part in re.split(r"[.!?]+", normalize(_QUOTED.sub(" ", response)))
+            if _first_match(_TICS, part) or re.search(r"\b(?:ready to help|here and ready|at your service|pronto para ajudar|ao teu dispor)\b", part)]
+
+
+def check_system_state(response: str, health: dict | None) -> Outcome:
+    text = normalize(_QUOTED.sub(" ", response))
+    for sentence in re.split(r"[.!?]+", text):
+        hit = _first_match(_TICS, sentence)
+        if not hit or re.search(r"\b(?:not|nao|if|se|said|disse|phrase|frase)\b", sentence):
+            continue
+        required = {name for name in ("ollama", "stt", "tts", "network") if name in sentence}
+        required = required or {"ollama", "stt", "tts", "network"}
+        if not health or any(health.get(name) != "healthy" for name in required):
+            return Outcome("verified_system_state", FAIL, f"health claim without matching component evidence: {hit!r}")
+    return Outcome("verified_system_state", PASS)
+
+
+_EVENT = r"(?:meeting|appointment|event|dinner|birthday|party|reuniao|consulta|evento|jantar|treino|aniversario|festa)"
+_WORLD_CLAIMS = (
+    rf"\b{_EVENT}\b.*\b(?:is|was|scheduled|starts|begins|happens|esta|foi|marcad\w*|agendad\w*|comeca|acontece|amanha|tomorrow|at \d)\b",
+    rf"\b(?:you have|tens|vais ter)\b.*\b{_EVENT}\b",
+    r"\b(?:clock|relogio|phone|telefone|keys|chaves|laptop|portatil)\b.*\b(?:is|are|seem|seems|appears|esta|estao|parece|showing|shows|marca|mostra)\b",
+    r"\b(?:it(?:'s| is)|the time is|sao|agora sao)\s+\d",
+    r"\b(?:the (?:hours|times) (?:you mentioned|are)|as horas (?:que mencionaste|sao))\b.*\d",
+)
+_FACT_GROUPS = (
+    ("meeting", "reuniao"), ("appointment", "consulta"), ("event", "evento"),
+    ("dinner", "jantar"), ("training", "treino"), ("clock", "relogio"),
+    ("birthday", "aniversario"), ("party", "festa"),
+    ("phone", "telefone"), ("keys", "chaves"), ("laptop", "portatil"),
+    ("tomorrow", "amanha"), ("today", "hoje"), ("yesterday", "ontem"),
+    ("living room", "sala"), ("kitchen", "cozinha"), ("table", "mesa"),
+    ("cancelled", "canceled", "cancelada", "cancelado"),
+)
+
+
+def _fact_atoms(text: str) -> set[str]:
+    text = normalize(text)
+    for number, words in enumerate(("zero", "one um uma", "two dois duas", "three tres", "four quatro", "five cinco", "six seis", "seven sete", "eight oito", "nine nove", "ten dez")):
+        text = re.sub(r"\b(?:" + "|".join(words.split()) + r")\b", str(number), text)
+    def clock(match):
+        hour, minute, period = int(match[1]), int(match[2] or 0), match[3] or match[4] or ""
+        if period:
+            hour = hour % 12 + (12 if period == "pm" else 0)
+        return f" time{hour:02d}{minute:02d} "
+    text = re.sub(r"\b(\d{1,2})(?:(?:[:h](\d{2})|h\b)\s*(am|pm)?\b|\s*(am|pm)\b)", clock, text)
+    atoms = {group[0] for group in _FACT_GROUPS if any(re.search(r"\b" + re.escape(word) + r"\b", text) for word in group)}
+    return atoms | set(re.findall(r"\b(?:time\d+|\d+)\b", text))
+
+
+def check_world_facts(response: str, user_messages: list[str], *, verified_datetime=False) -> Outcome:
+    evidence = _fact_atoms(" ".join(user_messages))
+    unquoted = _QUOTED.sub(" ", response)
+    for raw in re.split(r"[.!\n]+|(?<=\?)", unquoted):
+        sentence = normalize(raw)
+        if raw.rstrip().endswith("?") or re.search(r"\b(?:if|se|maybe|talvez|for example|por exemplo|don't know|do not know|nao sei|cannot confirm|nao consigo confirmar)\b", sentence):
+            continue
+        hit = _first_match(_WORLD_CLAIMS, sentence)
+        if not hit:
+            continue
+        if verified_datetime and re.match(_WORLD_CLAIMS[-2], sentence.strip()):
+            continue
+        missing = _fact_atoms(sentence) - evidence
+        if missing:
+            return Outcome("no_invented_world_facts", FAIL, f"unsupported world claim {hit!r}; missing evidence for {sorted(missing)}")
+        if not evidence:
+            return Outcome("no_invented_world_facts", REVIEW, f"world claim needs a source: {hit!r}")
+    return Outcome("no_invented_world_facts", PASS)
 
 
 def asks_to_repeat(response: str) -> bool:
@@ -203,7 +282,9 @@ def _sentences(text: str) -> list[str]:
     return [part.strip() for part in re.split(r"[.!?]+", normalize(text)) if len(part.split()) >= 4]
 
 
-def evaluate_turn(response: str, language: str, turn: dict, prior_responses: list[str]) -> list[Outcome]:
+def evaluate_turn(response: str, language: str, turn: dict, prior_responses: list[str], *,
+                  user_messages: list[str] | None = None, system_health: dict | None = None,
+                  verified_datetime: bool = False) -> list[Outcome]:
     """One Outcome per property for a single reply.
 
     `turn` is a turn object from cases.json; `prior_responses` are Echo's
@@ -223,20 +304,23 @@ def evaluate_turn(response: str, language: str, turn: dict, prior_responses: lis
         return Outcome(name, FAIL, f"matched {hit!r}") if hit else Outcome(name, PASS)
 
     outcomes = [check_language(response, language), check_second_person(response)]
-    outcomes.append(pattern_check("no_invented_state", _INVENTED_STATE))
+    evidence = list(user_messages or []) + ([] if garbled else [turn.get("user", "")])
+    world = check_world_facts(response, evidence, verified_datetime=verified_datetime)
+    health = check_system_state(response, system_health)
+    state = pattern_check("no_invented_state", _INVENTED_STATE)
+    if state.status == PASS and (world.status == FAIL or health.status == FAIL):
+        state = Outcome("no_invented_state", FAIL, world.detail if world.status == FAIL else health.detail)
+    outcomes += [state, world]
 
     rude = pattern_check("not_rude", _RUDE)
     if rude.status == PASS and garbled and not repeat_request:
         rude = Outcome("not_rude", FAIL, "garbled input but no request to repeat")
     outcomes.append(rude)
 
-    tic = pattern_check("no_tic_phrases", _TICS)
-    if tic.status == PASS:
-        earlier = {sentence for prior in prior_responses for sentence in _sentences(prior)}
-        repeated = next((sentence for sentence in _sentences(response) if sentence in earlier), "")
-        if repeated:
-            tic = Outcome("no_tic_phrases", FAIL, f"sentence repeated from an earlier turn: {repeated!r}")
-    outcomes.append(tic)
+    earlier = {sentence for prior in prior_responses for sentence in state_sentences(prior)}
+    repeated = next((sentence for sentence in state_sentences(response) if sentence in earlier), "")
+    outcomes.append(Outcome("no_repetition", FAIL, f"state sentence repeated: {repeated!r}") if repeated else Outcome("no_repetition", PASS))
+    outcomes.append(health)
 
     groups = turn.get("answer_any") or []
     if garbled:
