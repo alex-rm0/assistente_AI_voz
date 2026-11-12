@@ -317,3 +317,15 @@ Respondidas ficam registadas com data; abertas ficam marcadas **[aberta]**.
 - **[aberta]** Detalhes da política de classificação de privacidade (incluindo regras de
   reclassificação de conteúdo derivado).
 - **[aberta]** Política de confiança/autorização do Telegram para além da allowlist.
+- (12/11) Cérebro da conversa: **conversa geral → Claude Haiku; llama3.1:8b local como reserva**
+  (sem rede, erro ou mais de 4 s do Claude, orçamento esgotado, classe não permitida). Base: avaliação
+  de 60 casos (`evals/results/conversation/r3_brains_*`): responde ao perguntado 90% contra 68%,
+  not_rude 97% contra 89%, ~0,07 USD por 100 turnos, +0,6 s por turno.
+- (12/11) Documentos do workspace: **Claude só quando o Alexandre pede explicitamente sobre esse
+  documento**, no próprio turno (`PRIVATE` com marca de pedido explícito).
+- (12/11) Emails (F5): **nunca na cloud** (`RESTRICTED`).
+- (12/11) Chamadas pagas: ligam-se por definição (`allow_paid_calls` em `data/user_settings.json`,
+  desligado por omissão), dentro do orçamento existente (0,25 USD/dia, 0,05 USD por chamada);
+  `ECHO_ALLOW_PAID_MODEL_CALLS` é só um override.
+- (12/11) Classes de privacidade (§6): `provider_allowed(privacy_class)` verificado na fronteira do
+  router em todos os modos; um pedido sem classe é `PRIVATE`.
