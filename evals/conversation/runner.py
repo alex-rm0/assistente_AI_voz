@@ -127,6 +127,13 @@ def build_engine(case_dir: Path, llm, language: str):
     )
     if engine.response_language != language:
         raise RuntimeError(f"Engine language is {engine.response_language!r}, expected {language!r}")
+    # With a real local model, "how are you?" is answered from real measurements
+    # (Ollama and the network; no speech components run here). The fake provider measures nothing.
+    from assistant.system_health import SystemHealth, default_probes
+
+    probes = default_probes(llm=llm)
+    if "ollama" in probes:
+        engine.system_health = SystemHealth(probes)
     return engine
 
 
@@ -147,6 +154,7 @@ def run_case(case: dict, run: EvalRun, llm_factory: Callable[[dict], object]) ->
         telemetry = engine.get_last_turn_telemetry() or {}
         outcomes = evaluate_turn(response, case["language"], turn, replies, user_messages=user_messages,
                                  profile_text=profile_text,
+                                 system_health=engine.system_health.snapshot() if getattr(engine, "system_health", None) else None,
                                  verified_datetime=telemetry.get("selected_path") == "SYSTEM_DATETIME")
         if not turn.get("garbled"):
             user_messages.append(turn["user"])

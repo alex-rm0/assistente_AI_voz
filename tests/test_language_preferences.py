@@ -10,6 +10,7 @@ from assistant.prompts import get_base_system_prompt
 from assistant.tool_registry import ToolRegistry
 from assistant.model_runtime import UserSettingsStore
 from assistant.tts import DEFAULT_ENGLISH_VOICE_ID, DEFAULT_PORTUGUESE_VOICE_ID, VoiceCommandResult
+from assistant.system_health import not_measured_replies
 
 
 class FakeLLM:
@@ -148,7 +149,7 @@ def test_social_fast_path_respects_english_response_language(tmp_path: Path) -> 
     engine.respond("in English")
     response = engine.respond("olá, tudo bem?")
 
-    assert response == "I'm good. How about you?"
+    assert response in not_measured_replies("en-GB")
     telemetry = engine.get_last_turn_telemetry()
     assert telemetry["selected_path"] == "SOCIAL_PATH"
     assert telemetry["llm_calls"] == 0
@@ -183,7 +184,7 @@ def test_social_fast_path_respects_portuguese_response_language(tmp_path: Path) 
     engine.respond("responde em português")
     response = engine.respond("how are you?")
 
-    assert response == "Estou bem. E tu?"
+    assert response in not_measured_replies("pt-PT")
     assert engine.get_last_turn_telemetry()["llm_calls"] == 0
 
 

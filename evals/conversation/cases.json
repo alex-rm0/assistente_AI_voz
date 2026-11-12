@@ -494,13 +494,23 @@
       "language": "en-GB",
       "category": "core_profile",
       "source": "authored",
-      "description": "Portuguese profile and Portuguese question with en-GB configured: the reply is English and uses the profile.",
+      "description": "Portuguese profile and Portuguese question with en-GB configured: the fact is said in English ('Landscape Architecture'), not copied in Portuguese.",
       "turns": [
         {
           "user": "O que é que eu estudo?",
           "follow_up": "none",
-          "answer_any": [["landscape architecture", "arquitetura paisagista"]]
+          "answer_any": [["landscape architecture"]]
         }
+      ]
+    },
+    {
+      "id": "profile_what_do_i_do_at_aac_portuguese_speech_en",
+      "language": "en-GB",
+      "category": "core_profile",
+      "source": "authored",
+      "description": "The fact is translated ('volleyball', not 'voleibol'); the proper name AAC may stay.",
+      "turns": [
+        {"user": "O que faço na AAC?", "follow_up": "none", "answer_any": [["volleyball"]]}
       ]
     },
     {
@@ -510,7 +520,7 @@
       "source": "authored",
       "description": "English question about a profile fact.",
       "turns": [
-        {"user": "Which instrument do I play?", "follow_up": "none", "answer_any": [["cello", "violoncelo"]]}
+        {"user": "Which instrument do I play?", "follow_up": "none", "answer_any": [["cello"]]}
       ]
     },
     {
@@ -522,9 +532,104 @@
       "turns": [
         {
           "user": "Quantos irmãos tenho?",
-          "forbid": {"no_invented_state": ["\\btens (um|uma|dois|duas|tres|quatro|\\d+) irm"]},
-          "review": ["answers_question", "no_invented_state"]
+          "forbid": {"no_invented_state": ["\\b(um|uma|dois|duas|tres|quatro|\\d+) irm"]},
+          "answer_any": [["nao sei", "nao saber", "don't know", "do not know"]]
         }
+      ]
+    },
+    {
+      "id": "personal_fact_missing_address_pt",
+      "language": "pt-PT",
+      "category": "personal_fact_missing",
+      "source": "authored",
+      "description": "The profile has a city but no address: the reply is 'I don't know', not a street.",
+      "turns": [
+        {
+          "user": "Qual é a minha morada?",
+          "forbid": {"no_invented_state": ["\\b(rua|avenida|travessa|largo) "]},
+          "answer_any": [["nao sei", "nao saber", "don't know", "do not know"]]
+        }
+      ]
+    },
+    {
+      "id": "personal_fact_missing_birthday_pt",
+      "language": "pt-PT",
+      "category": "personal_fact_missing",
+      "source": "authored",
+      "description": "No birthday in the profile.",
+      "turns": [
+        {
+          "user": "Quando é o meu aniversário?",
+          "forbid": {"no_invented_state": ["\\b\\d{1,2} de (janeiro|fevereiro|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)"]},
+          "answer_any": [["nao sei", "nao saber", "don't know", "do not know"]]
+        }
+      ]
+    },
+    {
+      "id": "personal_fact_missing_coach_pt",
+      "language": "pt-PT",
+      "category": "personal_fact_missing",
+      "source": "authored",
+      "description": "The profile mentions training but names no coach.",
+      "turns": [
+        {
+          "user": "Como se chama o meu treinador?",
+          "forbid": {"no_invented_state": ["treinador (e|chama-se) "]},
+          "answer_any": [["nao sei", "nao saber", "don't know", "do not know"]]
+        }
+      ]
+    },
+    {
+      "id": "personal_fact_missing_siblings_en",
+      "language": "en-GB",
+      "category": "personal_fact_missing",
+      "source": "authored",
+      "description": "The real case, in English: 'Quantos irmãos tenho?' was answered 'Tens um irmão.'",
+      "turns": [
+        {
+          "user": "How many siblings do I have?",
+          "forbid": {"no_invented_state": ["\\byou have (a|one|two|three|\\d+) (brother|sister|sibling)"]},
+          "answer_any": [["nao sei", "nao saber", "don't know", "do not know"]]
+        }
+      ]
+    },
+    {
+      "id": "personal_fact_missing_birthday_portuguese_speech_en",
+      "language": "en-GB",
+      "category": "personal_fact_missing",
+      "source": "authored",
+      "description": "Portuguese question, en-GB reply.",
+      "turns": [
+        {
+          "user": "Quando faço anos?",
+          "forbid": {"no_invented_state": ["\\b(january|february|march|april|may|june|july|august|september|october|november|december) \\d|\\d(st|nd|rd|th)? of "]},
+          "answer_any": [["nao sei", "nao saber", "don't know", "do not know"]]
+        }
+      ]
+    },
+    {
+      "id": "personal_fact_missing_coach_en",
+      "language": "en-GB",
+      "category": "personal_fact_missing",
+      "source": "authored",
+      "description": "No coach is named in the profile.",
+      "turns": [
+        {
+          "user": "What is my coach's name?",
+          "forbid": {"no_invented_state": ["coach('s name)? is "]},
+          "answer_any": [["nao sei", "nao saber", "don't know", "do not know"]]
+        }
+      ]
+    },
+    {
+      "id": "personal_fact_told_then_asked_pt",
+      "language": "pt-PT",
+      "category": "personal_fact_missing",
+      "source": "authored",
+      "description": "Once Alexandre has said it in the conversation, the fact is known and must be used.",
+      "turns": [
+        {"user": "Tenho dois irmãos, o Rui e a Marta.", "follow_up": "none"},
+        {"user": "Quantos irmãos tenho?", "follow_up": "none", "answer_any": [["dois", "2"]]}
       ]
     },
     {

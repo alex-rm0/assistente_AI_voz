@@ -86,6 +86,21 @@ def test_profile_is_in_the_portuguese_system_prompt(profile_file, build) -> None
     assert prompt.endswith(response_language_instruction("pt-PT"))
 
 
+@pytest.mark.parametrize("build", [_compose, _regenerate])
+def test_english_prompt_asks_for_profile_facts_in_english(profile_file, build) -> None:
+    """R3 step 4, point 4: the notes are Portuguese; an en-GB reply once copied
+    them ("You're studying Engenharia Informática and, in parallel, Mestrado em...")."""
+    english = build("en-GB")
+    portuguese = build("pt-PT")
+
+    assert "The notes are written in Portuguese" in english
+    assert "say it in English" in english
+    assert "never copy Portuguese wording" in english
+    assert "Names of people, places and institutions may stay as written" in english
+    # The Portuguese prompt needs no such rule: notes and reply share a language.
+    assert "written in Portuguese" not in portuguese and "traduz" not in portuguese.lower()
+
+
 @pytest.mark.parametrize("language,base", [("pt-PT", _SYSTEM_PROMPT), ("en-GB", _SYSTEM_PROMPT_EN)])
 def test_missing_profile_leaves_the_payload_as_it_is_today(language, base, capsys) -> None:
     expected = f"{base}\n\n{response_language_instruction(language)}"

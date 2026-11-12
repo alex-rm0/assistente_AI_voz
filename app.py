@@ -25,6 +25,7 @@ from assistant.personal_model import PersonalModel
 from assistant.presence_manager import PresenceManager
 from assistant.prompts import get_base_system_prompt
 from assistant.session_manager import SessionManager
+from assistant.system_health import SystemHealth, default_probes
 from assistant.secret_storage import WindowsCredentialManagerSecretStorage, resolve_anthropic_api_key
 from assistant.task_research import OllamaSemanticExtractor
 from assistant.tts import TTSManager
@@ -366,6 +367,13 @@ def main() -> int:
             tts_manager=tts_manager,
             get_response_language=lambda: engine.response_language,
         )
+        # "How are you?" is answered from these measurements (assistant/system_health.py).
+        engine.system_health = SystemHealth(default_probes(
+            llm=llm,
+            tts_manager=tts_manager,
+            get_transcriber=lambda: getattr(window.controller, "voice_transcriber", None),
+            get_response_language=lambda: engine.response_language,
+        ))
         # Debug only (off by default): keep accepted voice captures + their
         # transcripts for scripts/benchmark_stt.py.
         transcriber = getattr(window.controller, "voice_transcriber", None)

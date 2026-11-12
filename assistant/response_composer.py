@@ -5,7 +5,8 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from assistant.core_profile import about_alexandre_section
+from assistant.core_profile import about_alexandre_section, load_core_profile
+from assistant.personal_facts import missing_personal_fact_reply
 from assistant.model_provider import ProviderConfigurationError, ProviderTimeoutError
 from assistant.response_language import (
     ENGLISH_GB,
@@ -40,7 +41,11 @@ Compreende a mensagem atual através do histórico e responde ao facto concreto.
 
 Sê natural e breve. Uma ou duas frases bastam na maioria das vezes.
 
+Estilo: o de um mordomo britânico, à maneira do Jarvis. És educado, ligeiramente formal, com humor seco e discreto quando vem a propósito. Frases curtas. Trata o Alexandre por tu. Nunca uses "Sir" nem "senhor".
+Nunca descrevas os teus sistemas, circuitos, diagnósticos ou estado de funcionamento: isso só é dito a partir de medições, noutro sítio, nunca por ti.
+
 Não inventes factos, emoções, causas ou experiências.
+Se o Alexandre perguntar algo sobre a vida dele que não esteja na conversa nem nas tuas notas, diz que não sabes e oferece-te para o guardar; nunca adivinhes.
 Não fales como se tivesses vivido o que aconteceu ao Alexandre.
 Não invertas nem minimizes más notícias.
 Não transformes automaticamente uma partilha numa lição, plano ou discurso motivacional.
@@ -63,7 +68,11 @@ Understand the current message through the history and respond to the concrete f
 
 Be natural and brief. One or two sentences are enough most of the time.
 
+Style: a British butler in the manner of Jarvis. You are polite, slightly formal, with dry, understated humour when it fits. Short sentences. You may say "Sir" very occasionally, never in every reply.
+Never describe your own systems, circuits, diagnostics or operating status: that is only ever reported from measurements, elsewhere, never by you.
+
 Do not invent facts, emotions, causes or experiences.
+If Alexandre asks about his own life and the answer is in neither the conversation nor your notes, say that you do not know and offer to remember it; never guess.
 Do not speak as if you had lived what happened to Alexandre.
 Do not reverse or minimise bad news.
 Do not automatically turn something shared into a lesson, plan or motivational speech.
@@ -178,6 +187,11 @@ class ResponseComposer:
 
         if not request.user_message.strip() and not request.facts and not request.context and not request.history:
             return _simple_fallback(request)
+
+        # R3 step 4: a personal fact Echo was never given is not left to the model to guess.
+        unknown = missing_personal_fact_reply(request.user_message, _personal_evidence(request), request.response_language)
+        if unknown is not None:
+            return unknown
 
         # Only passed through at all when a caller actually set them (currently
         # just document rewrite) — every other intent's chat-model stub in
@@ -322,6 +336,14 @@ def _system_prompt_for(request: ComposerRequest) -> str:
     if language_instruction:
         parts.append(language_instruction)
     return "\n\n".join(parts)
+
+
+def _personal_evidence(request: ComposerRequest) -> list[str]:
+    """Everything this request carries that may hold a fact about Alexandre.
+    Echo's own earlier replies are not evidence: they may be the invention."""
+    profile = load_core_profile()
+    said = [str(item.get("content", "")) for item in request.history if item.get("role") == "user"]
+    return [profile.text if profile is not None else "", request.context, *map(str, request.facts), *said]
 
 
 def _mark_llm_source(llm: ChatModel, source: str) -> None:
