@@ -5,6 +5,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from assistant.core_profile import about_alexandre_section
 from assistant.model_provider import ProviderConfigurationError, ProviderTimeoutError
 from assistant.response_language import (
     ENGLISH_GB,
@@ -101,9 +102,11 @@ def _with_language_anchor(user_message: str, response_language: str) -> str:
 
 
 def _base_system_prompt(response_language: str) -> str:
-    if normalize_response_language(response_language) == ENGLISH_GB:
-        return _SYSTEM_PROMPT_EN
-    return _SYSTEM_PROMPT
+    base = _SYSTEM_PROMPT_EN if normalize_response_language(response_language) == ENGLISH_GB else _SYSTEM_PROMPT
+    # R3 step 3: the core profile goes right after the base rules, in
+    # compose() and regenerate(); without a profile the prompt is unchanged.
+    about = about_alexandre_section(response_language)
+    return f"{base}\n\n{about}" if about else base
 
 _REGENERATION_INSTRUCTION = (
     "A resposta anterior foi semanticamente incompatível com a mensagem do Alexandre.\n"
