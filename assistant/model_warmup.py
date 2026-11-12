@@ -95,10 +95,10 @@ class ModelWarmup:
         if not callable(getattr(self.transcriber, "prewarm_stt", None)):
             return
         if getattr(self.transcriber, "stt_provider", None) == "openai-whisper":
-            # Default STT: nothing to warm -- log it here, without a thread.
+            # An explicitly selected CPU backend has no GPU worker to warm.
             if "stt" not in self.results:
                 self.results["stt"] = "skipped"
-                print("[MODEL_WARMUP] component=stt event=skipped reason=default_stt", flush=True)
+                print("[MODEL_WARMUP] component=stt event=skipped reason=explicit_cpu_backend", flush=True)
             return
         self._start("stt", self._warm_stt)
 
@@ -136,7 +136,7 @@ class ModelWarmup:
     def _warm_stt(self) -> None:
         prewarm_stt = getattr(self.transcriber, "prewarm_stt", None)
         if callable(prewarm_stt) and not self.cancelled:
-            self._step("stt", prewarm_stt, skipped_reason="default_stt")
+            self._step("stt", prewarm_stt, skipped_reason="backend_not_warmable")
 
     def _step(self, component: str, warm: Callable[[], Any], *, skipped_reason: str = "") -> None:
         started = time.perf_counter()

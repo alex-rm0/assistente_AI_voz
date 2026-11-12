@@ -226,7 +226,7 @@ def test_no_thread_when_there_is_nothing_to_warm(monkeypatch) -> None:
     assert created == []
 
 
-def test_default_stt_without_ollama_is_skipped_without_a_thread(monkeypatch, capsys) -> None:
+def test_explicit_cpu_stt_without_ollama_is_skipped_without_a_thread(monkeypatch, capsys) -> None:
     from assistant.voice_input import VoiceTranscriber
 
     created = _count_threads(monkeypatch)
@@ -235,4 +235,26 @@ def test_default_stt_without_ollama_is_skipped_without_a_thread(monkeypatch, cap
 
     assert created == []
     assert warmup.results == {"stt": "skipped"}
-    assert "[MODEL_WARMUP] component=stt event=skipped reason=default_stt" in capsys.readouterr().out
+    assert "[MODEL_WARMUP] component=stt event=skipped reason=explicit_cpu_backend" in capsys.readouterr().out
+
+
+def test_project_default_stt_is_warmed_without_environment(monkeypatch, capsys):
+    import json
+    from pathlib import Path
+    from assistant.voice_input import VoiceTranscriber
+    for key in ("ECHO_STT_PROVIDER", "ECHO_STT_MODEL", "ECHO_STT_PYTHON", "HF_HOME"):
+        monkeypatch.delenv(key, raising=False)
+    settings = json.loads((Path(__file__).resolve().parents[1] / "config/settings.json").read_text(encoding="utf-8"))["voice"]
+    transcriber = VoiceTranscriber(model_name=settings["model"], stt_settings=settings)
+    calls = []
+    class Backend:
+        def warmup(self):
+            calls.append("warmed")
+    transcriber._stt_backend = Backend()
+    warmup = ModelWarmup(transcriber=transcriber)
+    warmup.start_stt()
+    for thread in warmup._threads.values():
+        thread.join(timeout=2)
+    assert calls == ["warmed"]
+    assert warmup.results == {"stt": "ready"}
+    assert "reason=default_stt" not in capsys.readouterr().out

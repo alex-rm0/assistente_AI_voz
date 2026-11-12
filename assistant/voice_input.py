@@ -1084,8 +1084,8 @@ class VoiceTranscriber:
         return text
 
     def prewarm_stt(self) -> bool:
-        """Warm the GPU STT worker ahead of the first turn. No-op (False)
-        with the default openai-whisper STT. Blocking; raises on failure."""
+        """Warm configured GPU STT, or its CPU fallback, off the GUI thread.
+        Explicit CPU selection remains lazy. Blocking; raises on failure."""
         with self._stt_lock:
             if self._stt_closed:
                 return False
@@ -1109,7 +1109,8 @@ class VoiceTranscriber:
             raise RuntimeError("STT closed")
         if self._model is None:
             import whisper
-            self._model = whisper.load_model(self.model_name)
+            options = {"device": "cpu"} if self.stt_degraded else {}
+            self._model = whisper.load_model(self.model_name, **options)
         return self._model
 
     def set_stt_status_callback(self, callback) -> None:
