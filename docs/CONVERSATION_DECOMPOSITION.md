@@ -177,9 +177,9 @@ engine em que toca (E = escreve, L = só lê).
 
 - **Código**: B (711–752), J (2205–2252), `report_workspace_capacity` (4474–4505), R. ≈215 linhas.
 - **Entradas**: `prototype_web_ui/controller.py` chega ao engine por `responder.__self__` e
-  `getattr`: `set_progress_listener` (l. 54–55), `cancel_current_request` (l. 1355–1356),
-  `report_workspace_capacity` (l. 1430–1431), `consume_ui_events` (l. 2106–2107) e `llm` para o
-  warmup (l. 449, 472). Dentro do engine, `_queue_ui_event` é chamado por 23 métodos (49 sítios),
+  `getattr`: `set_progress_listener` (l. 55), `cancel_current_request` (l. 1360),
+  `report_workspace_capacity` (l. 1435), `consume_ui_events` (l. 2119) e `llm` para o
+  warmup (l. 454, 477). Dentro do engine, `_queue_ui_event` é chamado por 23 métodos (49 sítios),
   `_queue_semantic_object_sync` por 9; `is_cancel_requested` e `_emit_progress` só são usados na
   reescrita de documentos (5930–6121).
 - **Saídas**: `UIEventAdapter.serialize`, `voice_input` (`check_microphone`,
@@ -193,8 +193,8 @@ engine em que toca (E = escreve, L = só lê).
     devolve texto; a fronteira no `conversation.py` é só cancelamento, progresso, eventos e estado.
   - Não existe contrato: o controller descobre os métodos por nome em tempo de execução.
   - `respond` corre numa thread de trabalho. Só o cancelamento tem lock; `_pending_ui_events` e
-    `_work_session.capacity` não têm. Não verifiquei em que momento o controller chama
-    `consume_ui_events` e `report_workspace_capacity` em relação ao turno em curso.
+    `_work_session.capacity` não têm. O controller pode limpar a conversa e reportar capacidade a
+    meio de um turno: ver KNOWN_ISSUES §13.
 
 ## 3. Ordem de extração
 

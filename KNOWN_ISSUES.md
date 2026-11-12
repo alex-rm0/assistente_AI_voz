@@ -272,3 +272,31 @@ foram corrigidos**. Cada entrada tem o sintoma, a evidência e o estado.
 - **Estado:** aberto (monitorizar). Volta a correr
   `.venv\Scripts\python.exe scripts\flaky_check.py --runs 40` depois de
   qualquer mudança em threads ou no ciclo de vida do controller.
+
+## 13. Estado do engine partilhado com o controller sem lock
+
+- **Sintoma:** nenhum observado. Encontrado por leitura do código ao mapear
+  o `conversation.py` (`docs/CONVERSATION_DECOMPOSITION.md` §2.6); não há
+  falha reproduzida nem teste que a cubra.
+- **Evidência** (linhas no merge do `r3/prep`, 2026-11-12):
+  - `AssistantEngine.respond()` corre na thread de trabalho
+    (`EchoRequestWorker`). Só o cancelamento tem lock (`_cancel_lock`).
+  - `_pending_ui_events` é uma lista simples. A thread de trabalho
+    acrescenta-lhe eventos durante o turno (`_queue_ui_event`, 49 pontos de
+    chamada); a thread da UI lê-a e esvazia-a em `consume_ui_events`. O
+    controller chama-o em `_handle_response`, já com o turno acabado, e em
+    `clearConversation` (`prototype_web_ui/controller.py`), que não verifica
+    `_active` e por isso pode correr a meio de um turno.
+  - Nesse mesmo caminho, `clear_conversation()` corre na thread da UI e
+    repõe o estado transitório do engine (`_reset_transient_context`)
+    enquanto a thread de trabalho o pode estar a usar.
+  - `_work_session.capacity` é escrito pela thread da UI em
+    `report_workspace_capacity` (slot `reportWorkspaceCapacity`, que pode
+    chegar a qualquer momento), juntamente com `_workspace_capacity_revision`
+    e `_space_pressure_suppressed_candidate_ids`; a thread de trabalho lê-os
+    em `_maybe_propose_space_pressure_minimize`.
+- **Impacto provável:** eventos de UI perdidos ou entregues no turno
+  seguinte, e uma decisão de capacidade tomada com metade do estado antigo.
+  O caso mais sério é limpar a conversa a meio de um turno.
+- **Estado:** aberto, sem correção. A extração da fila de eventos (passo 3
+  do documento de decomposição) é o sítio natural para decidir o lock.
