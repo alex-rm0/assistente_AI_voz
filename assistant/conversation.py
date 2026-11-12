@@ -137,7 +137,7 @@ from assistant.presence_decision import (
 )
 from assistant.presence_manager import PresenceManager, PresenceState
 from assistant.proactive_suggestions import next_proactive_suggestion
-from assistant.response_composer import ComposerRequest, ResponseComposer
+from assistant.response_composer import ComposerRequest, ResponseComposer, limit_sir
 from assistant.response_language import (
     ENGLISH_GB,
     PORTUGUESE_PT,
@@ -7066,7 +7066,7 @@ class AssistantEngine:
                         self._turn_trace["model_routing_reason"] = _local_reason_label(error_code)
             self._turn_trace.setdefault("fallback_used", final_response_source in {"LOCAL_SAFE_FALLBACK", "FALLBACK"})
             self._compute_presence_decision_shadow(user_message)
-        return final_response
+        return limit_sir(self, final_response, self.response_language)
 
     def _compute_presence_decision_shadow(self, user_message: str) -> None:
         """Phase 8.0 (sections 4/18) + Phase 8.0.1 (section 4): SHADOW MODE

@@ -349,3 +349,65 @@ def test_runner_puts_the_fictitious_profile_in_the_composer_payload(isolated_eva
     assert instrument["answers_question"] == PASS and instrument["profile_discretion"] == PASS
     study = {o["property"]: o["status"] for o in by_id["profile_what_do_i_study_portuguese_speech_en"]["outcomes"]}
     assert study["answers_question"] == FAIL and study["profile_discretion"] == FAIL
+
+
+# --- brain comparison (R3 step 7): cost ceiling, usage numbers, thinking ----------
+
+
+def _llm_cases(count: int) -> list[dict]:
+    return [{"id": f"c{index}", "language": "en-GB", "turns": [{"user": "I passed my exam today."}]} for index in range(count)]
+
+
+def test_run_stops_when_the_cost_ceiling_is_exceeded(isolated_eval_env) -> None:
+    factory = runner.make_llm_factory("fake", fake_reply=lambda messages: "Well done.", fake_cost_usd=0.4)
+
+    report = runner.run_cases(_llm_cases(6), factory, provider="fake", max_cost_usd=1.0)
+
+    # 0.4 + 0.4 + 0.4 crosses 1.0 on the third call: the run stops there.
+    assert report["stopped"] == "cost_limit"
+    assert len(report["cases"]) == 3
+    usage = report["summary"]["usage"]
+    assert usage["cost_usd"] == pytest.approx(1.2)
+    assert usage["max_cost_usd"] == 1.0
+
+
+def test_run_without_a_ceiling_finishes_and_reports_usage(isolated_eval_env) -> None:
+    factory = runner.make_llm_factory("fake", fake_reply=lambda messages: "Well done.", fake_cost_usd=0.01)
+
+    report = runner.run_cases(_llm_cases(4), factory, provider="fake")
+
+    assert report["stopped"] == ""
+    usage = report["summary"]["usage"]
+    assert usage["cost_usd"] == pytest.approx(0.04)
+    assert usage["cost_per_100_turns_usd"] == pytest.approx(1.0)
+    assert usage["latency_ms_mean"] > 0 and usage["latency_ms_p90"] >= usage["latency_ms_mean"] * 0.5
+    assert usage["llm_calls"] == 4
+    assert all(turn["cost_usd"] == pytest.approx(0.01) for case in report["cases"] for turn in case["turns"])
+    assert "Cost" in runner.render_markdown(report) and "p90" in runner.render_markdown(report)
+
+
+def test_claude_needs_a_cost_ceiling_as_well_as_the_opt_in() -> None:
+    with pytest.raises(ValueError, match="cost ceiling"):
+        runner.make_llm_factory("anthropic", allow_cloud=True)
+    runner.make_llm_factory("anthropic", allow_cloud=True, max_cost_usd=1.0)  # builds; nothing is called
+
+
+def test_ollama_thinking_is_only_sent_when_set(monkeypatch) -> None:
+    from assistant import model_provider
+
+    sent: list[dict] = []
+
+    class _Response:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict:
+            return {"message": {"content": "ok"}, "prompt_eval_count": 1, "eval_count": 1}
+
+    monkeypatch.setattr(model_provider.requests, "post", lambda url, json=None, **kwargs: sent.append(json) or _Response())
+
+    model_provider.OllamaProvider(model="m").chat([{"role": "user", "content": "hi"}])
+    model_provider.OllamaProvider(model="m", think=False).chat([{"role": "user", "content": "hi"}])
+
+    assert "think" not in sent[0]  # unchanged for the app's default model
+    assert sent[1]["think"] is False

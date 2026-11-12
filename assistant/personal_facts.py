@@ -2,9 +2,10 @@
 
 R3 step 4: a small model guesses ("Tens um irmão.") even when told not to. For
 a few common topics this module decides before the model is called: when the
-question is about one of them and nothing Echo was given mentions that topic,
-the reply is a fixed "I don't know". Everything else is left to the model,
-which carries the same rule in its prompt.
+question is about one of them and nothing Echo was given states that fact,
+the reply is a fixed "I don't know". A word that merely occurs is not a fact:
+a profile saying Alexandre is a coach does not say who his coach is.
+Everything else is left to the model, which carries the same rule in its prompt.
 """
 
 from __future__ import annotations
@@ -14,24 +15,48 @@ import unicodedata
 
 from assistant.response_language import ENGLISH_GB, normalize_response_language
 
-# topic: (what the question mentions, what counts as evidence about the topic)
+_POSSESSIVE = r"(?:meu|minha|meus|minhas|teu|tua|teus|tuas|seu|sua|seus|suas|my|your|his)"
+
+
+def _relation_fact(noun: str, extra: str = "") -> str:
+    """Evidence that a relation of Alexandre's is actually stated, not just that
+    the word occurs. "É treinador de voleibol" says what he is; "o treinador
+    dele é o Paulo", "Treinador: Paulo" and "tem dois irmãos" state a fact."""
+    patterns = [
+        rf"\b{_POSSESSIVE} (?:{noun})\b",                                        # o meu treinador, my coach
+        rf"\b(?:{noun}) (?:dele|do alexandre)\b",                                # a irmã dele
+        rf"\b(?:tenho|tem|tens|has|have) (?:\w+ ){{0,3}}(?:{noun})\b",           # tem dois irmãos, has a dog
+        rf"(?:^|\n)\W*(?:{noun})\s*:",                                           # Treinador: Paulo
+        rf"\b(?:o|a|os|as|the) (?:{noun})\b[^.\n]{{0,30}}\b(?:eh|chama-se|chamam-se|sao|is|are)\b",  # o treinador ... é o Paulo
+    ]
+    return "|".join(patterns + ([extra] if extra else []))
+
+
+_SIBLINGS = r"irma(?:o|os|s)?|siblings?|brothers?|sisters?"
+_PARTNER = r"namorad[oa]|girlfriend|boyfriend|wife|husband|marido|esposa"
+_CHILDREN = r"filh[oa]s?|children|kids?|sons?|daughters?"
+_COACH = r"treinador(?:a|es)?|coach(?:es)?"
+_PETS = r"cao|caes|gatos?|animal de estimacao|animais de estimacao|pets?|dogs?|cats?"
+# topic: (what the question mentions, what counts as a stated fact about the topic)
 _TOPICS: dict[str, tuple[str, str]] = {
-    "siblings": (r"\birma(?:o|os|s)?\b|\bsiblings?\b|\bbrothers?\b|\bsisters?\b",) * 2,
+    "siblings": (rf"\b(?:{_SIBLINGS})\b", _relation_fact(_SIBLINGS)),
     # "pais" is not asked about here: without its accent it is also "país".
-    "parents": (r"\b(?:pai|mae|father|mother|parents|dad|mum|mom)\b", r"\b(?:pai|mae|pais|father|mother|parents|dad|mum|mom)\b"),
-    "partner": (r"\bnamorad[oa]\b|\bgirlfriend\b|\bboyfriend\b|\bwife\b|\bhusband\b|\bmarido\b|\besposa\b",) * 2,
-    "children": (r"\bfilh[oa]s?\b|\bchildren\b|\bkids?\b|\bsons?\b|\bdaughters?\b",) * 2,
+    "parents": (r"\b(?:pai|mae|father|mother|parents|dad|mum|mom)\b", _relation_fact(r"pai|mae|pais|father|mother|parents|dad|mum|mom")),
+    "partner": (rf"\b(?:{_PARTNER})\b", _relation_fact(_PARTNER)),
+    "children": (rf"\b(?:{_CHILDREN})\b", _relation_fact(_CHILDREN)),
     "address": (
         r"\bmorada\b|\bendereco\b|\baddress\b|\bcodigo postal\b|\bpostcode\b",
-        r"\bmorada\b|\bendereco\b|\baddress\b|\bcodigo postal\b|\bpostcode\b|\brua\b|\bavenida\b|\bstreet\b",
+        r"\b(?:mora|moro|morada|endereco|address|lives?)\b[^.\n]{0,25}\b(?:rua|avenida|travessa|largo|street|road|avenue)\b"
+        r"|\bcodigo postal\b|\bpostcode\b|\b\d{4}-\d{3}\b",
     ),
     "birthday": (
         r"\baniversario\b|\bfaco anos\b|\bquantos anos tenho\b|\bque idade\b|\bbirthday\b|\bhow old am i\b|\bwas i born\b|\bnasci\b|\bdata de nascimento\b",
-        r"\baniversario\b|\bnasc\w+|\bborn\b|\bbirthday\b|\bidade\b|\byears old\b|\banos de idade\b",
+        r"\bnasc(?:eu|i|ido|ida)\b|\bborn (?:on|in)\b|\bfa(?:z|co) anos\b|\b(?:aniversario|birthday)\b[^.\n]{0,20}\d"
+        r"|\b\d+ anos de idade\b|\bidade\s*:|\byears old\b|\bdata de nascimento\b",
     ),
-    "coach": (r"\btreinador[a]?\b|\bcoach(?:'s)?\b",) * 2,
-    "pets": (r"\b(?:cao|gato|animal de estimacao|pets?|dog|cat)\b",) * 2,
-    "phone": (r"\btelefone\b|\btelemovel\b|\bphone\b",) * 2,
+    "coach": (rf"\b(?:{_COACH})(?:'s)?\b", _relation_fact(_COACH, r"\btreinad[oa] (?:por|pel[oa])\b|\bcoached by\b")),
+    "pets": (rf"\b(?:{_PETS})\b", _relation_fact(_PETS)),
+    "phone": (r"\btelefone\b|\btelemovel\b|\bphone\b", r"\b(?:telefone|telemovel|phone|mobile)\b[^.\n]{0,20}\d{3}"),
 }
 _FIRST_PERSON = r"\b(?:eu|meu|minha|meus|minhas|tenho|sou|faco|nasci|moro|vivo|i|my|mine)\b"
 _QUESTION_START = (
@@ -43,14 +68,21 @@ _NOT_A_FACT_QUESTION = r"\b(?:achas|devo|devia|podes|consegues|ajuda\w*|should|c
 
 
 def _normalize(text: str) -> str:
-    text = unicodedata.normalize("NFKD", str(text or "").replace("’", "'").lower())
-    return " ".join("".join(ch for ch in text if not unicodedata.combining(ch)).split())
+    """Lower-case and accent-free, line by line. The verb "é" becomes "eh" first,
+    so that it is not confused with the conjunction "e"."""
+    text = re.sub(r"\bé\b", "eh", str(text or "").replace("’", "'").lower())
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return "\n".join(" ".join(line.split()) for line in text.splitlines()).strip()
 
 
 def unknown_reply(response_language: str) -> str:
+    # TODO(R3 step 6, memory with confirmation): once Echo can store a fact when
+    # asked, offer it here ("tell me and I'll remember it"). Until then the reply
+    # promises nothing, and the composer prompt tells the model the same.
     if normalize_response_language(response_language) == ENGLISH_GB:
-        return "I'm afraid I don't know that — tell me and I'll remember it, if you like."
-    return "Receio não saber isso — diz-me e eu guardo, se quiseres."
+        return "I'm afraid I don't know that."
+    return "Receio não saber isso."
 
 
 def missing_personal_fact_reply(user_message: str, evidence: list[str], response_language: str) -> str | None:
@@ -59,7 +91,7 @@ def missing_personal_fact_reply(user_message: str, evidence: list[str], response
     `evidence` is everything Echo was given that may hold the answer: the core
     profile, what the user said earlier, memory facts and context.
     """
-    text = _normalize(user_message).strip(" .!")
+    text = _normalize(user_message).replace("\n", " ").strip(" .!")
     is_question = "?" in text or re.search(_QUESTION_START, text)
     if not is_question or not re.search(_FIRST_PERSON, text) or re.search(_NOT_A_FACT_QUESTION, text):
         return None
