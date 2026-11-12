@@ -366,6 +366,11 @@ class VoiceTranscriber:
         self.model_name = self.stt_config.model
         self.stt_provider = self.stt_config.provider
         self._stt_backend = None
+        self._stt_lock = threading.RLock()
+        self._stt_closed = False
+        self._stt_cpu_model = model_name
+        self.stt_degraded = False
+        self._stt_status_callback = None
         if self.stt_provider not in {"openai-whisper", "faster-whisper"}:
             raise VoiceInputError("ECHO_STT_PROVIDER deve ser openai-whisper ou faster-whisper.")
         self.language = language
@@ -1042,19 +1047,20 @@ class VoiceTranscriber:
             logged_input_language = str(input_language or "auto").strip().lower()
 
         try:
-            if self.stt_provider == "faster-whisper":
-                if self._stt_backend is None:
-                    from assistant.stt_backend import FasterWhisperBackend
-                    self._stt_backend = FasterWhisperBackend(model=self.model_name, python=self.stt_config.python, hf_home=self.stt_config.hf_home)
-                result = self._stt_backend.transcribe(audio_path, language=whisper_language, initial_prompt=prompt)
-            else:
-                import whisper
-                if self._model is None:
-                    self._model = whisper.load_model(self.model_name)
-                result = self._model.transcribe(
-                    str(audio_path), language=whisper_language, initial_prompt=prompt,
-                    task="transcribe", temperature=0.0, condition_on_previous_text=False, fp16=False,
-                )
+            with self._stt_lock:
+                if self._stt_closed:
+                    raise RuntimeError("STT closed")
+                result = None
+                if self.stt_provider == "faster-whisper":
+                    try:
+                        result = self._gpu_stt().transcribe(audio_path, language=whisper_language, initial_prompt=prompt)
+                    except Exception as exc:
+                        self._degrade_stt(exc)
+                if result is None:
+                    result = self._cpu_stt().transcribe(
+                        str(audio_path), language=whisper_language, initial_prompt=prompt,
+                        task="transcribe", temperature=0.0, condition_on_previous_text=False, fp16=False,
+                    )
         except Exception as exc:
             raise VoiceInputError(f"Nao consegui transcrever o audio com Whisper: {exc}") from exc
         finally:
@@ -1080,15 +1086,56 @@ class VoiceTranscriber:
     def prewarm_stt(self) -> bool:
         """Warm the GPU STT worker ahead of the first turn. No-op (False)
         with the default openai-whisper STT. Blocking; raises on failure."""
-        if self.stt_provider != "faster-whisper":
-            return False
+        with self._stt_lock:
+            if self._stt_closed:
+                return False
+            if self.stt_provider != "faster-whisper":
+                return False
+            try:
+                self._gpu_stt().warmup()
+            except Exception as exc:
+                self._degrade_stt(exc)
+                self._cpu_stt()
+            return True
+
+    def _gpu_stt(self):
         if self._stt_backend is None:
             from assistant.stt_backend import FasterWhisperBackend
             self._stt_backend = FasterWhisperBackend(model=self.model_name, python=self.stt_config.python, hf_home=self.stt_config.hf_home)
-        self._stt_backend.warmup()
-        return True
+        return self._stt_backend
+
+    def _cpu_stt(self):
+        if self._stt_closed:
+            raise RuntimeError("STT closed")
+        if self._model is None:
+            import whisper
+            self._model = whisper.load_model(self.model_name)
+        return self._model
+
+    def set_stt_status_callback(self, callback) -> None:
+        self._stt_status_callback = callback
+        if self.stt_degraded and callback is not None:
+            callback("Voice recognition running in slow mode")
+
+    def _degrade_stt(self, error: Exception) -> None:
+        if self._stt_closed:
+            raise RuntimeError("STT closed") from error
+        reason = "gpu_backend_failed"
+        if not self.stt_config.python.is_file():
+            reason = "runtime_missing"
+        if self._stt_backend is not None:
+            self._stt_backend.close()
+        self.stt_provider = "openai-whisper"
+        self.model_name = self._stt_cpu_model
+        self.stt_degraded = True
+        print(f"[STT_BACKEND] provider=openai-whisper device=cpu model={self.model_name} "
+              f"degraded=true reason={reason} error={type(error).__name__}", flush=True)
+        if self._stt_status_callback is not None:
+            self._stt_status_callback("Voice recognition running in slow mode")
 
     def close(self) -> None:
+        self._stt_closed = True
+        self._stt_status_callback = None
         if self._stt_backend is not None:
             self._stt_backend.close()
 

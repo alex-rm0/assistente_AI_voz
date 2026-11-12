@@ -287,6 +287,7 @@ class EchoUIController(QObject):
     voiceInputError = Signal(str)
     voiceInputStarted = Signal()
     voiceInputFinished = Signal()
+    _sttStatusChanged = Signal(str)
     ttsStarted = Signal(str)
     ttsFinished = Signal(str)
     ttsError = Signal(str)
@@ -360,6 +361,9 @@ class EchoUIController(QObject):
         self.get_response_language_callback = get_response_language
         self.voice_available = bool(voice_available)
         self.voice_transcriber = voice_transcriber
+        self._sttStatusChanged.connect(self._handle_stt_status, Qt.ConnectionType.QueuedConnection)
+        if callable(getattr(voice_transcriber, "set_stt_status_callback", None)):
+            voice_transcriber.set_stt_status_callback(self._sttStatusChanged.emit)
         self._voice_runtime_status_provided = voice_missing_dependencies is not None
         self.voice_missing_dependencies = list(voice_missing_dependencies or [])
         self._active = False
@@ -1776,6 +1780,14 @@ class EchoUIController(QObject):
         _debug_ui(f"[Echo UI] progress_event={event}")
         self._last_progress_event = str(event or "")
         self.uiEvent.emit(_json_payload({"type": str(event or "")}))
+
+    @Slot(str)
+    def _handle_stt_status(self, status: str) -> None:
+        if self._shutdown_requested:
+            return
+        if self._response_language().startswith("pt"):
+            status = "O reconhecimento de voz está a funcionar em modo lento."
+        self.uiEvent.emit(_json_payload({"type": "voice_status", "status": status}))
 
     @Slot(str)
     def _handle_voice_status(self, status: str) -> None:
