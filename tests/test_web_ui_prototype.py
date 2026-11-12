@@ -403,7 +403,8 @@ def test_web_ui_renders_safe_markdown_without_inner_html() -> None:
     assert "document.createTextNode" in markdown_block
     assert ".textContent =" in markdown_block
     assert "innerHTML" not in markdown_block
-    assert "renderSafeMarkdown(element, value)" in render_block
+    assert "renderSafeMarkdown(element, presentation.text)" in render_block
+    assert "currentResponseText = value" in render_block
     assert "element.textContent = value" not in render_block
     assert "container.dataset.rawText = source" in markdown_block
     assert ".echo-response strong" in css
@@ -436,7 +437,7 @@ def test_echo_response_has_dedicated_visible_layer() -> None:
     assert "z-index: 7" in css
     assert 'const element = byId("echoResponse")' in ui
     assert "function renderEchoResponse(text)" in ui
-    assert 'renderSafeMarkdown(element, value)' in ui
+    assert 'renderSafeMarkdown(element, presentation.text)' in ui
     assert 'element.style.display = "block"' in ui
     assert 'element.classList.add("visible")' in ui
     assert 'console.log("[Echo UI JS] resposta aplicada:"' in ui

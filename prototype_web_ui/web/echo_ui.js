@@ -1929,6 +1929,57 @@
       && Boolean(element.textContent.trim());
   }
 
+  function responsePresentation(value) {
+    const objects = window.echoWorkspaceObjects;
+    if (!objects || typeof objects.listObjects !== "function" || !/^\s*(?:subject|assunto):/i.test(value)) return {text: value, hosted: false};
+    const compact = (text) => String(text || "").replace(/\s+/g, " ").trim();
+    const nodes = Array.from(document.querySelectorAll("#workspaceObjects [data-id]"));
+    let host = null;
+    const hosted = objects.listObjects().some((obj) => {
+      if (!["writing_task", "task_artifact"].includes(obj.type)) return false;
+      const node = nodes.find((item) => item.dataset.id === obj.id);
+      if (!node || node.hidden) return false;
+      const style = getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      const matches = style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0
+        && compact(node.textContent).includes(compact(value));
+      if (matches) host = node;
+      return matches;
+    });
+    return {hosted, host, text: hosted
+      ? (document.documentElement.lang.toLowerCase().startsWith("en") ? "The draft is ready in the email task." : "O rascunho está pronto na tarefa do email.")
+      : value};
+  }
+
+  function positionHostedResponse(element) {
+    const presentation = responsePresentation(currentResponseText);
+    if (!presentation.hosted) {
+      element.style.removeProperty("left");
+      element.style.removeProperty("width");
+      return;
+    }
+    const stage = document.querySelector(".stage");
+    const size = stageSize(stage);
+    const gap = cssPixelNumber(stage, "--safe-gap", 24);
+    const rect = localRectFromElement(stage, presentation.host);
+    const rightWidth = size.width - rect.right - gap * 2;
+    const leftWidth = rect.left - gap * 2;
+    const width = Math.max(1, Math.min(680, Math.max(rightWidth, leftWidth)));
+    const left = rightWidth >= leftWidth ? rect.right + gap : gap;
+    element.style.left = `${left + width / 2}px`;
+    element.style.width = `${width}px`;
+  }
+
+  function refreshHostedResponse() {
+    const element = byId("echoResponse");
+    if (!element || !isResponseVisible(element) || !currentResponseText) return;
+    const presentation = responsePresentation(currentResponseText);
+    if (element.dataset.workspaceHosted === String(presentation.hosted)) return;
+    element.dataset.workspaceHosted = String(presentation.hosted);
+    renderSafeMarkdown(element, presentation.text);
+    updateResponseLayout(element, presentation.text);
+  }
+
   function renderEchoResponse(text) {
     console.log("[Echo UI JS] renderEchoResponse:", text);
     logUiResponse("render_start");
@@ -1947,14 +1998,16 @@
 
     replyFadeToken += 1;
     currentResponseText = value;
-    renderSafeMarkdown(element, value);
+    const presentation = responsePresentation(value);
+    element.dataset.workspaceHosted = String(presentation.hosted);
+    renderSafeMarkdown(element, presentation.text);
     element.hidden = false;
     element.style.display = "block";
     element.style.visibility = "visible";
     element.style.opacity = "1";
     element.classList.remove("muted");
     element.classList.add("visible");
-    updateResponseLayout(element, value);
+    updateResponseLayout(element, presentation.text);
 
     const responseTitle = byId("responseTitle");
     const bridgeReply = byId("bridgeReply");
@@ -1988,6 +2041,7 @@
     const stage = document.querySelector(".stage");
     if (!stage || !element) return;
 
+    text = responsePresentation(text).text;
     const metrics = collectResponseMetrics(element, text);
     const layout = determineResponseLayout(metrics, activeResponseLayout);
     activeResponseLayout = layout;
@@ -2045,8 +2099,10 @@
         }
         updateAdaptiveLayout();
         updateResponseLayoutBounds(stage, activeResponseLayout);
+        positionHostedResponse(element);
       });
     }
+    positionHostedResponse(element);
   }
 
   function updateResponseLayout(element, text) {
@@ -2410,6 +2466,7 @@
           return;
         }
         if (handleDocumentWorkspaceEvent(event)) {
+          window.requestAnimationFrame(refreshHostedResponse);
           return;
         }
         if (event.type === "research_started") {
