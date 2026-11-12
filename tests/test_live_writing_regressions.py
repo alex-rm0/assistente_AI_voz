@@ -96,6 +96,30 @@ def test_email_reference_does_not_capture_apps_files_or_negation(message):
     assert not is_email_read_request(message)
 
 
+@pytest.mark.parametrize("resume_first", [False, True])
+def test_saved_email_survives_trip_and_can_resume_and_read_without_model(tmp_path, resume_first):
+    draft = "Subject: Meeting\n\nDear Francisca and Karina,\n\nCan you attend this week at 21:30?\n\nAlexandre"
+    engine, local = english_engine(tmp_path, [draft])
+    artifact = collected_email(engine)
+    engine.respond("Guarda isso num ficheiro.")
+    saved = engine._work_session.objects[artifact].payload["saved_file"]
+    engine.respond("Vamos também preparar umas férias em Estocolmo.")
+    trip = engine._work_session.active_task
+    trip_fields = (dict(trip.entities), dict(trip.parameters), list(trip.collected_facts))
+    calls = len(local.calls)
+    if resume_first:
+        response = engine.respond("volta ao email")
+        assert engine.get_last_turn_telemetry()["llm_calls"] == 0
+        assert engine._work_session.attention.focus_object_id == artifact
+        assert "trip" not in response.lower()
+    for message in ("Lê o mail, por favor.", "Consegues ler o mail, por favor?"):
+        assert draft in engine.respond(message)
+        assert engine.get_last_turn_telemetry()["llm_calls"] == 0
+    assert len(local.calls) == calls
+    assert engine._work_session.objects[artifact].payload["saved_file"] == saved
+    assert (dict(trip.entities), dict(trip.parameters), list(trip.collected_facts)) == trip_fields
+
+
 def test_name_spelling_correction_stays_in_workflow(tmp_path):
     engine, local = english_engine(tmp_path)
     artifact = collected_email(engine)

@@ -25,9 +25,9 @@ def is_email_read_request(message):
     return _email_reference(text) and bool(re.search(r"\b(?:le|ler|leia|leias|read)\b", text))
 
 
-def try_written_email_reference(engine, message):
+def try_written_email_reference(engine, message, *, read_only=False):
     read = is_email_read_request(message)
-    if not (read or is_email_resume_request(message)) or not engine.presence.can_use_tools():
+    if (read_only and not read) or not (read or is_email_resume_request(message)) or not engine.presence.can_use_tools():
         return None
     if not read:
         return try_resume_written_email(engine)

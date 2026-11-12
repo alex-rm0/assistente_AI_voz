@@ -939,7 +939,7 @@ class AssistantEngine:
             return pending_intent_response
 
         if self._active_task_context is not None:
-            content_response = self._try_content_operation(user_message)
+            content_response = try_written_email_reference(self, user_message, read_only=True) or self._try_content_operation(user_message)
             if content_response is not None:
                 content_response = self._complete_turn(
                     user_message=user_message,
@@ -3230,7 +3230,7 @@ class AssistantEngine:
 
     def _try_resume_activity_reference(self, user_message: str) -> str | None:
         normalized_message = _normalize_text(user_message)
-        response = try_written_email_reference(self, user_message) if not _is_resume_reference_phrase(normalized_message) else None
+        response = try_written_email_reference(self, user_message) if self._pending_writing_task is None or not _is_resume_reference_phrase(normalized_message) else None
         if response is not None:
             return response
         if is_email_resume_request(user_message) and not _is_resume_reference_phrase(normalized_message):
