@@ -19,6 +19,7 @@ from assistant.action_claims import detect_ungrounded_workspace_operation_claim 
 from assistant.artifact_export import export_kind, presentation_to_text
 from assistant.writing_corrections import try_recipient_correction
 from assistant.writing_continuity import is_email_resume_request, try_resume_written_email, writing_workflow_question as _writing_workflow_question
+from assistant.writing_requests import incomplete_writing_request
 from assistant.addressable_content import (
     build_addressable_content,
     detect_content_operation,
@@ -13171,24 +13172,7 @@ def _writing_request_kind(message: str) -> str:
 
 
 def _looks_like_incomplete_writing_request(normalized_message: str) -> bool:
-    text = normalized_message.replace("-", " ").strip(" .,!?:;")
-    if re.search(r"\b(?:acrescenta|adiciona|cria)\s+(?:mais\s+um|outro)\s+(?:e mail|email|mail)\b", text):
-        return True
-    if not re.search(r"\b(?:preciso|quero|queria|gostava|ajuda|ajudas|ajuda me|podes|consegues|help me|i need to|i want to)\b", text):
-        return False
-    if _extract_writing_batch_count(text) > 1 and re.search(r"\b(?:escrever|redigir|preparar)\b", text) and re.search(
-        r"\b(?:emails?|e mails?|mails?|mensagens?)\b",
-        text,
-    ):
-        return True
-    if any(marker in text for marker in ("escrever um email", "escrever um mail", "redigir um email", "redigir um mail", "preparar um email", "preparar um mail", "escrever uma mensagem", "write an email", "write an e mail", "write a mail")):
-        return True
-    return bool(
-        re.search(
-            r"\b(?:ajuda|ajuda me|preciso|quero|podes|consegues)\b.*\b(?:escrever|redigir|preparar|mandar|enviar|compor|criar|fazer|responder)\b.*\b(?:email|mail|mensagem)\b|\bajuda(?: me)? (?:num|no|com um|com o|com uma) (?:email|mail|mensagem)\b",
-            text,
-        )
-    )
+    return incomplete_writing_request(normalized_message, _extract_writing_batch_count(normalized_message))
 
 
 _PT_NUMBER_WORDS = {

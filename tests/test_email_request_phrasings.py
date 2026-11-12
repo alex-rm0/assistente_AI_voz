@@ -27,6 +27,10 @@ def _route(tmp_path: Path, message: str):
         "ajudas-me a escrever um email",
         "preciso de mandar um mail",
         "can you help me write an email",
+        "Boa, boa. Queria escrever o mail contigo. Ajudas-me?",
+        "Boa. Queria escrever o email contigo.",
+        "Olá! Gostava de escrever o mail contigo.",
+        "Queria redigir o email.",
     ],
 )
 def test_email_request_opens_the_email_task(tmp_path: Path, message: str) -> None:
@@ -44,6 +48,10 @@ def test_email_request_opens_the_email_task(tmp_path: Path, message: str) -> Non
         "I want to read my emails",
         "preciso de ler o mail do João",
         "queria ver os mails de hoje",
+        "Boa, boa. Não quero escrever o mail.",
+        "Não queria escrever um email.",
+        "Queria ler o email contigo.",
+        "Não me ajudes a escrever o email.",
     ],
 )
 def test_talking_about_an_email_is_not_a_request(tmp_path: Path, message: str) -> None:
