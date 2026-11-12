@@ -329,6 +329,8 @@ def main() -> int:
         semantic_extractor=semantic_extractor,
     )
 
+    engine.speech_clarity_enforce = settings.get("speech_clarity", {}).get("enforce", False) is True
+
     def change_presence(name: str) -> None:
         engine.set_presence_state(name)
 

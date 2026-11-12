@@ -19,6 +19,7 @@ from assistant.tts import TTSError, play_audio_file
 from assistant.voice_input import VoiceInputError, VoiceNoSpeechDetected, VoiceTranscriber, check_voice_runtime
 from assistant.voice_wake import classify_voice_wake_intent, wake_acknowledgement_text
 from assistant.turn_input import CaptureScope, TurnInput
+from assistant.speech_clarity import observe_speech_clarity
 
 
 class _WakeRecognizerPrewarmThread(QThread):
@@ -1845,6 +1846,7 @@ class EchoUIController(QObject):
             self._settle_idle_if_nothing_pending()
             return
         if capture.capture_mode == "standby":
+            observe_speech_clarity(capture, protected=("standby_control",))
             # Phase 7.6 (section 5): STANDBY never emits voiceTranscriptionReady
             # or touches the composer/response area -- the transcript is
             # purely a wake/ignore decision, not conversational content.
@@ -1852,6 +1854,7 @@ class EchoUIController(QObject):
             return
         self.voiceTranscriptionReady.emit(clean)
         if not self._voice_conversation_active:
+            observe_speech_clarity(capture, protected=("manual_review",))
             self._emit_state("idle")
             return
         if not clean:
@@ -1868,6 +1871,7 @@ class EchoUIController(QObject):
             self._schedule_voice_rearm()
             return
         if classify_voice_wake_intent(clean) == "sleep":
+            observe_speech_clarity(capture, protected=("voice_control",))
             # Phase 7.6 (section 7): a sleep command during ACTIVE mode is
             # control-flow, not a task/query -- never routed through
             # submitMessage()/the response pipeline.

@@ -58,3 +58,41 @@ def test_protection_uses_canonical_commands_and_current_field(tmp_path):
     engine.respond("vamos escrever um mail")
     assert protection_for_turn(voice("Francisca e Karina", avg_logprob=-1.1), engine) == ("recipient_field",)
     assert not protection_for_turn(voice("A de para do reunião com"), engine)
+
+
+def test_shadow_preserves_response_path_and_llm_payload(tmp_path, capsys):
+    from tests.test_automatic_routing_regressions import make_engine
+    text = "A de para do reunião com"
+    typed, _, typed_llm, _ = make_engine(tmp_path / "typed", mode="local", ollama_replies=["Não percebi. Podes repetir?"])
+    spoken, _, voice_llm, _ = make_engine(tmp_path / "voice", mode="local", ollama_replies=["Não percebi. Podes repetir?"])
+    expected = typed.respond(text)
+    actual = spoken.respond_turn(voice(text, avg_logprob=-1))
+    assert actual == expected
+    assert spoken.get_last_turn_telemetry()["selected_path"] == typed.get_last_turn_telemetry()["selected_path"]
+    assert voice_llm.calls == typed_llm.calls
+    assert "[SPEECH_CLARITY]" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("language,expected", [
+    ("en-GB", "Sorry, I didn't quite catch that — could you say it again?"),
+    ("pt-PT", "Desculpa, não percebi bem — podes repetir?"),
+])
+def test_enforcement_is_explicit_and_local_without_memory_writes(tmp_path, language, expected):
+    from tests.test_automatic_routing_regressions import make_engine
+    engine, _, local, _ = make_engine(tmp_path, mode="local")
+    engine._set_response_language(language)
+    engine.speech_clarity_enforce = True
+    before = list(engine.memory.load())
+    assert engine.respond_turn(voice("A de para do reunião com")) == expected
+    assert local.calls == []
+    assert list(engine.memory.load()) == before
+    assert engine.get_last_turn_telemetry()["llm_calls"] == 0
+
+
+def test_typed_does_not_log_or_enforce_clarity(tmp_path, capsys):
+    from tests.test_automatic_routing_regressions import make_engine
+    engine, *_ = make_engine(tmp_path, mode="local")
+    engine.speech_clarity_enforce = True
+    engine.respond("A de para do reunião com")
+    assert engine.get_last_turn_telemetry()["selected_path"] != "SPEECH_CLARITY"
+    assert "[SPEECH_CLARITY]" not in capsys.readouterr().out

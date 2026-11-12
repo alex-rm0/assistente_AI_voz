@@ -85,6 +85,14 @@ def respond_to_turn(engine, value):
     engine.begin_request()
     token = _turn.set(turn)
     try:
+        if turn.source == "voice":
+            from assistant.speech_clarity import observe_speech_clarity, repeat_response
+            enforce = getattr(engine, "speech_clarity_enforce", False) is True
+            decision = observe_speech_clarity(turn, engine, enforce=enforce)
+            if enforce and decision.would_ask_repeat:
+                engine._begin_turn_trace(turn.text)
+                return engine._complete_turn(turn.text, repeat_response(engine.response_language), "SPEECH_CLARITY",
+                                             selected_path="SPEECH_CLARITY", technical=True, remember=False)
         return engine._respond_inner(turn.text)
     except Exception as exc:
         return engine._handle_unexpected_error(turn.text, exc)

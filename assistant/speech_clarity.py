@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 import math
 import re
+import json
 
 from assistant.text_matching import normalize_for_matching
 
@@ -92,3 +93,25 @@ def protection_for_turn(turn, engine):
     if fields and re.fullmatch(r"(?:\d{1,4}(?:[/:h.,-]\d{1,4})*(?:\s*(?:euros?|dias?|days?|horas?|hours?))?|amanha|hoje|tomorrow|today)", text):
         return ("structured_field",)
     return ()
+
+
+def observe_speech_clarity(turn, engine=None, *, protected=None, enforce=False):
+    if turn.source != "voice":
+        return None
+    reasons = protected if protected is not None else protection_for_turn(turn, engine)
+    decision = evaluate_speech_clarity(turn, protected=reasons)
+    compact = lambda value: json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+    print(
+        f"[SPEECH_CLARITY] capture_id={turn.capture_id} session_id={turn.session_id} mode={turn.capture_mode} "
+        f"would_ask_repeat={str(decision.would_ask_repeat).lower()} signals={compact(decision.signals)} "
+        f"protected={str(bool(decision.protected)).lower()} protected_reasons={compact(decision.protected)} "
+        f"enforce={str(enforce).lower()} stt_model={compact(turn.stt_model)} avg_logprob={turn.avg_logprob} "
+        f"no_speech_probability={turn.no_speech_probability} compression_ratio={turn.compression_ratio}",
+        flush=True,
+    )
+    return decision
+
+
+def repeat_response(language):
+    return ("Sorry, I didn't quite catch that — could you say it again?" if language == "en-GB"
+            else "Desculpa, não percebi bem — podes repetir?")

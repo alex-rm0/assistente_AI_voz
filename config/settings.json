@@ -6,6 +6,9 @@
   "DEBUG_PERFORMANCE": true,
   "DEBUG_OLLAMA_PAYLOAD": true,
   "default_presence": "ACTIVE_CONVERSATION",
+  "speech_clarity": {
+    "enforce": false
+  },
   "model": {
     "provider": "ollama",
     "name": "llama3.1:8b"
