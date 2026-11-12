@@ -57,14 +57,16 @@ class FakeProvider:
     name = "fake"
     model = "fake"
 
-    def __init__(self, reply: Callable[[list[dict]], str]) -> None:
+    def __init__(self, reply: Callable[[list[dict]], str], cost_usd: float = 0.0) -> None:
         self._reply = reply
+        self._cost_usd = cost_usd
 
     def chat(self, messages, **_kwargs):
         from assistant.model_provider import ModelResponse
 
         return ModelResponse(
-            text=self._reply(messages), provider="fake", model="fake", input_tokens=0, output_tokens=0, latency_ms=0.0
+            text=self._reply(messages), provider="fake", model="fake", input_tokens=0, output_tokens=0, latency_ms=0.0,
+            estimated_cost_usd=self._cost_usd,
         )
 
 
@@ -74,26 +76,43 @@ def make_llm_factory(
     model: str = "",
     base_url: str = "http://127.0.0.1:11434",
     allow_cloud: bool = False,
+    max_cost_usd: float | None = None,
+    think: bool | None = None,
     fake_reply: Callable[[list[dict]], str] | None = None,
+    fake_cost_usd: float = 0.0,
 ) -> Callable[[dict], object]:
-    """Returns case -> LLM. Each provider talks to exactly one backend: no routing, no fallback."""
+    """Returns case -> LLM. Each provider talks to exactly one backend: no routing, no fallback.
+
+    Claude needs both the explicit opt-in and a cost ceiling for the run; the
+    ceiling itself is enforced by run_cases(max_cost_usd=...). `think` is sent
+    to Ollama only when set (False turns a thinking model's reasoning off).
+    """
     from assistant.model_provider import DEFAULT_ANTHROPIC_MODEL, DEFAULT_OLLAMA_MODEL, OllamaProvider, ProviderBackedLLM
     from assistant.prompts import get_base_system_prompt
 
     if provider == "anthropic" and not allow_cloud:
         raise PermissionError("Claude is a paid cloud provider: pass --allow-cloud to use it.")
+    if provider == "anthropic" and not max_cost_usd:
+        raise ValueError("Claude needs a cost ceiling for the run: pass --max-cost-usd.")
     if provider not in PROVIDERS:
         raise ValueError(f"Unknown provider {provider!r}; expected one of {PROVIDERS}")
 
     def factory(case: dict):
         if provider == "fake":
-            backend = FakeProvider(fake_reply or (lambda _messages: FAKE_REPLIES[case["language"]]))
+            backend = FakeProvider(fake_reply or (lambda _messages: FAKE_REPLIES[case["language"]]), fake_cost_usd)
         elif provider == "ollama":
-            backend = OllamaProvider(model=model or DEFAULT_OLLAMA_MODEL, base_url=base_url)
+            backend = OllamaProvider(model=model or DEFAULT_OLLAMA_MODEL, base_url=base_url, think=think)
         else:
             from assistant.anthropic_provider import AnthropicProvider
+            from assistant.secret_storage import WindowsCredentialManagerSecretStorage, resolve_anthropic_api_key
 
-            backend = AnthropicProvider(model=model or DEFAULT_ANTHROPIC_MODEL)
+            # The key comes from the same place the app reads it; paid calls still need
+            # ECHO_ALLOW_PAID_MODEL_CALLS=true in the environment of this run.
+            storage = WindowsCredentialManagerSecretStorage()
+            backend = AnthropicProvider(
+                model=model or DEFAULT_ANTHROPIC_MODEL,
+                api_key_getter=lambda: resolve_anthropic_api_key(os.environ, storage)[0],
+            )
         return ProviderBackedLLM(backend, system_prompt=get_base_system_prompt(), model_source=f"provider:{provider}")
 
     return factory
@@ -137,8 +156,13 @@ def build_engine(case_dir: Path, llm, language: str):
     return engine
 
 
-def run_case(case: dict, run: EvalRun, llm_factory: Callable[[dict], object]) -> dict:
-    engine = build_engine(run.case_dir(case["id"]), llm_factory(case), case["language"])
+def run_case(case: dict, run: EvalRun, llm_factory: Callable[[dict], object], *, spent_usd: float = 0.0,
+             max_cost_usd: float | None = None) -> dict:
+    """Runs one case. Stops after the turn that takes the run's spend past `max_cost_usd`
+    (the result then carries "stopped": "cost_limit" and only the turns that ran)."""
+    llm = llm_factory(case)
+    engine = build_engine(run.case_dir(case["id"]), llm, case["language"])
+    stopped = ""
     turns: list[dict] = []
     replies: list[str] = []
     user_messages: list[str] = []
@@ -146,6 +170,7 @@ def run_case(case: dict, run: EvalRun, llm_factory: Callable[[dict], object]) ->
     profile_text = PROFILE_PATH.read_text(encoding="utf-8")
     for turn in case["turns"]:
         started = time.perf_counter()
+        calls_before = len(getattr(llm, "responses", ()))
         error = ""
         try:
             response = str(engine.respond(turn["user"]) or "")
@@ -159,8 +184,14 @@ def run_case(case: dict, run: EvalRun, llm_factory: Callable[[dict], object]) ->
         if not turn.get("garbled"):
             user_messages.append(turn["user"])
         replies.append(response)
+        calls = list(getattr(llm, "responses", ()))[calls_before:]
+        cost = sum(float(call.estimated_cost_usd or 0.0) for call in calls)
+        spent_usd += cost
         turns.append(
             {
+                "cost_usd": cost,
+                "input_tokens": sum(int(call.input_tokens or 0) for call in calls),
+                "output_tokens": sum(int(call.output_tokens or 0) for call in calls),
                 "user": turn["user"],
                 "evaluation_input": dict(turn),
                 "user_context": list(user_messages[:-1] if not turn.get("garbled") else user_messages),
@@ -172,7 +203,11 @@ def run_case(case: dict, run: EvalRun, llm_factory: Callable[[dict], object]) ->
                 "outcomes": [{"property": o.property, "status": o.status, "detail": o.detail} for o in outcomes],
             }
         )
-    return {key: case.get(key, "") for key in ("id", "language", "category", "source", "description")} | {"turns": turns}
+        if max_cost_usd is not None and spent_usd > max_cost_usd:
+            stopped = "cost_limit"
+            break
+    return {key: case.get(key, "") for key in ("id", "language", "category", "source", "description")} | {
+        "turns": turns, "stopped": stopped}
 
 
 def apply_cross_case_repetition(case_results: list[dict]) -> None:
@@ -213,7 +248,21 @@ def summarize(case_results: list[dict]) -> dict:
             "pass_rate": round(counter[PASS] / decided, 3) if decided else None,
         }
 
+    all_turns = [turn for case in case_results for turn in case["turns"]]
+    latencies = sorted(float(turn.get("latency_ms") or 0.0) for turn in all_turns)
+    cost = sum(float(turn.get("cost_usd") or 0.0) for turn in all_turns)
+    usage = {
+        # Engine time per turn, model call included.
+        "latency_ms_mean": round(sum(latencies) / len(latencies), 1) if latencies else 0.0,
+        "latency_ms_p90": latencies[max(0, -(-len(latencies) * 9 // 10) - 1)] if latencies else 0.0,
+        "llm_calls": sum(int(turn.get("llm_calls") or 0) for turn in all_turns),
+        "input_tokens": sum(int(turn.get("input_tokens") or 0) for turn in all_turns),
+        "output_tokens": sum(int(turn.get("output_tokens") or 0) for turn in all_turns),
+        "cost_usd": round(cost, 6),
+        "cost_per_100_turns_usd": round(100 * cost / len(all_turns), 4) if all_turns else 0.0,
+    }
     return {
+        "usage": usage,
         "cases": len(case_results),
         "turns": sum(len(case["turns"]) for case in case_results),
         "errors": sum(bool(turn["error"]) for case in case_results for turn in case["turns"]),
@@ -229,12 +278,22 @@ def summarize(case_results: list[dict]) -> dict:
     }
 
 
-def run_cases(cases: list[dict], llm_factory: Callable[[dict], object], *, provider: str, model: str = "") -> dict:
+def run_cases(cases: list[dict], llm_factory: Callable[[dict], object], *, provider: str, model: str = "",
+              max_cost_usd: float | None = None) -> dict:
+    """Runs the cases in order. With `max_cost_usd`, the run stops as soon as the
+    estimated spend passes it; the report then says so and holds what ran."""
     run = EvalRun()
     previous_profile = os.environ.get(PROFILE_ENV_VAR)
     os.environ[PROFILE_ENV_VAR] = str(PROFILE_PATH)
+    results: list[dict] = []
+    stopped = ""
     try:
-        results = [run_case(case, run, llm_factory) for case in cases]
+        for case in cases:
+            spent = sum(float(turn["cost_usd"]) for done in results for turn in done["turns"])
+            results.append(run_case(case, run, llm_factory, spent_usd=spent, max_cost_usd=max_cost_usd))
+            stopped = results[-1].pop("stopped")
+            if stopped:
+                break
     finally:
         if previous_profile is None:
             os.environ.pop(PROFILE_ENV_VAR, None)
@@ -242,7 +301,9 @@ def run_cases(cases: list[dict], llm_factory: Callable[[dict], object], *, provi
             os.environ[PROFILE_ENV_VAR] = previous_profile
         run.cleanup()
     apply_cross_case_repetition(results)
-    return {"evaluation_version": 2, "provider": provider, "model": model, "summary": summarize(results), "cases": results}
+    summary = summarize(results)
+    summary["usage"]["max_cost_usd"] = max_cost_usd
+    return {"evaluation_version": 2, "provider": provider, "model": model, "stopped": stopped, "summary": summary, "cases": results}
 
 
 def _rate(value: float | None) -> str:
@@ -256,6 +317,12 @@ def render_markdown(report: dict) -> str:
         "",
         f"Provider: `{report['provider']}`" + (f", model `{report['model']}`" if report["model"] else ""),
         f"Cases: {summary['cases']}, turns: {summary['turns']}, turns that raised: {summary['errors']}",
+        *(["**Stopped early: the cost ceiling was exceeded.**"] if report.get("stopped") else []),
+        *([
+            f"Engine latency per turn: mean {summary['usage']['latency_ms_mean']:.0f} ms, p90 {summary['usage']['latency_ms_p90']:.0f} ms. "
+            f"Cost: {summary['usage']['cost_usd']:.4f} USD ({summary['usage']['cost_per_100_turns_usd']:.4f} USD per 100 turns), "
+            f"{summary['usage']['llm_calls']} model calls."
+        ] if "usage" in summary else []),
         "",
         "Pass rate = pass / (pass + fail). Review items are waiting for a human and count for neither side.",
         "Machine style alone is allowed. Health claims need matching component evidence. "

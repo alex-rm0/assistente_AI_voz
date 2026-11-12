@@ -177,10 +177,14 @@ OLLAMA_KEEP_ALIVE = -1  # never expire while the app is open
 class OllamaProvider:
     """ModelProvider implementation over Ollama's /api/chat and /api/embeddings."""
 
-    def __init__(self, model: str, base_url: str = "http://127.0.0.1:11434", timeout_seconds: int = 120) -> None:
+    def __init__(self, model: str, base_url: str = "http://127.0.0.1:11434", timeout_seconds: int = 120,
+                 think: bool | None = None) -> None:
         self.model = model
         self.base_url = base_url
         self.timeout_seconds = timeout_seconds
+        # Only for models with a reasoning phase (Ollama's "think" field). None
+        # sends nothing, which is what the default model has always received.
+        self.think = think
 
     @property
     def name(self) -> str:
@@ -214,6 +218,8 @@ class OllamaProvider:
         }
         if response_format is not None:
             payload["format"] = response_format
+        if self.think is not None:
+            payload["think"] = self.think
         options: dict[str, Any] = {}
         if temperature is not None:
             options["temperature"] = temperature
