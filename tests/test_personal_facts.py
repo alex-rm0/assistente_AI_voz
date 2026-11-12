@@ -55,6 +55,50 @@ def test_the_model_answers_when_the_evidence_mentions_the_topic(message: str, ev
     assert missing_personal_fact_reply(message, [PROFILE, evidence], "pt-PT") is None
 
 
+# A fictitious profile in which the user IS a coach, a brother and a dog trainer's
+# neighbour, but none of those lines says who his coach, siblings or pets are.
+ROLE_PROFILE = """
+- É treinador de voleibol dos juniores e presidente da secção.
+- Presidente, treinador e atleta da equipa sénior.
+- Works as a coach at the club on Saturdays.
+- Gosta de cães, mas vive num apartamento pequeno.
+- Trata os atletas mais novos como irmãos.
+- Vive em Aveiro, perto da Rua Direita.
+- Organiza a festa de aniversário do clube todos os anos.
+- Atende o telefone do clube às segundas.
+"""
+
+
+@pytest.mark.parametrize("message", [
+    "Como se chama o meu treinador?", "Quem é o meu treinador?", "What is my coach's name?", "Who is my coach?",
+    "Quantos irmãos tenho?", "Do I have a dog?", "Qual é a minha morada?", "Quando é o meu aniversário?",
+    "Qual é o meu número de telefone?",
+])
+def test_a_word_used_in_another_sense_is_not_evidence(message: str) -> None:
+    """Real case: the profile said Alexandre is a coach, so "treinador" was found
+    and the model was left to invent his coach's name."""
+    assert missing_personal_fact_reply(message, [ROLE_PROFILE], "pt-PT") == unknown_reply("pt-PT")
+
+
+@pytest.mark.parametrize("message,evidence", [
+    ("Como se chama o meu treinador?", "- O treinador dele é o Paulo Matos."),
+    ("Como se chama o meu treinador?", "O meu treinador chama-se Paulo."),
+    ("Como se chama o meu treinador?", "Treinador: Paulo Matos"),
+    ("Como se chama o meu treinador?", "É treinado pelo Paulo Matos."),
+    ("What is my coach's name?", "My coach is Paul."),
+    ("What is my coach's name?", "He is coached by Paul."),
+    ("Quantos irmãos tenho?", "Irmãos: Rui e Marta."),
+    ("Quantos irmãos tenho?", "A irmã dele chama-se Marta."),
+    ("Do I have a dog?", "Tem um cão chamado Bolt."),
+    ("Qual é a minha morada?", "Mora na Rua das Flores, 12."),
+    ("Quando é o meu aniversário?", "Nasceu a 3 de março de 2003."),
+    ("Quando é o meu aniversário?", "Faz anos a 3 de março."),
+    ("Qual é o meu número de telefone?", "Telemóvel: 912 345 678"),
+])
+def test_a_concrete_fact_is_evidence(message: str, evidence: str) -> None:
+    assert missing_personal_fact_reply(message, [ROLE_PROFILE, evidence], "pt-PT") is None
+
+
 @pytest.mark.parametrize("message", [
     "O que é que eu estudo?", "O que faço na AAC?", "Que instrumento toco?",   # answered by the profile
     "O meu irmão vem cá jantar amanhã.", "Tenho de ligar ao meu treinador.",    # statements, not questions
@@ -99,6 +143,19 @@ def test_composer_uses_what_the_user_said_earlier_but_not_what_echo_said(profile
 
     llm = _CountingLLM()
     request = ComposerRequest(intent="conversa", user_message="Quantos irmãos tenho?", history=invented, response_language="pt-PT")
+    assert ResponseComposer(llm).compose(request) == unknown_reply("pt-PT")
+    assert llm.calls == 0
+
+
+def test_asking_twice_does_not_turn_the_question_into_evidence(profile) -> None:
+    asked_before = [
+        {"role": "user", "content": "Como se chama o meu treinador?"},
+        {"role": "assistant", "content": unknown_reply("pt-PT")},
+    ]
+    llm = _CountingLLM("Chama-se Ricardo.")
+
+    request = ComposerRequest(intent="conversa", user_message="Quem é o meu treinador?", history=asked_before, response_language="pt-PT")
+
     assert ResponseComposer(llm).compose(request) == unknown_reply("pt-PT")
     assert llm.calls == 0
 

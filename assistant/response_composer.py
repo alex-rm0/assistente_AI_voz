@@ -340,9 +340,11 @@ def _system_prompt_for(request: ComposerRequest) -> str:
 
 def _personal_evidence(request: ComposerRequest) -> list[str]:
     """Everything this request carries that may hold a fact about Alexandre.
-    Echo's own earlier replies are not evidence: they may be the invention."""
+    Echo's own earlier replies are not evidence: they may be the invention.
+    Nor are the user's earlier questions: asking about a coach names no coach."""
     profile = load_core_profile()
     said = [str(item.get("content", "")) for item in request.history if item.get("role") == "user"]
+    said = [text for text in said if "?" not in text]
     return [profile.text if profile is not None else "", request.context, *map(str, request.facts), *said]
 
 
