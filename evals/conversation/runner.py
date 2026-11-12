@@ -8,6 +8,7 @@ chosen by the caller: a fake provider, local Ollama, or Claude.
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections import Counter
 from pathlib import Path
@@ -21,6 +22,9 @@ LANGUAGES = ("pt-PT", "en-GB")
 PROVIDERS = ("fake", "ollama", "anthropic")
 _TURN_KEYS = {"user", "garbled", "follow_up", "answer_any", "forbid", "review", "soft"}
 FAKE_REPLIES = {"pt-PT": "Claro. Diz-me o que precisas.", "en-GB": "Sure. Tell me what you need."}
+# Every run uses this fictitious core profile, never the private data/profile/core_profile.md.
+PROFILE_PATH = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "core_profile.md"
+PROFILE_ENV_VAR = "ECHO_CORE_PROFILE_PATH"
 
 
 def load_cases(path: Path = CASES_PATH) -> list[dict]:
@@ -131,6 +135,8 @@ def run_case(case: dict, run: EvalRun, llm_factory: Callable[[dict], object]) ->
     turns: list[dict] = []
     replies: list[str] = []
     user_messages: list[str] = []
+    # What the profile says is evidence for a world claim, like the user's own words.
+    profile_text = PROFILE_PATH.read_text(encoding="utf-8")
     for turn in case["turns"]:
         started = time.perf_counter()
         error = ""
@@ -140,6 +146,7 @@ def run_case(case: dict, run: EvalRun, llm_factory: Callable[[dict], object]) ->
             response, error = "", f"{type(exc).__name__}: {exc}"
         telemetry = engine.get_last_turn_telemetry() or {}
         outcomes = evaluate_turn(response, case["language"], turn, replies, user_messages=user_messages,
+                                 profile_text=profile_text,
                                  verified_datetime=telemetry.get("selected_path") == "SYSTEM_DATETIME")
         if not turn.get("garbled"):
             user_messages.append(turn["user"])
@@ -216,9 +223,15 @@ def summarize(case_results: list[dict]) -> dict:
 
 def run_cases(cases: list[dict], llm_factory: Callable[[dict], object], *, provider: str, model: str = "") -> dict:
     run = EvalRun()
+    previous_profile = os.environ.get(PROFILE_ENV_VAR)
+    os.environ[PROFILE_ENV_VAR] = str(PROFILE_PATH)
     try:
         results = [run_case(case, run, llm_factory) for case in cases]
     finally:
+        if previous_profile is None:
+            os.environ.pop(PROFILE_ENV_VAR, None)
+        else:
+            os.environ[PROFILE_ENV_VAR] = previous_profile
         run.cleanup()
     apply_cross_case_repetition(results)
     return {"evaluation_version": 2, "provider": provider, "model": model, "summary": summarize(results), "cases": results}
@@ -240,6 +253,8 @@ def render_markdown(report: dict) -> str:
         "Machine style alone is allowed. Health claims need matching component evidence. "
         "no_repetition flags repeated state sentences within a case or across at least two cases in the same language. "
         "World-fact checks use user evidence, never earlier model replies; PASS means no known unsupported pattern was found.",
+        "Every case runs with the fictitious core profile in tests/fixtures/core_profile.md; "
+        "profile_discretion fails when a reply mentions a profile fact nobody asked about.",
         "",
         "| Property | Pass rate | Pass | Fail | Review | pt-PT | en-GB |",
         "|---|---|---|---|---|---|---|",

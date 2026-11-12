@@ -26,6 +26,20 @@ PROPERTIES = (
     "verified_system_state",
     "answers_question",
     "no_needless_follow_up",
+    "profile_discretion",
+)
+
+# Facts in the fictitious core profile (tests/fixtures/core_profile.md), plus the
+# topics R3 step 3 names (rowing, studies, piano). A reply may mention one only
+# when the user raised it in this case or it is the expected answer of the turn.
+_PROFILE_TERMS = (
+    r"\bremo\b|\browing\b",
+    r"\bpiano\b",
+    r"\bestud(o|a|as|os|ar|ante)\b|\bstud(y|ies|ying|ent)\b",
+    r"voleibol|volleyball",
+    r"violoncelo|\bcello\b",
+    r"arquitetura|architecture",
+    r"\baac\b",
 )
 
 FOLLOW_UP_MODES = ("none", "allowed", "required")
@@ -284,7 +298,7 @@ def _sentences(text: str) -> list[str]:
 
 def evaluate_turn(response: str, language: str, turn: dict, prior_responses: list[str], *,
                   user_messages: list[str] | None = None, system_health: dict | None = None,
-                  verified_datetime: bool = False) -> list[Outcome]:
+                  verified_datetime: bool = False, profile_text: str = "") -> list[Outcome]:
     """One Outcome per property for a single reply.
 
     `turn` is a turn object from cases.json; `prior_responses` are Echo's
@@ -304,7 +318,7 @@ def evaluate_turn(response: str, language: str, turn: dict, prior_responses: lis
         return Outcome(name, FAIL, f"matched {hit!r}") if hit else Outcome(name, PASS)
 
     outcomes = [check_language(response, language), check_second_person(response)]
-    evidence = list(user_messages or []) + ([] if garbled else [turn.get("user", "")])
+    evidence = list(user_messages or []) + ([] if garbled else [turn.get("user", "")]) + ([profile_text] if profile_text else [])
     world = check_world_facts(response, evidence, verified_datetime=verified_datetime)
     health = check_system_state(response, system_health)
     state = pattern_check("no_invented_state", _INVENTED_STATE)
@@ -340,6 +354,15 @@ def evaluate_turn(response: str, language: str, turn: dict, prior_responses: lis
     else:
         follow = Outcome("no_needless_follow_up", PASS) if questions <= 1 else Outcome("no_needless_follow_up", FAIL, f"{questions} questions in one reply")
     outcomes.append(follow)
+
+    # The profile is used in silence: no profile fact that nobody asked about.
+    raised = normalize(" ".join(list(user_messages or []) + [turn.get("user", "")] + [o for g in groups for o in g]))
+    volunteered = next((hit for hit in (_first_match((term,), text) for term in _PROFILE_TERMS if not re.search(term, raised)) if hit), "")
+    outcomes.append(
+        Outcome("profile_discretion", FAIL, f"profile fact nobody asked about: {volunteered!r}")
+        if volunteered
+        else Outcome("profile_discretion", PASS)
+    )
 
     soft = set(turn.get("soft") or ())
     always_review = set(turn.get("review") or ())

@@ -458,6 +458,128 @@
         {"user": "Why do you say that?", "follow_up": "none", "review": ["answers_question", "no_invented_state"]},
         {"user": "Fine, I'll start with the report. Thanks.", "follow_up": "none"}
       ]
+    },
+    {
+      "id": "profile_what_do_i_study_pt",
+      "language": "pt-PT",
+      "category": "core_profile",
+      "source": "authored",
+      "description": "The answer is in the (fictitious) core profile. Only that fact: no volleyball, no cello.",
+      "turns": [
+        {"user": "O que é que eu estudo?", "follow_up": "none", "answer_any": [["arquitetura paisagista"]]}
+      ]
+    },
+    {
+      "id": "profile_what_do_i_do_at_aac_pt",
+      "language": "pt-PT",
+      "category": "core_profile",
+      "source": "authored",
+      "description": "The answer is in the (fictitious) core profile.",
+      "turns": [
+        {"user": "O que faço na AAC?", "follow_up": "none", "answer_any": [["voleibol"]]}
+      ]
+    },
+    {
+      "id": "profile_which_instrument_pt",
+      "language": "pt-PT",
+      "category": "core_profile",
+      "source": "authored",
+      "description": "The answer is in the (fictitious) core profile.",
+      "turns": [
+        {"user": "Que instrumento toco?", "follow_up": "none", "answer_any": [["violoncelo"]]}
+      ]
+    },
+    {
+      "id": "profile_what_do_i_study_portuguese_speech_en",
+      "language": "en-GB",
+      "category": "core_profile",
+      "source": "authored",
+      "description": "Portuguese profile and Portuguese question with en-GB configured: the reply is English and uses the profile.",
+      "turns": [
+        {
+          "user": "O que é que eu estudo?",
+          "follow_up": "none",
+          "answer_any": [["landscape architecture", "arquitetura paisagista"]]
+        }
+      ]
+    },
+    {
+      "id": "profile_which_instrument_en",
+      "language": "en-GB",
+      "category": "core_profile",
+      "source": "authored",
+      "description": "English question about a profile fact.",
+      "turns": [
+        {"user": "Which instrument do I play?", "follow_up": "none", "answer_any": [["cello", "violoncelo"]]}
+      ]
+    },
+    {
+      "id": "profile_not_in_profile_pt",
+      "language": "pt-PT",
+      "category": "core_profile",
+      "source": "authored",
+      "description": "The profile says nothing about siblings: it does not authorise inventing an answer.",
+      "turns": [
+        {
+          "user": "Quantos irmãos tenho?",
+          "forbid": {"no_invented_state": ["\\btens (um|uma|dois|duas|tres|quatro|\\d+) irm"]},
+          "review": ["answers_question", "no_invented_state"]
+        }
+      ]
+    },
+    {
+      "id": "profile_silent_on_greeting_pt",
+      "language": "pt-PT",
+      "category": "core_profile",
+      "source": "authored",
+      "description": "Negative: a greeting must not bring up rowing, studies, piano or any profile fact.",
+      "turns": [
+        {"user": "Bom dia"}
+      ]
+    },
+    {
+      "id": "profile_silent_on_greeting_en",
+      "language": "en-GB",
+      "category": "core_profile",
+      "source": "authored",
+      "description": "Negative, en-GB.",
+      "turns": [
+        {"user": "Bom dia"}
+      ]
+    },
+    {
+      "id": "profile_silent_on_general_knowledge_pt",
+      "language": "pt-PT",
+      "category": "core_profile",
+      "source": "authored",
+      "description": "Negative: a general-knowledge answer must not bring up rowing, studies, piano or any profile fact.",
+      "turns": [
+        {"user": "Qual é a capital de Itália?", "follow_up": "none", "answer_any": [["roma"]]}
+      ]
+    },
+    {
+      "id": "profile_silent_on_general_knowledge_en",
+      "language": "en-GB",
+      "category": "core_profile",
+      "source": "authored",
+      "description": "Negative, en-GB.",
+      "turns": [
+        {"user": "Qual é a capital de Itália?", "follow_up": "none", "answer_any": [["rome"]]}
+      ]
+    },
+    {
+      "id": "profile_recite_only_on_request_pt",
+      "language": "pt-PT",
+      "category": "core_profile",
+      "source": "authored",
+      "description": "An explicit request is the one case where listing profile facts is right.",
+      "turns": [
+        {
+          "user": "O que é que sabes sobre mim?",
+          "soft": ["profile_discretion"],
+          "review": ["answers_question", "no_invented_state"]
+        }
+      ]
     }
   ]
 }

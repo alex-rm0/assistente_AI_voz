@@ -294,3 +294,58 @@ def test_natural_request_to_clarify_is_not_a_false_negative():
     statuses = _statuses(reply, turn={"user": "the of for when", "garbled": True})
     assert statuses["answers_question"] == PASS
     assert statuses["not_rude"] == PASS
+
+
+# --- core profile (R3 step 3) -------------------------------------------------
+
+
+def test_profile_fact_passes_only_when_asked_for():
+    study = {"user": "O que é que eu estudo?", "answer_any": [["arquitetura paisagista"]]}
+
+    assert _statuses("Estudas Arquitetura Paisagista.", "pt-PT", study)["profile_discretion"] == PASS
+    recited = _statuses("Estudas Arquitetura Paisagista e tocas violoncelo.", "pt-PT", study)
+    assert recited["profile_discretion"] == FAIL
+    assert _statuses("Bom dia. Como correu o remo?", "pt-PT", {"user": "Bom dia"})["profile_discretion"] == FAIL
+    assert _statuses("Rome. Good luck with your studies.", turn={"user": "Qual é a capital de Itália?"})["profile_discretion"] == FAIL
+    assert _statuses("Rome.", turn={"user": "Qual é a capital de Itália?"})["profile_discretion"] == PASS
+    # A topic the user raised earlier in the case is fair game.
+    outcomes = evaluate_turn("Descansa do remo hoje.", "pt-PT", {"user": "Achas que treino?"}, [],
+                             user_messages=["Tive um treino de remo muito cedo."])
+    assert {o.property: o.status for o in outcomes}["profile_discretion"] == PASS
+
+
+def test_profile_cases_exist_and_cover_use_and_silence():
+    cases = {case["id"]: case for case in runner.load_cases() if case["category"] == "core_profile"}
+    users = {turn["user"] for case in cases.values() for turn in case["turns"]}
+
+    assert {"O que é que eu estudo?", "O que faço na AAC?", "Que instrumento toco?", "Bom dia", "Qual é a capital de Itália?"} <= users
+    assert {case["language"] for case in cases.values()} == {"pt-PT", "en-GB"}
+    # Every expected answer is a fact of the fictitious profile, not of the real one.
+    profile = runner.PROFILE_PATH.read_text(encoding="utf-8").lower()
+    assert "fictício" in profile
+    for case_id in ("profile_what_do_i_study_pt", "profile_what_do_i_do_at_aac_pt", "profile_which_instrument_pt"):
+        assert cases[case_id]["turns"][0]["answer_any"][0][0] in profile
+
+
+def test_runner_puts_the_fictitious_profile_in_the_composer_payload(isolated_eval_env) -> None:
+    import os
+
+    system_prompts: list[str] = []
+
+    def reply(messages: list[dict]) -> str:
+        system_prompts.append(messages[0]["content"])
+        return "Tocas violoncelo."
+
+    cases = [case for case in runner.load_cases() if case["id"] in ("profile_which_instrument_pt", "profile_what_do_i_study_portuguese_speech_en")]
+    before = os.environ["ECHO_CORE_PROFILE_PATH"]
+
+    report = runner.run_cases(cases, runner.make_llm_factory("fake", fake_reply=reply), provider="fake")
+
+    assert os.environ["ECHO_CORE_PROFILE_PATH"] == before  # restored after the run
+    assert any("Sobre o Alexandre" in prompt and "Toca violoncelo" in prompt for prompt in system_prompts)
+    assert any("About Alexandre" in prompt and "Toca violoncelo" in prompt for prompt in system_prompts)
+    by_id = {case["id"]: case["turns"][0] for case in report["cases"]}
+    instrument = {o["property"]: o["status"] for o in by_id["profile_which_instrument_pt"]["outcomes"]}
+    assert instrument["answers_question"] == PASS and instrument["profile_discretion"] == PASS
+    study = {o["property"]: o["status"] for o in by_id["profile_what_do_i_study_portuguese_speech_en"]["outcomes"]}
+    assert study["answers_question"] == FAIL and study["profile_discretion"] == FAIL
