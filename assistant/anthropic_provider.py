@@ -32,10 +32,14 @@ class AnthropicProvider:
         timeout_seconds: int = 120,
         max_tokens: int = 1024,
         allow_paid_calls: bool | None = None,
+        allow_paid_calls_getter: Callable[[], bool] | None = None,
     ) -> None:
         self.model = model
         self.api_key = api_key if api_key is not None else os.environ.get("ANTHROPIC_API_KEY", "")
         self.api_key_getter = api_key_getter
+        # When given, asked on every call: the switch is a setting Alexandre can
+        # change while Echo is running (allow_paid_calls in user_settings.json).
+        self.allow_paid_calls_getter = allow_paid_calls_getter
         self.base_url = base_url
         self.timeout_seconds = timeout_seconds
         self.max_tokens = max_tokens
@@ -72,10 +76,11 @@ class AnthropicProvider:
                 provider=self.name,
                 provider_error_type="missing_api_key",
             )
-        if not self.allow_paid_calls:
+        allowed = self.allow_paid_calls_getter() if self.allow_paid_calls_getter is not None else self.allow_paid_calls
+        if not allowed:
             raise ProviderConfigurationError(
                 "O provider Anthropic esta selecionado, mas as chamadas pagas estao bloqueadas. "
-                f"Define {PAID_CALL_CONFIRMATION_ENV}=true apenas quando quiseres executar um teste pago.",
+                f"Liga allow_paid_calls nas definicoes (ou {PAID_CALL_CONFIRMATION_ENV}=true para forcar).",
                 provider=self.name,
                 provider_error_type="paid_calls_not_confirmed",
             )

@@ -22,6 +22,7 @@ SYSTEM_COMMAND_INTENTS = {
     "get_model_status",
     "get_budget_status",
     "set_automatic_claude_enabled",
+    "set_allow_paid_calls",
     "set_model_budget",
     "save_anthropic_key",
     "remove_anthropic_key",

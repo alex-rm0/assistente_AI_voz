@@ -20,7 +20,7 @@ from assistant.model_provider import (
     resolve_model_provider,
 )
 from assistant.model_router import AutomaticRoutingConfig, ModelRouter, ModelRoutingConfig, ModelUsageBudget, RoutedLLM, resolve_model_routing_config
-from assistant.model_runtime import ModelRuntimeBridge, UserSettingsStore
+from assistant.model_runtime import ModelRuntimeBridge, UserSettingsStore, paid_calls_getter
 from assistant.personal_model import PersonalModel
 from assistant.presence_manager import PresenceManager
 from assistant.prompts import get_base_system_prompt
@@ -235,6 +235,8 @@ def main() -> int:
     anthropic_provider = AnthropicProvider(
         model=anthropic_model_name,
         api_key_getter=lambda: resolve_anthropic_api_key(os.environ, secret_storage)[0],
+        # Paid calls are a setting (allow_paid_calls in data/user_settings.json), read on every call.
+        allow_paid_calls_getter=paid_calls_getter(user_settings_store),
         base_url=str(anthropic_config.get("base_url") or "https://api.anthropic.com"),
         timeout_seconds=int(anthropic_config.get("timeout_seconds", 120)),
         max_tokens=int(anthropic_config.get("max_tokens", 1024)),
@@ -258,6 +260,7 @@ def main() -> int:
             anthropic_model=anthropic_provider.model,
             budget=budget,
             anthropic_key_available=lambda: bool(resolve_anthropic_api_key(os.environ, secret_storage)[0]),
+            paid_calls_allowed=paid_calls_getter(user_settings_store),
         )
         llm = RoutedLLM(
             providers={"ollama": ollama_provider, "anthropic": anthropic_provider},

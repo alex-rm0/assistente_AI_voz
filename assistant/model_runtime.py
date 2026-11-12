@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from assistant.anthropic_provider import PAID_CALL_CONFIRMATION_ENV
 from assistant.model_provider import DEFAULT_ANTHROPIC_MODEL, DEFAULT_OLLAMA_MODEL
-from assistant.model_router import AutomaticRoutingConfig, ModelRouter, ModelRoutingConfig, ModelUsageBudget
+from assistant.model_router import AutomaticRoutingConfig, ModelRouter, ModelRoutingConfig, ModelUsageBudget, paid_calls_allowed
 from assistant.secret_storage import (
     ANTHROPIC_SECRET_NAME,
     NullSecretStorage,
@@ -26,6 +27,7 @@ from assistant.tavily_research import TavilyResearchConfig, TavilyResearchProvid
 SAFE_USER_SETTING_KEYS = {
     "model_routing_mode",
     "automatic_claude_enabled",
+    "allow_paid_calls",
     "daily_budget_usd",
     "max_single_call_estimated_usd",
     "visual_preferences",
@@ -116,6 +118,13 @@ class UserSettingsStore:
         data.update({key: value for key, value in changes.items() if key in SAFE_USER_SETTING_KEYS})
         self.save(data)
         return self.load()
+
+
+def paid_calls_getter(store: "UserSettingsStore", env: dict[str, str] | None = None) -> Callable[[], bool]:
+    """Whether paid model calls are on, read fresh each time it is asked:
+    `allow_paid_calls` in the user settings file, with the environment
+    variable as an override (see assistant.model_router.paid_calls_allowed)."""
+    return lambda: paid_calls_allowed(env, store.load().get("allow_paid_calls"))
 
 
 class ModelRuntimeBridge:
@@ -295,6 +304,8 @@ class ModelRuntimeBridge:
             return self.set_mode(str(params.get("mode") or ""))
         if intent == "set_automatic_claude_enabled":
             return self.set_automatic_claude_enabled(bool(params.get("enabled")))
+        if intent == "set_allow_paid_calls":
+            return self.set_allow_paid_calls(params.get("enabled") is True)
         if intent == "set_model_budget":
             return self.set_budget(float(params.get("daily_budget_usd") or 0.0), float(params.get("max_single_call_estimated_usd") or 0.0))
         if intent == "get_budget_status" or intent == "get_model_status":
@@ -446,6 +457,11 @@ class ModelRuntimeBridge:
         note = "Claude automático ativo." if enabled else "Claude automático desligado."
         return self.current_payload(state="mode_changed", note=note)
 
+    def set_allow_paid_calls(self, enabled: bool) -> dict[str, Any]:
+        self.store.update(allow_paid_calls=bool(enabled))
+        note = "Chamadas pagas ligadas." if enabled else "Chamadas pagas desligadas."
+        return self.current_payload(state="mode_changed", note=note)
+
     def set_budget(self, daily_budget_usd: float, max_single_call_estimated_usd: float) -> dict[str, Any]:
         daily = _bounded_money(daily_budget_usd, 0.0, 25.0)
         single = _bounded_money(max_single_call_estimated_usd, 0.0, 5.0)
@@ -560,7 +576,7 @@ class ModelRuntimeBridge:
             return False
 
     def _paid_calls_enabled(self) -> bool:
-        return str(self.env.get(PAID_CALL_CONFIRMATION_ENV) or "").strip().lower() == "true"
+        return paid_calls_getter(self.store, self.env)()
 
     def _budget_snapshot(self) -> dict[str, float]:
         if self.budget is None:
