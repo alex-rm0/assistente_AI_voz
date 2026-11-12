@@ -756,6 +756,21 @@ def _complexity_reason_for_claude(routing_input: ModelRoutingInput) -> str:
         "planeia",
         "passo a passo",
         "continuidade",
+        # The same requests in English (en-GB is the default response language).
+        "long text",
+        "rewrite",
+        "rephrase",
+        "summarise this document",
+        "summarize this document",
+        "long summary",
+        "explain in detail",
+        "in detail",
+        "technical explanation",
+        "compare",
+        "comparison",
+        "detailed plan",
+        "step by step",
+        "step-by-step",
     )
     if any(marker in text for marker in complex_markers):
         return "complex_request"
@@ -825,35 +840,51 @@ def _count_constraints(text: str) -> int:
         "sem ",
         "com ",
         "em pontos",
+        "short",
+        "detailed",
+        "three points",
+        "four points",
+        "five points",
+        "british english",
+        "without ",
+        "bullet points",
     )
     return sum(1 for marker in markers if marker in normalized)
 
 
 def _looks_like_professional_long_writing(text: str) -> bool:
-    writing = any(marker in text for marker in ("escreve", "redige", "cria", "prepara"))
-    professional = any(marker in text for marker in ("email", "e-mail", "profissional", "relatorio", "relatório"))
-    detailed = any(marker in text for marker in ("detalhado", "estado atual", "progressos", "proximos passos", "próximos passos"))
+    writing = any(marker in text for marker in ("escreve", "redige", "cria", "prepara", "write", "draft", "compose", "prepare"))
+    professional = any(marker in text for marker in ("email", "e-mail", "profissional", "relatorio", "relatório", "professional", "report"))
+    detailed = any(marker in text for marker in (
+        "detalhado", "estado atual", "progressos", "proximos passos", "próximos passos",
+        "detailed", "current state", "progress", "next steps",
+    ))
     return writing and professional and detailed
 
 
 def _looks_like_structured_summary(text: str) -> bool:
-    if not any(marker in text for marker in ("resume", "resumo", "sintetiza")):
+    if not any(marker in text for marker in ("resume", "resumo", "sintetiza", "summarise", "summarize", "summary")):
         return False
-    has_structure = any(marker in text for marker in ("pontos", "topicos", "tópicos", "ideias principais", "bullet"))
-    has_count = any(marker in text for marker in (" tres ", " três ", " quatro ", " cinco ", " 3 ", " 4 ", " 5 "))
+    has_structure = any(marker in text for marker in ("pontos", "topicos", "tópicos", "ideias principais", "bullet", "points", "main ideas", "key ideas"))
+    has_count = any(marker in text for marker in (" tres ", " três ", " quatro ", " cinco ", " 3 ", " 4 ", " 5 ", " three ", " four ", " five "))
     has_source_text = ":" in text or len(text.split()) >= 35
     return has_structure and (has_count or has_source_text)
 
 
 def _looks_like_complex_planning(text: str) -> bool:
-    planning = any(marker in text for marker in ("planeia", "planear", "plano", "organiza"))
-    detailed = any(marker in text for marker in ("detalhado", "passo a passo", "semanal", "dias", "orcamento", "orçamento"))
+    planning = any(marker in text for marker in ("planeia", "planear", "plano", "organiza", "plan", "organise", "organize"))
+    detailed = any(marker in text for marker in (
+        "detalhado", "passo a passo", "semanal", "dias", "orcamento", "orçamento",
+        "detailed", "in detail", "step by step", "step-by-step", "weekly", "days", "budget",
+    ))
     return planning and detailed
 
 
 def _looks_like_technical_explanation(text: str) -> bool:
-    explanation = any(marker in text for marker in ("explica", "explica-me", "explicacao", "explicação"))
-    technical = any(marker in text for marker in ("python", "erro", "codigo", "código", "api", "git", "assíncrono", "assincrono"))
+    explanation = any(marker in text for marker in ("explica", "explica-me", "explicacao", "explicação", "explain", "explanation"))
+    technical = any(marker in text for marker in (
+        "python", "erro", "codigo", "código", "api", "git", "assíncrono", "assincrono", "error", "code", "async",
+    ))
     return explanation and technical
 
 
