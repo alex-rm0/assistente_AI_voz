@@ -91,6 +91,12 @@ def default_probes(*, llm=None, tts_manager=None, get_transcriber=None, get_resp
         except OSError:
             return UNAVAILABLE
     probes["network"] = network_probe
+
+    # With model routing, Claude answers the conversation and the local model is
+    # the reserve. The router records how the last Claude call went.
+    cloud_state = getattr(llm, "cloud_state", None)
+    if callable(cloud_state):
+        probes["cloud"] = cloud_state
     return probes
 
 
@@ -132,8 +138,15 @@ _LABELS = {
     "stt": ("o reconhecimento de voz", "voice recognition"),
     "tts": ("a voz", "speech output"),
     "network": ("a rede", "the network"),
+    "cloud": ("o modelo na cloud", "the cloud model"),
 }
+_CLOUD_ON_RESERVE = (
+    "o modelo na cloud não está a responder e estou a usar o local",
+    "the cloud model is not responding, so I am using the local one",
+)
 _PROBLEMS = {
+    ("cloud", DEGRADED): _CLOUD_ON_RESERVE,
+    ("cloud", UNAVAILABLE): _CLOUD_ON_RESERVE,
     ("ollama", UNAVAILABLE): ("o modelo de linguagem não está a responder", "the language model is not responding"),
     ("ollama", DEGRADED): ("o modelo de linguagem está lento", "the language model is rather slow"),
     ("stt", DEGRADED): ("o reconhecimento de voz está um pouco lento hoje", "voice recognition is a touch slow today"),
@@ -205,7 +218,7 @@ def wellbeing_reply(message: str, response_language: str, health: SystemHealth |
     elif all(name in measured for name in COMPONENTS):
         line = _ALL_OK[index % len(_ALL_OK)][pick]
     else:
-        parts = _join([_LABELS[name][pick] for name in COMPONENTS if name in measured], english)
+        parts = _join([_LABELS[name][pick] for name in (*COMPONENTS, "cloud") if name in measured], english)
         line = _PARTIAL_OK[index % len(_PARTIAL_OK)][pick].format(parts=parts)
     line = line[0].upper() + line[1:]
 
