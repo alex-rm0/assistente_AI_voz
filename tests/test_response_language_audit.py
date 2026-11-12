@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+import pytest
 
 from assistant.system_health import not_measured_replies
 from assistant.agent import Agent, AgentContext
@@ -804,3 +805,35 @@ def test_t_cross_language_input_independence_comparison(tmp_path: Path) -> None:
     reply_b = engine_b.respond("I want to compare samsung and apple")
     # response_language must win regardless of what language the request was in
     assert engine_b.response_language == "pt-PT"
+
+
+def test_live_desktop_confirmation_and_cancellation_follow_response_language(tmp_path):
+    engine, _, local, _ = make_engine(tmp_path, mode="local")
+    engine._set_response_language("en-GB")
+    response = engine.respond("abre o gmail")
+    assert response.startswith("Would you like me to open Gmail?")
+    assert "Responde" not in response
+    assert engine.agent.has_pending_confirmation()
+    response = engine.respond("Não.")
+    assert response == "Action cancelled. I haven't executed anything."
+    assert not engine.agent.has_pending_confirmation()
+    assert local.calls == []
+
+
+@pytest.mark.parametrize("original,expected", [
+    ("Não encontrei 'notas, por favor?' na workspace. Qual é o nome exato do ficheiro?",
+     "I couldn't find 'notas, por favor?' in the workspace. What's the exact filename?"),
+    ("Queres que traga o VS Code para a frente?", "Would you like me to bring VS Code to the front?"),
+    ("Queres que abra a pasta 'relatórios'?", "Would you like me to open the folder 'relatórios'?"),
+    ("Queres que pesquise no Google por: gatos?", "Would you like me to search Google for: gatos?"),
+])
+def test_local_wrappers_translate_without_changing_user_values(original, expected):
+    from assistant.response_language import localize_deterministic_response
+    assert localize_deterministic_response(original, "en-GB") == expected
+    assert localize_deterministic_response(original, "pt-PT") == original
+
+
+def test_confirmation_localization_never_truncates_or_translates_a_draft_body():
+    from assistant.response_language import localize_deterministic_response
+    draft = "Subject: Instructions\n\nQueres que abra o Gmail?\nResponde 'sim' para executar ou 'nao' para cancelar.\n\nAna"
+    assert localize_deterministic_response(draft, "en-GB") == draft

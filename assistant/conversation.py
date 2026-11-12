@@ -6991,7 +6991,7 @@ class AssistantEngine:
                 if self._turn_trace is not None:
                     self._turn_trace["ungrounded_workspace_operation_claim"] = workspace_claim_reason
 
-        if final_response and not tool_confirmation:
+        if final_response:
             localized = localize_deterministic_response(final_response, self.response_language)
             if localized != final_response:
                 final_response = localized

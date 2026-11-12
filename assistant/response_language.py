@@ -1103,9 +1103,33 @@ def localize_deterministic_response(response: str, language: str) -> str:
         "nao consegui voltar a aceder ao documento anterior na workspace.": "I couldn't access the previous document in the workspace again.",
         "nao encontrei esse objeto no workspace.": "I couldn't find that object in the workspace.",
         "ainda nao sei executar este tipo de tarefa.": "I can't carry out this type of task yet.",
+        "acao cancelada. nao executei nada.": "Action cancelled. I haven't executed anything.",
+        "acao cancelada. nao criei nenhum ficheiro.": "Action cancelled. I haven't created any file.",
+        "claro. nao abro nada. continuamos por aqui.": "Of course. I won't open anything. We can carry on here.",
+        "claro. cancelo isso. diz-me.": "Of course. I've cancelled that. Go on.",
+        "ainda nao executei nada. queres que avance com essa acao ou preferes cancelar?": "I haven't executed anything yet. Shall I go ahead, or would you prefer to cancel?",
+        "nao ha nenhuma acao pendente para confirmar.": "There's no pending action to confirm.",
     }
     if normalized in exact:
         return exact[normalized]
+    confirmation, separator, remainder = text.partition("\nResponde 'sim' para executar ou 'nao' para cancelar.")
+    if separator and not remainder and "\n" not in confirmation and confirmation.startswith("Queres que "):
+        return localize_deterministic_response(confirmation, language) + "\nReply 'yes' to proceed or 'no' to cancel."
+    wrappers = (
+        (r"Queres que traga o (.+) para a frente\?", "Would you like me to bring {} to the front?"),
+        (r"Queres que abra o projeto (.+)\?", "Would you like me to open the project {}?"),
+        (r"Queres que abra a pasta '(.+)'\?", "Would you like me to open the folder '{}'?"),
+        (r"Queres que abra o ficheiro '(.+)'\?", "Would you like me to open the file '{}'?"),
+        (r"Queres que abra este URL\? (.+)", "Would you like me to open this URL? {}"),
+        (r"Queres que abra o (.+)\?", "Would you like me to open {}?"),
+        (r"Queres que pesquise no (.+) por: (.+)\?", "Would you like me to search {} for: {}?"),
+        (r"Não encontrei '(.+)' na workspace\. Qual é o nome exato do ficheiro\?",
+         "I couldn't find '{}' in the workspace. What's the exact filename?"),
+    )
+    for pattern, template in wrappers:
+        match = re.fullmatch(pattern, text)
+        if match:
+            return template.format(*match.groups())
     created = re.fullmatch(r"Criei o ficheiro '(.+)' na pasta workspace\.", text)
     if created:
         return f"Created the file '{created[1]}' in the workspace."
