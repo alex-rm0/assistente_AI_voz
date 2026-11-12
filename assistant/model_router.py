@@ -10,8 +10,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,14 @@ from assistant.model_provider import (
     ModelResponse,
     ProviderBackedLLM,
     ProviderConfigurationError,
+    ProviderTimeoutError,
+)
+from assistant.privacy import (
+    DEFAULT_PRIVACY_CLASS,
+    content_privacy_class,
+    normalize_privacy_class,
+    provider_allowed,
+    stricter,
 )
 
 
@@ -35,6 +44,28 @@ NO_PAID_CALL_SOURCES = {
     "VOICE_CRITIC",
     "PLANNER",
 }
+# Decision of 12/11 (North Star §11): general conversation goes to Claude when
+# the data may leave the machine; the local model is the reserve.
+CONVERSATION_SOURCES = {"RESPONSE_COMPOSER", "RESPONSE_COMPOSER_REGENERATION"}
+# A conversational turn does not wait longer than this for Claude before the
+# local model answers instead. Document tasks keep their caller's own deadline.
+CLAUDE_CONVERSATION_TIMEOUT_SECONDS = 4.0
+# After a failed Claude call, stay local for this long instead of paying the
+# timeout again on every turn.
+CLOUD_RETRY_AFTER_SECONDS = 60.0
+
+
+def paid_calls_allowed(env: dict[str, str] | None, setting: object) -> bool:
+    """Are paid model calls switched on?
+
+    The switch is `allow_paid_calls` in data/user_settings.json (off unless
+    Alexandre turns it on). ECHO_ALLOW_PAID_MODEL_CALLS is only an override:
+    "true" forces them on, "false" forces them off, unset leaves the setting.
+    """
+    override = str((env if env is not None else os.environ).get(PAID_CALL_CONFIRMATION_ENV) or "").strip().lower()
+    if override in ("true", "false"):
+        return override == "true"
+    return setting is True
 
 
 @dataclass(frozen=True)
@@ -70,6 +101,11 @@ class ModelRoutingInput:
     # can hide a genuinely complex reconstructed task. Never contains the
     # document's actual content. See _document_task_complexity_score.
     task_profile: dict[str, object] | None = None
+    # North Star §6: the class of the data in this request. Nothing declared
+    # means PRIVATE. explicit_document_request is set when the user's own turn
+    # asks about that document, the one case in which PRIVATE data may go out.
+    privacy_class: str = DEFAULT_PRIVACY_CLASS
+    explicit_document_request: bool = False
 
 
 @dataclass(frozen=True)
@@ -90,6 +126,7 @@ class ModelRoutingDecision:
     task_complexity_score: float = 0.0
     task_complexity_band: str = ""
     escalation_considered: bool = False
+    privacy_class: str = ""
 
 
 class ModelUsageBudget:
@@ -178,6 +215,7 @@ class ModelRouter:
         budget: ModelUsageBudget | None = None,
         env: dict[str, str] | None = None,
         anthropic_key_available: Callable[[], bool] | None = None,
+        paid_calls_allowed: Callable[[], bool] | None = None,
     ) -> None:
         self.config = config
         self.ollama_model = ollama_model
@@ -185,10 +223,34 @@ class ModelRouter:
         self.budget = budget
         self.env = env if env is not None else os.environ
         self.anthropic_key_available = anthropic_key_available
+        self.paid_calls_allowed = paid_calls_allowed
 
     def decide(self, routing_input: ModelRoutingInput) -> ModelRoutingDecision:
-        mode = self.config.mode
+        """Choose the provider, then check the privacy class at this boundary:
+        whatever the mode, data that may not leave the machine stays local."""
         routing_input = _with_routing_metrics(routing_input)
+        privacy_class = normalize_privacy_class(routing_input.privacy_class)
+        decision = self._decide(routing_input)
+        if not provider_allowed(decision.provider, privacy_class, explicit_document_request=routing_input.explicit_document_request):
+            decision = self._privacy_blocked(decision.mode, privacy_class, routing_input)
+        return replace(decision, privacy_class=privacy_class)
+
+    def _privacy_blocked(self, mode: str, privacy_class: str, routing_input: ModelRoutingInput) -> ModelRoutingDecision:
+        return self._ollama(
+            mode,
+            f"privacy_class_{privacy_class.lower()}",
+            f"Dados de classe {privacy_class}; ficam no modelo local.",
+            "privacy_class_not_allowed",
+            routing_input=routing_input,
+        )
+
+    def _paid_calls_allowed(self) -> bool:
+        if self.paid_calls_allowed is not None:
+            return bool(self.paid_calls_allowed())
+        return paid_calls_allowed(self.env, False)
+
+    def _decide(self, routing_input: ModelRoutingInput) -> ModelRoutingDecision:
+        mode = self.config.mode
         if routing_input.explicit_provider:
             provider = routing_input.explicit_provider
             model = routing_input.explicit_model or (self.anthropic_model if provider == "anthropic" else self.ollama_model)
@@ -250,19 +312,23 @@ class ModelRouter:
                 "missing_api_key",
                 routing_input=routing_input,
             )
-        if self.env.get(PAID_CALL_CONFIRMATION_ENV, "").strip().lower() != "true":
+        if not self._paid_calls_allowed():
             return self._ollama(
                 "automatic",
                 "document_escalation_blocked_paid_disabled" if is_document_task else "paid_calls_not_confirmed",
-                f"Sem {PAID_CALL_CONFIRMATION_ENV}=true; fica no modelo local.",
+                "Chamadas pagas desligadas (allow_paid_calls); fica no modelo local.",
                 "paid_calls_not_confirmed",
                 routing_input=routing_input,
             )
+        privacy_class = normalize_privacy_class(routing_input.privacy_class)
+        if not provider_allowed("anthropic", privacy_class, explicit_document_request=routing_input.explicit_document_request):
+            return self._privacy_blocked("automatic", privacy_class, routing_input)
 
         if is_document_task:
             return self._document_task_decision(routing_input, profile)
 
-        complexity_reason = _complexity_reason_for_claude(routing_input)
+        # A specific reason (professional writing, structured summary...) is kept; plain conversation has its own.
+        complexity_reason = _complexity_reason_for_claude(routing_input) or ("general_conversation" if source in CONVERSATION_SOURCES else "")
         if not complexity_reason:
             return self._ollama("automatic", "low_complexity", "Pedido simples; o modelo local e suficiente.", routing_input=routing_input)
 
@@ -444,9 +510,39 @@ class RoutedLLM(ProviderBackedLLM):
         self.last_routing_decision: ModelRoutingDecision | None = None
         self.routing_decisions: list[ModelRoutingDecision] = []
         self._next_call_source = ""
+        self._next_call_privacy: tuple[str, bool] = (DEFAULT_PRIVACY_CLASS, False)
+        self._clock = time.monotonic
+        self._cloud_state = "unknown"
+        self._cloud_failed_at: float | None = None
+        self.last_cloud_failure_reason = ""
 
     def mark_next_call_source(self, source: str) -> None:
         self._next_call_source = str(source or "").strip()
+
+    def mark_next_call_privacy(self, privacy_class: str, explicit_document_request: bool = False) -> None:
+        """Declare the privacy class of the data in the next chat() call (North
+        Star §6). It applies to that call only; an unmarked call is PRIVATE."""
+        self._next_call_privacy = (normalize_privacy_class(privacy_class), bool(explicit_document_request))
+
+    def cloud_state(self) -> str:
+        """healthy / degraded / unknown, from the last Claude call. A probe for
+        assistant/system_health.py: degraded means the local model is answering."""
+        return self._cloud_state
+
+    def _cloud_cooling_down(self) -> bool:
+        return self._cloud_failed_at is not None and self._clock() - self._cloud_failed_at < CLOUD_RETRY_AFTER_SECONDS
+
+    def _local_reserve(self, decision: ModelRoutingDecision, reason: str) -> ModelRoutingDecision:
+        print(f"[MODEL_ROUTING] reserve=local reason={reason} source_decision={decision.reason_code}", flush=True)
+        return replace(
+            decision,
+            provider="ollama",
+            model=self.router.ollama_model,
+            paid_call=False,
+            reason_code=reason,
+            reason="Claude indisponivel; o modelo local respondeu.",
+            fallback_reason=reason,
+        )
 
     @property
     def supports_local_semantic_extraction(self) -> bool:
@@ -469,6 +565,11 @@ class RoutedLLM(ProviderBackedLLM):
         messages.append({"role": "user", "content": user_message})
         source_name = str(source or self._next_call_source or "OTHER").strip() or "OTHER"
         self._next_call_source = ""
+        declared_class, explicit_document_request = self._next_call_privacy
+        self._next_call_privacy = (DEFAULT_PRIVACY_CLASS, False)
+        # Known document or email markers anywhere in the payload outrank what the caller declared.
+        found_class = content_privacy_class([str(message.get("content") or "") for message in messages])
+        privacy_class = stricter(declared_class, found_class) if found_class else declared_class
         routing_message, routing_context_chars = _extract_routing_user_message(user_message, history or [])
         decision = self.router.decide(
             ModelRoutingInput(
@@ -480,24 +581,46 @@ class RoutedLLM(ProviderBackedLLM):
                 constraint_count=_count_constraints(routing_message),
                 explicit_provider=self.explicit_provider,
                 task_profile=task_profile,
+                privacy_class=privacy_class,
+                explicit_document_request=explicit_document_request,
             )
         )
-        provider = self.providers.get(decision.provider)
-        if provider is None:
-            raise ProviderConfigurationError(
-                f"O provider {decision.provider} foi escolhido, mas nao esta configurado.",
-                provider=decision.provider,
-                provider_error_type="provider_not_configured",
-            )
-        self.provider = provider
-        result = provider.chat(
-            messages,
-            model=decision.model,
-            response_format=response_format,
-            temperature=temperature,
-            num_predict=num_predict,
-            timeout_seconds=timeout_seconds,
+        call = dict(response_format=response_format, temperature=temperature, num_predict=num_predict)
+        result = None
+        # In automatic mode the local model is the reserve for Claude: a failed
+        # or slow cloud call never fails the turn.
+        has_reserve = (
+            decision.provider == "anthropic" and decision.mode == "automatic"
+            and not self.explicit_provider and "ollama" in self.providers and "anthropic" in self.providers
         )
+        if has_reserve and self._cloud_cooling_down():
+            decision = self._local_reserve(decision, "claude_cooldown")
+        elif has_reserve:
+            cloud_timeout = timeout_seconds
+            if task_profile is None:
+                cloud_timeout = min(value for value in (timeout_seconds, CLAUDE_CONVERSATION_TIMEOUT_SECONDS) if value is not None)
+            try:
+                result = self.providers["anthropic"].chat(messages, model=decision.model, timeout_seconds=cloud_timeout, **call)
+                self._cloud_state, self._cloud_failed_at = "healthy", None
+            except ProviderTimeoutError:
+                failure = "claude_timeout"
+            except ProviderConfigurationError as exc:
+                failure = f"claude_{exc.provider_error_type or 'configuration_error'}"
+            except Exception as exc:  # noqa: BLE001 - any cloud failure falls back to the local model
+                failure = "claude_unreachable" if "ligar" in str(exc).lower() else "claude_error"
+            if result is None:
+                self._cloud_state, self._cloud_failed_at, self.last_cloud_failure_reason = "degraded", self._clock(), failure
+                decision = self._local_reserve(decision, failure)
+        if result is None:
+            provider = self.providers.get(decision.provider)
+            if provider is None:
+                raise ProviderConfigurationError(
+                    f"O provider {decision.provider} foi escolhido, mas nao esta configurado.",
+                    provider=decision.provider,
+                    provider_error_type="provider_not_configured",
+                )
+            result = provider.chat(messages, model=decision.model, timeout_seconds=timeout_seconds, **call)
+        self.provider = self.providers[decision.provider]
         self.router.budget.register(result) if self.router.budget is not None else None
         self.last_response = result
         self.responses.append(result)
@@ -523,8 +646,10 @@ class RoutedLLM(ProviderBackedLLM):
             # decisions, which was making configured_model_mode_source go
             # blank again as soon as an actual LLM call happened.
             model_routing_mode_source=self.router.config.mode_source,
-            model_routing_provider=decision.provider if decision else provider,
-            model_routing_model=decision.model if decision else model,
+            # The provider and model that actually answered (the UI label reads
+            # these), not the ones first chosen: after a reserve they differ.
+            model_routing_provider=provider if self.last_response else (decision.provider if decision else provider),
+            model_routing_model=model if self.last_response else (decision.model if decision else model),
             model_routing_reason_code=decision.reason_code if decision else "",
             model_routing_reason=decision.reason if decision else "",
             model_routing_paid_call=bool(decision.paid_call) if decision else False,
@@ -666,12 +791,14 @@ def _with_routing_metrics(routing_input: ModelRoutingInput) -> ModelRoutingInput
         explicit_provider=routing_input.explicit_provider,
         explicit_model=routing_input.explicit_model,
         task_profile=routing_input.task_profile,
+        privacy_class=routing_input.privacy_class,
+        explicit_document_request=routing_input.explicit_document_request,
     )
 
 
 def _extract_routing_user_message(user_message: str, history: list[dict[str, str]]) -> tuple[str, int]:
     text = str(user_message or "")
-    match = re.search(r"Mensagem do Alexandre:\s*(.*?)\s*\n\nInten", text, flags=re.IGNORECASE | re.DOTALL)
+    match = re.search(r"(?:Mensagem do Alexandre|Alexandre's message):\s*(.*?)\s*\n\nInten", text, flags=re.IGNORECASE | re.DOTALL)
     routing_message = match.group(1).strip() if match else text.strip()
     context_chars = sum(len(str(item.get("content") or "")) for item in history)
     for heading in ("Contexto relevante:", "Factos relevantes:", "Próximo objetivo da conversa:", "Proximo objetivo da conversa:"):

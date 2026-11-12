@@ -7,6 +7,7 @@ from typing import Protocol
 
 from assistant.core_profile import about_alexandre_section, load_core_profile
 from assistant.personal_facts import missing_personal_fact_reply
+from assistant.privacy import PERSONAL, PRIVATE
 from assistant.sir_budget import limit_sir  # noqa: F401 - the reply style's last step, applied by the engine when it finalises a reply
 from assistant.model_provider import ProviderConfigurationError, ProviderTimeoutError
 from assistant.response_language import (
@@ -209,6 +210,7 @@ class ResponseComposer:
 
         try:
             _mark_llm_source(self.llm, "RESPONSE_COMPOSER")
+            _mark_llm_privacy(self.llm, *_privacy_for(request.intent, request.task_profile))
             reply = self.llm.chat(
                 _with_language_anchor(self._user_prompt(request), request.response_language),
                 history=request.history,
@@ -258,6 +260,7 @@ class ResponseComposer:
         system_prompt = f"{_base_system_prompt(response_language)}\n\n{response_language_instruction(response_language)}"
         try:
             _mark_llm_source(self.llm, "RESPONSE_COMPOSER_REGENERATION")
+            _mark_llm_privacy(self.llm, *_privacy_for("conversation", None))
             reply = self.llm.chat(
                 _with_language_anchor(
                     f"{instruction}\n\n{message_label}:\n{user_message.strip()}\n\n{reason_label}: {reason}",
@@ -347,6 +350,30 @@ def _personal_evidence(request: ComposerRequest) -> list[str]:
     said = [str(item.get("content", "")) for item in request.history if item.get("role") == "user"]
     said = [text for text in said if "?" not in text]
     return [profile.text if profile is not None else "", request.context, *map(str, request.facts), *said]
+
+
+def _privacy_for(intent: str, task_profile: dict[str, object] | None) -> tuple[str, bool]:
+    """The privacy class of a composer request and whether it is an explicit
+    request about a document (North Star §6). The router checks it; known
+    document markers in the payload can only make it stricter.
+
+    - Document tasks: PRIVATE. They only exist because the user asked about
+      that document in this turn, which is the one case PRIVATE may go out.
+    - Everything else the composer answers is conversation or a common task
+      Alexandre asked for, a dictated email draft included: PERSONAL.
+    RESTRICTED is not assigned here: it is for mail read from a mailbox (F5).
+    """
+    name = str(intent or "")
+    task_type = str((task_profile or {}).get("task_type") or "")
+    if name.startswith("document_") or task_type.startswith("document_"):
+        return PRIVATE, True
+    return PERSONAL, False
+
+
+def _mark_llm_privacy(llm: ChatModel, privacy_class: str, explicit_document_request: bool) -> None:
+    marker = getattr(llm, "mark_next_call_privacy", None)
+    if callable(marker):
+        marker(privacy_class, explicit_document_request)
 
 
 def _mark_llm_source(llm: ChatModel, source: str) -> None:

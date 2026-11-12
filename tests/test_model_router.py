@@ -131,7 +131,7 @@ def test_resolve_model_routing_rejects_unknown_mode() -> None:
 
 
 def test_local_mode_always_chooses_ollama() -> None:
-    decision = _router("local").decide(ModelRoutingInput(source="RESPONSE_COMPOSER", user_message="explica em detalhe"))
+    decision = _router("local").decide(ModelRoutingInput(privacy_class="PERSONAL", source="RESPONSE_COMPOSER", user_message="explica em detalhe"))
 
     assert decision.provider == "ollama"
     assert decision.model == "llama3.1:8b"
@@ -139,7 +139,7 @@ def test_local_mode_always_chooses_ollama() -> None:
 
 
 def test_claude_mode_chooses_anthropic_without_fallback() -> None:
-    decision = _router("claude").decide(ModelRoutingInput(source="RESPONSE_COMPOSER", user_message="olá"))
+    decision = _router("claude").decide(ModelRoutingInput(privacy_class="PERSONAL", source="RESPONSE_COMPOSER", user_message="olá"))
 
     assert decision.provider == "anthropic"
     assert decision.paid_call is True
@@ -149,7 +149,7 @@ def test_claude_mode_chooses_anthropic_without_fallback() -> None:
 def test_automatic_simple_request_stays_local_even_when_paid_allowed(tmp_path: Path) -> None:
     env = {"ANTHROPIC_API_KEY": "secret", PAID_CALL_CONFIRMATION_ENV: "true"}
     decision = _router("automatic", claude_enabled=True, env=env, budget=ModelUsageBudget(tmp_path / "usage.json")).decide(
-        ModelRoutingInput(source="RESPONSE_COMPOSER", user_message="Olá")
+        ModelRoutingInput(privacy_class="PERSONAL", source="AGENT_FINAL_RESPONSE", user_message="Olá")
     )
 
     assert decision.provider == "ollama"
@@ -159,7 +159,7 @@ def test_automatic_simple_request_stays_local_even_when_paid_allowed(tmp_path: P
 def test_automatic_complex_request_uses_claude_only_when_authorized(tmp_path: Path) -> None:
     env = {"ANTHROPIC_API_KEY": "secret", PAID_CALL_CONFIRMATION_ENV: "true"}
     decision = _router("automatic", claude_enabled=True, env=env, budget=ModelUsageBudget(tmp_path / "usage.json")).decide(
-        ModelRoutingInput(source="RESPONSE_COMPOSER", user_message="Faz um plano detalhado para estudar.", prompt_chars=1200)
+        ModelRoutingInput(privacy_class="PERSONAL", source="RESPONSE_COMPOSER", user_message="Faz um plano detalhado para estudar.", prompt_chars=1200)
     )
 
     assert decision.provider == "anthropic"
@@ -170,7 +170,7 @@ def test_automatic_complex_request_uses_claude_only_when_authorized(tmp_path: Pa
 def test_automatic_professional_email_uses_claude_when_authorized(tmp_path: Path) -> None:
     env = {"ANTHROPIC_API_KEY": "secret", PAID_CALL_CONFIRMATION_ENV: "true"}
     decision = _router("automatic", claude_enabled=True, env=env, budget=ModelUsageBudget(tmp_path / "usage.json")).decide(
-        ModelRoutingInput(
+        ModelRoutingInput(privacy_class="PERSONAL", 
             source="RESPONSE_COMPOSER",
             user_message="Escreve um email profissional detalhado a explicar o estado atual do projeto Echo, os progressos realizados e os próximos passos.",
             prompt_chars=1500,
@@ -184,7 +184,7 @@ def test_automatic_professional_email_uses_claude_when_authorized(tmp_path: Path
 def test_automatic_structured_summary_uses_claude_when_authorized(tmp_path: Path) -> None:
     env = {"ANTHROPIC_API_KEY": "secret", PAID_CALL_CONFIRMATION_ENV: "true"}
     decision = _router("automatic", claude_enabled=True, env=env, budget=ModelUsageBudget(tmp_path / "usage.json")).decide(
-        ModelRoutingInput(
+        ModelRoutingInput(privacy_class="PERSONAL", 
             source="RESPONSE_COMPOSER",
             user_message="Resume este texto em quatro pontos claros: A biblioteca alargou o horário durante exames e vai avaliar a medida.",
             prompt_chars=1200,
@@ -198,7 +198,7 @@ def test_automatic_structured_summary_uses_claude_when_authorized(tmp_path: Path
 def test_structured_summary_reason_wins_over_long_prompt(tmp_path: Path) -> None:
     env = {"ANTHROPIC_API_KEY": "secret", PAID_CALL_CONFIRMATION_ENV: "true"}
     decision = _router("automatic", claude_enabled=True, env=env, budget=ModelUsageBudget(tmp_path / "usage.json")).decide(
-        ModelRoutingInput(
+        ModelRoutingInput(privacy_class="PERSONAL", 
             source="RESPONSE_COMPOSER",
             user_message="Resume este texto em quatro pontos claros: " + ("conteúdo " * 600),
             prompt_chars=5000,
@@ -215,8 +215,8 @@ def test_structured_summary_reason_wins_over_long_prompt(tmp_path: Path) -> None
 def test_short_message_with_large_internal_prompt_does_not_become_long_prompt(tmp_path: Path) -> None:
     env = {"ANTHROPIC_API_KEY": "secret", PAID_CALL_CONFIRMATION_ENV: "true"}
     decision = _router("automatic", claude_enabled=True, env=env, budget=ModelUsageBudget(tmp_path / "usage.json")).decide(
-        ModelRoutingInput(
-            source="RESPONSE_COMPOSER",
+        ModelRoutingInput(privacy_class="PERSONAL", 
+            source="AGENT_FINAL_RESPONSE",
             user_message="Há quanto tempo estamos a trabalhar no projeto Echo?",
             prompt_chars=58,
             user_message_chars=58,
@@ -234,7 +234,7 @@ def test_short_message_with_large_internal_prompt_does_not_become_long_prompt(tm
 def test_automatic_short_summary_without_structure_stays_local(tmp_path: Path) -> None:
     env = {"ANTHROPIC_API_KEY": "secret", PAID_CALL_CONFIRMATION_ENV: "true"}
     decision = _router("automatic", claude_enabled=True, env=env, budget=ModelUsageBudget(tmp_path / "usage.json")).decide(
-        ModelRoutingInput(source="RESPONSE_COMPOSER", user_message="Resume isto.", prompt_chars=600)
+        ModelRoutingInput(privacy_class="PERSONAL", source="AGENT_FINAL_RESPONSE", user_message="Resume isto.", prompt_chars=600)
     )
 
     assert decision.provider == "ollama"
@@ -243,7 +243,7 @@ def test_automatic_short_summary_without_structure_stays_local(tmp_path: Path) -
 
 def test_automatic_without_api_key_falls_back_to_local_without_paid_call(tmp_path: Path) -> None:
     decision = _router("automatic", claude_enabled=True, env={}, budget=ModelUsageBudget(tmp_path / "usage.json")).decide(
-        ModelRoutingInput(source="RESPONSE_COMPOSER", user_message="Faz um plano detalhado.", prompt_chars=1200)
+        ModelRoutingInput(privacy_class="PERSONAL", source="RESPONSE_COMPOSER", user_message="Faz um plano detalhado.", prompt_chars=1200)
     )
 
     assert decision.provider == "ollama"
@@ -257,7 +257,7 @@ def test_automatic_without_paid_confirmation_falls_back_to_local(tmp_path: Path)
         claude_enabled=True,
         env={"ANTHROPIC_API_KEY": "secret"},
         budget=ModelUsageBudget(tmp_path / "usage.json"),
-    ).decide(ModelRoutingInput(source="RESPONSE_COMPOSER", user_message="Faz um plano detalhado.", prompt_chars=1200))
+    ).decide(ModelRoutingInput(privacy_class="PERSONAL", source="RESPONSE_COMPOSER", user_message="Faz um plano detalhado.", prompt_chars=1200))
 
     assert decision.provider == "ollama"
     assert decision.fallback_reason == "paid_calls_not_confirmed"
@@ -276,7 +276,7 @@ def test_automatic_budget_exceeded_falls_back_to_local(tmp_path: Path) -> None:
         budget=ModelUsageBudget(tmp_path / "usage.json"),
     )
 
-    decision = router.decide(ModelRoutingInput(source="RESPONSE_COMPOSER", user_message="Faz um plano detalhado.", prompt_chars=1200))
+    decision = router.decide(ModelRoutingInput(privacy_class="PERSONAL", source="RESPONSE_COMPOSER", user_message="Faz um plano detalhado.", prompt_chars=1200))
 
     assert decision.provider == "ollama"
     assert decision.fallback_reason in {"single_call_budget_exceeded", "daily_budget_exceeded"}
@@ -291,7 +291,7 @@ def test_automatic_corrupt_budget_state_falls_back_to_local(tmp_path: Path) -> N
         claude_enabled=True,
         env={"ANTHROPIC_API_KEY": "secret", PAID_CALL_CONFIRMATION_ENV: "true"},
         budget=ModelUsageBudget(budget_path),
-    ).decide(ModelRoutingInput(source="RESPONSE_COMPOSER", user_message="Faz um plano detalhado.", prompt_chars=1200))
+    ).decide(ModelRoutingInput(privacy_class="PERSONAL", source="RESPONSE_COMPOSER", user_message="Faz um plano detalhado.", prompt_chars=1200))
 
     assert decision.provider == "ollama"
     assert decision.fallback_reason == "budget_state_unavailable"
@@ -300,7 +300,7 @@ def test_automatic_corrupt_budget_state_falls_back_to_local(tmp_path: Path) -> N
 def test_tool_selector_source_never_uses_paid_model(tmp_path: Path) -> None:
     env = {"ANTHROPIC_API_KEY": "secret", PAID_CALL_CONFIRMATION_ENV: "true"}
     decision = _router("automatic", claude_enabled=True, env=env, budget=ModelUsageBudget(tmp_path / "usage.json")).decide(
-        ModelRoutingInput(source="TOOL_SELECTOR", user_message="escolhe ferramenta", prompt_chars=5000)
+        ModelRoutingInput(privacy_class="PERSONAL", source="TOOL_SELECTOR", user_message="escolhe ferramenta", prompt_chars=5000)
     )
 
     assert decision.provider == "ollama"
@@ -309,7 +309,7 @@ def test_tool_selector_source_never_uses_paid_model(tmp_path: Path) -> None:
 
 def test_explicit_provider_override_wins_over_mode() -> None:
     decision = _router("local").decide(
-        ModelRoutingInput(source="RESPONSE_COMPOSER", user_message="olá", explicit_provider="anthropic", explicit_model="claude-x")
+        ModelRoutingInput(privacy_class="PERSONAL", source="RESPONSE_COMPOSER", user_message="olá", explicit_provider="anthropic", explicit_model="claude-x")
     )
 
     assert decision.provider == "anthropic"
@@ -339,6 +339,7 @@ def test_routed_llm_automatic_complex_calls_anthropic_when_authorized(tmp_path: 
         router=_router("automatic", claude_enabled=True, env=env, budget=ModelUsageBudget(tmp_path / "usage.json")),
     )
 
+    llm.mark_next_call_privacy("PERSONAL")
     llm.chat("Faz um plano detalhado para estudar.", source="RESPONSE_COMPOSER")
 
     assert ollama.calls == []
@@ -358,7 +359,8 @@ def test_routed_llm_routes_on_original_composer_message_not_system_prompt(tmp_pa
     )
 
     prompt = "Mensagem do Alexandre:\nHá quanto tempo estamos a trabalhar no projeto Echo?\n\nIntenção:\nconversa"
-    llm.chat(prompt, history=[], source="RESPONSE_COMPOSER")
+    llm.mark_next_call_privacy("PERSONAL")
+    llm.chat(prompt, history=[], source="AGENT_FINAL_RESPONSE")
 
     assert anthropic.calls == []
     assert len(ollama.calls) == 1
@@ -372,6 +374,7 @@ def test_routed_llm_claude_mode_surfaces_missing_key_without_ollama_fallback() -
     llm = RoutedLLM(providers={"ollama": ollama, "anthropic": anthropic}, router=_router("claude"))
 
     with pytest.raises(ProviderConfigurationError, match="ANTHROPIC_API_KEY"):
+        llm.mark_next_call_privacy("PERSONAL")
         llm.chat("Olá", source="RESPONSE_COMPOSER")
 
     assert ollama.calls == []
@@ -412,7 +415,7 @@ def test_document_task_simple_first_rewrite_stays_local_first(tmp_path: Path) ->
     """C: a short, simple first-time rewrite is Ollama-preferred (Via 2:
     local first), not sent straight to Claude."""
     decision = _router("automatic", claude_enabled=True, env=_PAID_ENV, budget=ModelUsageBudget(tmp_path / "u.json")).decide(
-        ModelRoutingInput(source="RESPONSE_COMPOSER", user_message="torna-o mais formal", task_profile=_document_profile())
+        ModelRoutingInput(privacy_class="PERSONAL", source="RESPONSE_COMPOSER", user_message="torna-o mais formal", task_profile=_document_profile())
     )
 
     assert decision.provider == "ollama"
@@ -423,7 +426,7 @@ def test_document_task_simple_first_rewrite_stays_local_first(tmp_path: Path) ->
 
 def test_document_task_trivial_document_is_low_complexity(tmp_path: Path) -> None:
     decision = _router("automatic", claude_enabled=True, env=_PAID_ENV, budget=ModelUsageBudget(tmp_path / "u.json")).decide(
-        ModelRoutingInput(
+        ModelRoutingInput(privacy_class="PERSONAL", 
             source="RESPONSE_COMPOSER",
             user_message="torna-o mais formal",
             task_profile=_document_profile(document_chars=10, document_named_entity_count=0, document_list_item_count=0),
@@ -439,7 +442,7 @@ def test_document_task_iterative_refinement_escalates_when_authorized(tmp_path: 
     """D: an iterative refinement with an active draft is high complexity
     and escalates to Claude once paid calls are authorized."""
     decision = _router("automatic", claude_enabled=True, env=_PAID_ENV, budget=ModelUsageBudget(tmp_path / "u.json")).decide(
-        ModelRoutingInput(
+        ModelRoutingInput(privacy_class="PERSONAL", 
             source="RESPONSE_COMPOSER",
             user_message="ainda consegues melhor",
             task_profile=_document_profile(task_type="document_refinement", document_has_draft=True, document_revision_number=1),
@@ -457,7 +460,7 @@ def test_document_task_refinement_stays_local_without_paid_calls_confirmed(tmp_p
     confirmed -- stays on Ollama with a document-specific blocked reason."""
     env = {"ANTHROPIC_API_KEY": "secret"}
     decision = _router("automatic", claude_enabled=True, env=env, budget=ModelUsageBudget(tmp_path / "u.json")).decide(
-        ModelRoutingInput(
+        ModelRoutingInput(privacy_class="PERSONAL", 
             source="RESPONSE_COMPOSER",
             user_message="ainda consegues melhor",
             task_profile=_document_profile(task_type="document_refinement", document_has_draft=True, document_revision_number=1),
@@ -473,7 +476,7 @@ def test_document_task_first_attempt_placeholder_escalates_second_attempt(tmp_pa
     """F: a first local attempt rejected for a placeholder makes the second
     attempt's profile escalation-eligible."""
     decision = _router("automatic", claude_enabled=True, env=_PAID_ENV, budget=ModelUsageBudget(tmp_path / "u.json")).decide(
-        ModelRoutingInput(
+        ModelRoutingInput(privacy_class="PERSONAL", 
             source="RESPONSE_COMPOSER",
             user_message="torna-o mais formal",
             task_profile=_document_profile(
@@ -492,7 +495,7 @@ def test_document_task_first_attempt_placeholder_escalates_second_attempt(tmp_pa
 def test_document_task_first_attempt_valid_does_not_escalate(tmp_path: Path) -> None:
     """G: a first attempt with no failure signal never escalates."""
     decision = _router("automatic", claude_enabled=True, env=_PAID_ENV, budget=ModelUsageBudget(tmp_path / "u.json")).decide(
-        ModelRoutingInput(source="RESPONSE_COMPOSER", user_message="torna-o mais formal", task_profile=_document_profile())
+        ModelRoutingInput(privacy_class="PERSONAL", source="RESPONSE_COMPOSER", user_message="torna-o mais formal", task_profile=_document_profile())
     )
 
     assert decision.provider == "ollama"
@@ -503,7 +506,7 @@ def test_document_task_noop_refinement_can_escalate_second_attempt(tmp_path: Pat
     """H: a no-op refinement result on the first attempt makes the second
     attempt escalation-eligible too."""
     decision = _router("automatic", claude_enabled=True, env=_PAID_ENV, budget=ModelUsageBudget(tmp_path / "u.json")).decide(
-        ModelRoutingInput(
+        ModelRoutingInput(privacy_class="PERSONAL", 
             source="RESPONSE_COMPOSER",
             user_message="ainda consegues melhor",
             task_profile=_document_profile(
@@ -533,7 +536,7 @@ def test_document_task_insufficient_budget_blocks_escalation(tmp_path: Path) -> 
         budget=ModelUsageBudget(tmp_path / "u.json"),
     )
     decision = router.decide(
-        ModelRoutingInput(
+        ModelRoutingInput(privacy_class="PERSONAL", 
             source="RESPONSE_COMPOSER",
             user_message="ainda consegues melhor",
             task_profile=_document_profile(task_type="document_refinement", document_has_draft=True, document_revision_number=1),
@@ -549,7 +552,7 @@ def test_document_task_missing_api_key_blocks_escalation(tmp_path: Path) -> None
     stays on Ollama with a document-specific api-key reason."""
     env = {PAID_CALL_CONFIRMATION_ENV: "true"}
     decision = _router("automatic", claude_enabled=True, env=env, budget=ModelUsageBudget(tmp_path / "u.json")).decide(
-        ModelRoutingInput(
+        ModelRoutingInput(privacy_class="PERSONAL", 
             source="RESPONSE_COMPOSER",
             user_message="ainda consegues melhor",
             task_profile=_document_profile(task_type="document_refinement", document_has_draft=True, document_revision_number=1),
@@ -564,7 +567,7 @@ def test_document_task_claude_disabled_blocks_escalation(tmp_path: Path) -> None
     """K: automatic_claude_enabled=false blocks escalation regardless of
     complexity, same as any other automatic-mode call."""
     decision = _router("automatic", claude_enabled=False, env=_PAID_ENV, budget=ModelUsageBudget(tmp_path / "u.json")).decide(
-        ModelRoutingInput(
+        ModelRoutingInput(privacy_class="PERSONAL", 
             source="RESPONSE_COMPOSER",
             user_message="ainda consegues melhor",
             task_profile=_document_profile(task_type="document_refinement", document_has_draft=True, document_revision_number=1),
@@ -580,7 +583,7 @@ def test_document_task_local_regeneration_reason_when_still_medium(tmp_path: Pat
     automatically clear the high-complexity bar -- stays local with a
     distinct reason instead of silently reusing document_local_first."""
     decision = _router("automatic", claude_enabled=True, env=_PAID_ENV, budget=ModelUsageBudget(tmp_path / "u.json")).decide(
-        ModelRoutingInput(
+        ModelRoutingInput(privacy_class="PERSONAL", 
             source="RESPONSE_COMPOSER",
             user_message="torna-o mais formal",
             task_profile=_document_profile(
@@ -605,7 +608,7 @@ def test_document_task_preferred_provider_ollama_forces_local(tmp_path: Path) ->
     """Section 7: the document flow can force attempt 1 to stay local even
     when the profile would otherwise score as high complexity."""
     decision = _router("automatic", claude_enabled=True, env=_PAID_ENV, budget=ModelUsageBudget(tmp_path / "u.json")).decide(
-        ModelRoutingInput(
+        ModelRoutingInput(privacy_class="PERSONAL", 
             source="RESPONSE_COMPOSER",
             user_message="ainda consegues melhor",
             task_profile=_document_profile(
@@ -622,7 +625,7 @@ def test_document_task_complexity_fields_recorded_on_decision(tmp_path: Path) ->
     """N: task_complexity_score/band and escalation_considered are exposed
     on the decision object for telemetry."""
     decision = _router("automatic", claude_enabled=True, env=_PAID_ENV, budget=ModelUsageBudget(tmp_path / "u.json")).decide(
-        ModelRoutingInput(
+        ModelRoutingInput(privacy_class="PERSONAL", 
             source="RESPONSE_COMPOSER",
             user_message="ainda consegues melhor",
             task_profile=_document_profile(task_type="document_refinement", document_has_draft=True, document_revision_number=1),
@@ -644,6 +647,7 @@ def test_routed_llm_forwards_task_profile_and_escalates(tmp_path: Path) -> None:
         router=_router("automatic", claude_enabled=True, env=_PAID_ENV, budget=ModelUsageBudget(tmp_path / "u.json")),
     )
 
+    llm.mark_next_call_privacy("PERSONAL")
     llm.chat(
         "ainda consegues melhor",
         source="RESPONSE_COMPOSER",
@@ -663,6 +667,7 @@ def test_routed_llm_without_task_profile_uses_generic_heuristic() -> None:
     anthropic = FakeProvider("anthropic", "claude-haiku-4-5-20251001")
     llm = RoutedLLM(providers={"ollama": ollama, "anthropic": anthropic}, router=_router("local"))
 
+    llm.mark_next_call_privacy("PERSONAL")
     llm.chat("Olá", source="RESPONSE_COMPOSER")
 
     assert llm.last_routing_decision.task_complexity_band == ""
