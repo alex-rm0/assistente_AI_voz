@@ -30,3 +30,6 @@ evals/results/baselines/
 output.txt
 .claude/
 evals/results/conversation/
+
+# Perfil pessoal do Alexandre: só local, nunca no git (repo público)
+data/profile/
