@@ -4,11 +4,14 @@
     .venv\\Scripts\\python.exe scripts\\eval_conversation.py --provider ollama --model llama3.1:8b
     .venv\\Scripts\\python.exe scripts\\eval_conversation.py --provider ollama --model qwen3.5:9b --think off
     .venv\\Scripts\\python.exe scripts\\eval_conversation.py --provider anthropic --allow-cloud --max-cost-usd 1
+    .venv\\Scripts\\python.exe scripts\\eval_conversation.py --provider auto --allow-cloud --max-cost-usd 0.5
 
 `fake` answers every LLM call with one fixed sentence: it checks the runner, not the conversation.
 `ollama` uses the local GPU: check `nvidia-smi` first (CLAUDE.md). `anthropic` is paid: it refuses
 to run without --allow-cloud and --max-cost-usd, needs ECHO_ALLOW_PAID_MODEL_CALLS=true in the
-environment, and stops as soon as the estimated spend passes the ceiling. Never touches data/ or config/settings.json: every case runs on a
+environment, and stops as soon as the estimated spend passes the ceiling. `auto` runs the app's
+automatic routing (Claude for conversation, the local model as reserve) with paid calls switched on
+for this process only, under the same two flags. Never touches data/ or config/settings.json: every case runs on a
 temporary data directory. The report goes to evals/results/conversation/<timestamp>__<provider>/.
 """
 
@@ -70,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{name:24} {runner._rate(row['pass_rate']):>5}  pass={row['pass']} fail={row['fail']} review={row['review']}")
     usage = report["summary"]["usage"]
     print(f"latency mean={usage['latency_ms_mean']:.0f} ms p90={usage['latency_ms_p90']:.0f} ms  cost={usage['cost_usd']:.4f} USD  calls={usage['llm_calls']}")
+    print(f"answered by: {usage['answered_by']}  routing reasons: {usage['routing_reasons']}")
     if report["stopped"]:
         print(f"STOPPED: cost ceiling of {args.max_cost_usd} USD exceeded after {report['summary']['turns']} turns.")
     print(f"Report: {md_path}")
