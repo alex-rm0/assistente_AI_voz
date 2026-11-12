@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from assistant.agent import Agent, AgentContext, system_state_tool_intent
+from assistant.action_claims import detect_ungrounded_workspace_operation_claim as _detect_ungrounded_workspace_operation_claim, unsupported_send_claim, send_not_executed_response
 from assistant.artifact_export import export_kind, presentation_to_text
 from assistant.addressable_content import (
     build_addressable_content,
@@ -6926,9 +6927,10 @@ class AssistantEngine:
                         final_response = fallback
                         final_response_source = "LOCAL_SAFE_FALLBACK"
 
-        claim_reason = _detect_unsupported_tool_claim(final_response, tools_used)
+        send_claim = unsupported_send_claim(final_response, tools_used) if not technical else ""
+        claim_reason = send_claim or _detect_unsupported_tool_claim(final_response, tools_used)
         if claim_reason:
-            final_response = localize("guard.tool_claim", self.response_language)
+            final_response = send_not_executed_response(self.response_language) if send_claim else localize("guard.tool_claim", self.response_language)
             final_response_source = "TOOL_CLAIM_BLOCKED"
             self._last_response_blocked = True
 
@@ -12155,64 +12157,6 @@ def _detect_ungrounded_activity_claim(response: str) -> str:
         match = pattern.search(english)
         if match:
             return "own:" + match.group(0)  # Echo's own state, not the user's
-    return ""
-
-
-_WORKSPACE_OPERATION_REQUEST_MARKERS = (
-    "abre",
-    "abrir",
-    "mostra",
-    "mostrar",
-    "foca",
-    "minimiza",
-    "compacta",
-    "esconde",
-    "oculta",
-)
-
-_WORKSPACE_OPERATION_SUCCESS_CLAIM_MARKERS = (
-    "i opened",
-    "esta a abrir",
-    "está a abrir",
-    "abri",
-    "ja abri",
-    "já abri",
-    "minimizei",
-    "minimizado",
-    "escondi",
-    "foquei",
-    "esta em foco",
-    "está em foco",
-)
-
-
-# English "open" only as a request to open ("open the...", "can you open",
-# "please open") -- not "what window is open?" or "open-source".
-_OPEN_REQUEST_RE = re.compile(r"^(?:please )?open\s|\b(?:can|could|would) you (?:please )?open\b|\bplease open\b")
-
-
-def _detect_ungrounded_workspace_operation_claim(user_message: str, response: str) -> str:
-    # These are execution claims even when the user merely asks for the
-    # filename or why a card is visible. Quotes are content, not execution.
-    unquoted = re.sub(r'"[^"]*"|“[^”]*”|`[^`]*`', "", response)
-    normalized_unquoted = _normalize_text(unquoted).replace("’", "'")
-    write_claim = re.search(
-        r"\b(?:i(?:'ve| have)?\s+(?:saved|stored|created|added|written)|"
-        r"(?:it|the (?:task|file|email|note|draft))\s*(?:'s|is|was|has been)\s+(?:saved|stored|created|added))\b",
-        normalized_unquoted,
-    )
-    if write_claim:
-        return write_claim.group(0)
-    normalized_message = _normalize_text(user_message)
-    if not (
-        contains_any_phrase(normalized_message, _WORKSPACE_OPERATION_REQUEST_MARKERS)
-        or _OPEN_REQUEST_RE.search(normalized_message.strip())
-    ):
-        return ""
-    normalized_response = _normalize_text(response)
-    for marker in _WORKSPACE_OPERATION_SUCCESS_CLAIM_MARKERS:
-        if _normalize_text(marker) in normalized_response:
-            return marker
     return ""
 
 
