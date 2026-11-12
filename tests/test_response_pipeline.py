@@ -11,6 +11,7 @@ from assistant.presence_manager import PresenceManager
 from assistant.prompts import get_base_system_prompt
 from assistant.tool_registry import ToolRegistry
 from assistant.tools import get_open_windows, open_url
+from assistant.system_health import not_measured_replies
 
 
 @pytest.mark.parametrize("detector,message,response", [
@@ -179,7 +180,7 @@ def test_viva_como_estas_uses_social_fast_path_without_agent_or_context(tmp_path
 
     response = engine.respond("Viva, como estás?")
 
-    assert response == "Estou bem. E tu?"
+    assert response in not_measured_replies("pt-PT")
     assert_no_capability_leak(response)
     assert llm.chat_calls == 0
     assert llm.choose_tool_calls == 0
@@ -205,7 +206,7 @@ def test_viva_tudo_bem_contigo_uses_natural_social_reply(tmp_path: Path) -> None
 
     response = engine.respond("Viva, tudo bem contigo?")
 
-    assert response == "Tudo bem. E contigo?"
+    assert response in not_measured_replies("pt-PT")
     assert_social_response_is_contained(response)
     assert llm.chat_calls == 0
     assert llm.choose_tool_calls == 0

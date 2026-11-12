@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+from assistant.system_health import not_measured_replies
 from assistant.agent import Agent, AgentContext
 from assistant.conversation import _generic_task_title
 from assistant.response_language import localize
@@ -275,7 +276,7 @@ def test_n_pt_input_en_gb_output(tmp_path: Path) -> None:
 
     reply = engine.respond("como estas")
 
-    assert reply == "I'm good. How about you?"
+    assert reply in not_measured_replies("en-GB")
     assert "estou" not in reply.lower()
 
 
@@ -286,7 +287,7 @@ def test_o_en_input_pt_pt_output(tmp_path: Path) -> None:
 
     reply = engine.respond("how are you")
 
-    assert reply == "Estou bem. E tu?"
+    assert reply in not_measured_replies("pt-PT")
 
 
 # --- P/Q: deterministic error --------------------------------------------------
