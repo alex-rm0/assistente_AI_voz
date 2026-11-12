@@ -41,6 +41,8 @@ import re
 import time
 from dataclasses import dataclass
 
+from assistant.fast_router import route_fast_command
+
 from assistant.interaction_primitives import (
     detect_task_control_action,
     extract_role_course_name,
@@ -553,6 +555,9 @@ def _representation_intent(raw_message: str, normalized: str) -> RepresentationI
 
 
 def _attention_intent(normalized: str, work_session=None) -> AttentionIntent:
+    external = route_fast_command(normalized)
+    if external is not None and external.kind in {"tool", "denied"}:
+        return AttentionIntent()
     if contains_any_phrase(normalized, ("opcoes", "opções")) and contains_any_phrase(normalized, ("outra vez", "de novo")):
         return AttentionIntent()
     # Order matters: show_again's two-part check is the most specific

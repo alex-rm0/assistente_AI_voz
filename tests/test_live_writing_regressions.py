@@ -120,6 +120,20 @@ def test_saved_email_survives_trip_and_can_resume_and_read_without_model(tmp_pat
     assert (dict(trip.entities), dict(trip.parameters), list(trip.collected_facts)) == trip_fields
 
 
+@pytest.mark.parametrize("target", ["gmail", "www.youtube.com", "https://www.google.com"])
+def test_external_site_with_existing_workspace_objects_still_requires_confirmation(tmp_path, target):
+    engine, local = english_engine(tmp_path)
+    collected_email(engine)
+    engine.respond("Vamos também preparar umas férias em Estocolmo.")
+    response = engine.respond("abre " + target)
+    assert engine.agent.has_pending_confirmation()
+    assert response.startswith("Would you like me to open")
+    assert engine.get_last_turn_telemetry()["llm_calls"] == 0
+    assert "cancelled" in engine.respond("Não.")
+    assert not engine.agent.has_pending_confirmation()
+    assert local.calls == []
+
+
 def test_name_spelling_correction_stays_in_workflow(tmp_path):
     engine, local = english_engine(tmp_path)
     artifact = collected_email(engine)

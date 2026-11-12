@@ -14569,7 +14569,7 @@ _RESUME_REFERENCE_TRIGGER_PHRASES = (
 
 
 def _is_open_reference_phrase(normalized_message: str) -> bool:
-    return contains_any_phrase(normalized_message, _OPEN_REFERENCE_TRIGGER_PHRASES)
+    return contains_any_phrase(normalized_message, _OPEN_REFERENCE_TRIGGER_PHRASES) and route_fast_command(normalized_message) is None
 
 
 def _is_resume_reference_phrase(normalized_message: str) -> bool:
