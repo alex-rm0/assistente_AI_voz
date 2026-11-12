@@ -81,3 +81,29 @@ def test_unexecuted_draft_edit_is_blocked(tmp_path, reply, tools):
     assert engine._complete_turn("Troca o nome.", reply, "RESPONSE_COMPOSER",
                                  selected_path="GENERAL_CONVERSATION", tools_used=tools) != reply
     assert engine._last_response_blocked
+
+
+@pytest.mark.parametrize("generated", [False, True])
+def test_natural_resume_keeps_the_email_in_work_session(tmp_path, generated):
+    engine, local = english_engine(tmp_path, [DRAFT])
+    artifact = collected_email(engine)
+    if generated:
+        engine.respond("Podes escrever o primeiro rascunho.")
+    before = dict(engine._work_session.objects[artifact].payload)
+    count = len(local.calls)
+    response = engine.respond("Vamos continuar aqui a tarefa do mail, por favor.")
+    assert "no email" not in response.lower()
+    assert engine.get_last_turn_telemetry()["selected_path"] == "TASK_RESUME"
+    assert engine._work_session.objects[artifact].payload == before
+    assert len(local.calls) == count
+
+
+def test_resume_paused_canonical_email_uses_same_task(tmp_path):
+    from assistant.conversation import ActiveTaskContext
+    engine, local = english_engine(tmp_path)
+    email = ActiveTaskContext(id="mail-original", task_type="compose_email", status="paused")
+    engine._paused_task_stack.append(email)
+    engine._update_task_artifact_ui(email)
+    engine.respond("Vamos continuar aqui a tarefa do mail, por favor.")
+    assert engine._work_session.active_task is email
+    assert not local.calls

@@ -18,6 +18,7 @@ from assistant.agent import Agent, AgentContext, system_state_tool_intent
 from assistant.action_claims import detect_ungrounded_workspace_operation_claim as _detect_ungrounded_workspace_operation_claim, unsupported_send_claim, send_not_executed_response, unsupported_draft_edit_claim
 from assistant.artifact_export import export_kind, presentation_to_text
 from assistant.writing_corrections import try_recipient_correction
+from assistant.writing_continuity import is_email_resume_request, try_resume_written_email, writing_workflow_question as _writing_workflow_question
 from assistant.addressable_content import (
     build_addressable_content,
     detect_content_operation,
@@ -3237,6 +3238,11 @@ class AssistantEngine:
 
     def _try_resume_activity_reference(self, user_message: str) -> str | None:
         normalized_message = _normalize_text(user_message)
+        if is_email_resume_request(user_message) and not _is_resume_reference_phrase(normalized_message):
+            response = try_resume_written_email(self)
+            if response is not None:
+                return response
+            user_message = normalized_message = "volta ao email"
         if not _is_resume_reference_phrase(normalized_message):
             return None
         target_resolution = resolve_semantic_targets(user_message, self._work_session, "activity_resume")
@@ -15059,21 +15065,6 @@ def _is_writing_language_feedback(message: str) -> bool:
         and re.search(r"\b(?:ingles|portugues|english|portuguese)\b", text)
         and re.search(r"\b(?:escrever|escreves|responder|respondes|falar|falas|write|writing|speaking|responding|replying)\b", text)
     )
-
-
-def _writing_workflow_question(task: PendingWritingTask, response_language: str = "pt-PT") -> str:
-    missing = set(task.missing_fields)
-    if {"project", "purpose"}.issubset(missing):
-        return localize("writing.ask_project_purpose", response_language)
-    if "recipient" in missing:
-        return localize("writing.ask_recipient", response_language)
-    if "project" in missing:
-        return localize("writing.ask_project", response_language)
-    if "purpose" in missing:
-        return localize("writing.ask_purpose", response_language)
-    if task.recipient:
-        return localize("writing.confirm_recipient_draft", response_language, recipient=task.recipient)
-    return localize("writing.ask_draft", response_language)
 
 
 def _writing_task_prompt(task: PendingWritingTask) -> str:
