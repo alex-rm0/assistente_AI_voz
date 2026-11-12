@@ -1821,6 +1821,8 @@ class EchoUIController(QObject):
             "A ouvir...": "voice.status.listening",
             "A processar...": "voice.status.processing",
             "Concluído.": "voice.status.done",
+            "Não detetei fala.": "voice.status.no_speech",
+            "Nao detetei fala.": "voice.status.no_speech",
         }.get(clean_status)
         if key:
             clean_status = localize(key, self._response_language())

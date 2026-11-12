@@ -1134,6 +1134,23 @@ def test_voice_status_uses_current_response_language_without_changing_state() ->
     assert events[-1]["status"] == "A ouvir..."
 
 
+def test_voice_no_speech_status_follows_language_and_does_not_change_state():
+    from prototype_web_ui.controller import EchoUIController
+    _qt_app()
+    language = ["en-GB"]
+    controller = EchoUIController(lambda _: "", get_response_language=lambda: language[0])
+    events, states = [], []
+    controller.uiEvent.connect(lambda payload: events.append(json.loads(payload)))
+    controller.stateChanged.connect(states.append)
+    for status in ("Não detetei fala.", "Nao detetei fala."):
+        controller._handle_voice_status(status)
+        assert events[-1]["status"] == "I didn't detect speech."
+    language[0] = "pt-PT"
+    controller._handle_voice_status("Não detetei fala.")
+    assert events[-1]["status"] == "Não detetei fala."
+    assert states == []
+
+
 def test_cancel_current_request_invokes_fake_engine_cancellation() -> None:
     from prototype_web_ui.controller import EchoUIController
 

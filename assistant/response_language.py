@@ -255,6 +255,7 @@ _STRINGS: dict[str, tuple[str, str]] = {
     "voice.status.listening": ("A ouvir...", "Listening..."),
     "voice.status.processing": ("A processar...", "Processing..."),
     "voice.status.done": ("Concluído.", "Done."),
+    "voice.status.no_speech": ("Não detetei fala.", "I didn't detect speech."),
     "datetime.time": ("São {time}.", "It is {time}."),
     "datetime.today": ("Hoje é {date}.", "Today is {date}."),
     "datetime.tomorrow": ("Amanhã é {date}.", "Tomorrow is {date}."),
