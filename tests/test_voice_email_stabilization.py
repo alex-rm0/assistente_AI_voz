@@ -107,3 +107,58 @@ def test_resume_paused_canonical_email_uses_same_task(tmp_path):
     engine.respond("Vamos continuar aqui a tarefa do mail, por favor.")
     assert engine._work_session.active_task is email
     assert not local.calls
+
+
+def test_english_card_localizes_conjunction_without_changing_recipient(tmp_path):
+    engine, _ = english_engine(tmp_path)
+    artifact = collected_email(engine)
+    obj = engine._work_session.objects[artifact]
+    assert obj.title == "Email to Francisca and Karina"
+    assert obj.payload["recipient"] == "Francisca e Karina"
+
+
+@pytest.mark.parametrize("reply_requested", [False, True])
+def test_new_email_does_not_invent_reply_subject(tmp_path, reply_requested):
+    engine, _ = english_engine(tmp_path, [DRAFT.replace("Subject: Meeting", "Subject: Re: Meeting")])
+    artifact = collected_email(engine)
+    if reply_requested:
+        engine._pending_writing_task.subject = "Re: Meeting"
+    engine.respond("Podes escrever o primeiro rascunho.")
+    subject = engine._work_session.objects[artifact].payload["draft_content"].splitlines()[0]
+    assert subject == ("Subject: Re: Meeting" if reply_requested else "Subject: Meeting")
+
+
+def test_morning_greeting_is_not_repeated_mid_conversation(tmp_path):
+    engine, _ = english_engine(tmp_path)
+    engine.respond("Bom dia.")
+    response = engine._complete_turn("Vamos continuar.", "Good morning. We can continue.",
+                                    "RESPONSE_COMPOSER", selected_path="GENERAL_CONVERSATION")
+    assert response == "We can continue."
+
+
+def test_email_greeting_is_not_removed_as_conversational_repeat(tmp_path):
+    engine, _ = english_engine(tmp_path)
+    engine.respond("Bom dia.")
+    draft = "Good morning Francisca,\n\nCan you attend?\n\nAlexandre"
+    assert engine._complete_turn("Escreve o email.", draft, "WRITING_WORKFLOW", technical=True,
+                                 selected_path="WRITING_TASK") == draft
+
+
+@pytest.mark.parametrize("language,message,reply", [
+    ("pt-PT", "Já enviaste o email ao professor?", "Sim, já o enviei."),
+    ("en-GB", "Have you sent the email to the professor?", "Yes, I've sent it."),
+])
+def test_sending_question_through_real_engine_is_truthful(tmp_path, language, message, reply):
+    engine, _ = english_engine(tmp_path, [reply])
+    engine._set_response_language(language)
+    response = engine.respond(message)
+    assert response != reply
+    assert engine._last_response_blocked
+
+
+def test_tool_confirmation_does_not_require_conversation_history(tmp_path):
+    engine, local = english_engine(tmp_path)
+    response = "Do you want me to open this URL? https://www.google.com"
+    assert engine._complete_turn("Abre o Google.", response, "FAST_ROUTER", tool_confirmation=True,
+                                 selected_path="FAST_ROUTE") == response
+    assert not local.calls

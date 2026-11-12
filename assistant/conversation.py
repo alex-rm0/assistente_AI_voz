@@ -20,6 +20,7 @@ from assistant.artifact_export import export_kind, presentation_to_text
 from assistant.writing_corrections import try_recipient_correction
 from assistant.writing_continuity import is_email_resume_request, try_resume_written_email, writing_workflow_question as _writing_workflow_question
 from assistant.writing_requests import incomplete_writing_request
+from assistant.writing_presentation import clean_new_email_subject, remove_unsolicited_greeting, is_writing_language_feedback as _is_writing_language_feedback
 from assistant.addressable_content import (
     build_addressable_content,
     detect_content_operation,
@@ -2104,6 +2105,7 @@ class AssistantEngine:
                 language_instruction=self._language_instruction(),
             )
         )
+        draft = clean_new_email_subject(draft, task)
         header = re.search(r"(?im)^\s*(?:subject|assunto):", draft)
         names = [name for name in re.findall(r"\w+", task.recipient) if name.casefold() not in {"e", "and", "o", "a"}]
         expected_time = _requested_writing_clock(task.purpose or task.subject)
@@ -6923,6 +6925,8 @@ class AssistantEngine:
                         final_response_source = "LOCAL_SAFE_FALLBACK"
 
         send_claim = unsupported_send_claim(final_response, tools_used) if not technical else ""
+        if final_response and not technical and not tool_confirmation:
+            final_response = remove_unsolicited_greeting(final_response, history, user_message, self.response_language)
         claim_reason = send_claim or _detect_unsupported_tool_claim(final_response, tools_used)
         if claim_reason:
             final_response = send_not_executed_response(self.response_language) if send_claim else localize("guard.tool_claim", self.response_language)
@@ -15040,15 +15044,6 @@ def _refresh_pending_writing_task_state(task: PendingWritingTask) -> None:
     task.missing_fields = _missing_writing_fields(task)
     task.awaiting_field = task.missing_fields[0] if task.missing_fields else ""
     task.current_step = f"awaiting_{task.awaiting_field}" if task.awaiting_field else "ready_to_draft"
-
-
-def _is_writing_language_feedback(message: str) -> bool:
-    text = _normalize_text(message).strip(" .,!?:;")
-    return bool(
-        re.match(r"^(?:por\s*que|porque|why|how come)\b", text)
-        and re.search(r"\b(?:ingles|portugues|english|portuguese)\b", text)
-        and re.search(r"\b(?:escrever|escreves|responder|respondes|falar|falas|write|writing|speaking|responding|replying)\b", text)
-    )
 
 
 def _writing_task_prompt(task: PendingWritingTask) -> str:

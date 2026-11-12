@@ -1047,6 +1047,9 @@ def localize(key: str, response_language: str, **params: object) -> str:
     en-GB from `_STRINGS` and formats it. Raises KeyError for an unknown
     key rather than silently falling back, so a missing translation is a
     loud bug, not a quiet Portuguese leak."""
+    if key in {"writing.recipient_title", "email.card.title_to"}:
+        from assistant.writing_presentation import recipient_display
+        params = {name: recipient_display(value, normalize_response_language(response_language)) for name, value in params.items()}
     template = _STRINGS[key][1 if normalize_response_language(response_language) == ENGLISH_GB else 0]
     return template.format(**params) if params else template
 
