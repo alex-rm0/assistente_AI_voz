@@ -49,6 +49,53 @@ def collected_email(engine):
     return artifact
 
 
+@pytest.mark.parametrize("message", [
+    "Pois é, preciso que corrijas umas coisas no email. Consegues abrir a tarefa?",
+    "Quero pegar na tarefa do mail. Abro uma tarefa com o mail.",
+    "Vamos continuar aqui a tarefa do mail, por favor.",
+])
+def test_live_email_reference_resumes_same_workflow_without_tools(tmp_path, message):
+    engine, local = english_engine(tmp_path)
+    artifact = collected_email(engine)
+    before = engine._pending_writing_task.recipient
+    response = engine.respond(message)
+    assert engine._pending_writing_task.active_artifact_id == artifact
+    assert engine._pending_writing_task.recipient == before
+    assert "gmail" not in response.lower()
+    assert engine._work_session.attention.focus_object_id == artifact
+    assert not engine.agent.has_pending_confirmation()
+    assert engine.get_last_turn_telemetry()["llm_calls"] == 0
+    assert local.calls == []
+
+
+@pytest.mark.parametrize("message", [
+    "Consegues ler o mail, por favor?", "Consejo me ler o mail, por favor?",
+    "Read the email draft, please.",
+])
+def test_live_read_email_uses_canonical_draft_not_filename(tmp_path, message):
+    draft = "Subject: Meeting\n\nDear Francisca and Karina,\n\nCan you attend this week at 21:30?\n\nAlexandre"
+    engine, local = english_engine(tmp_path, [draft])
+    artifact = collected_email(engine)
+    engine.respond("Guarda isso num ficheiro.")
+    calls_before = len(local.calls)
+    response = engine.respond(message)
+    assert draft in response
+    assert engine._work_session.attention.focus_object_id == artifact
+    assert engine._work_session.objects[artifact].payload["draft_content"] == draft
+    assert "workspace_search" not in engine.get_last_turn_telemetry()["tools_used"]
+    assert len(local.calls) == calls_before
+
+
+@pytest.mark.parametrize("message", [
+    "abre o Gmail", "abre o mail no browser", "lê o ficheiro email_resumo_novo.txt",
+    "não abras a tarefa do email", "Don't read the email draft",
+])
+def test_email_reference_does_not_capture_apps_files_or_negation(message):
+    from assistant.writing_continuity import is_email_resume_request, is_email_read_request
+    assert not is_email_resume_request(message)
+    assert not is_email_read_request(message)
+
+
 def test_name_spelling_correction_stays_in_workflow(tmp_path):
     engine, local = english_engine(tmp_path)
     artifact = collected_email(engine)

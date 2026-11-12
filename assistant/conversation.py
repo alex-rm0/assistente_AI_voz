@@ -20,7 +20,7 @@ from assistant.system_health import wellbeing_reply
 from assistant.action_claims import detect_ungrounded_workspace_operation_claim as _detect_ungrounded_workspace_operation_claim, unsupported_send_claim, send_not_executed_response, unsupported_draft_edit_claim
 from assistant.artifact_export import export_kind, presentation_to_text
 from assistant.writing_corrections import try_recipient_correction
-from assistant.writing_continuity import is_email_resume_request, try_resume_written_email, writing_workflow_question as _writing_workflow_question
+from assistant.writing_continuity import is_email_resume_request, try_written_email_reference, writing_workflow_question as _writing_workflow_question
 from assistant.writing_requests import incomplete_writing_request
 from assistant.writing_presentation import clean_new_email_subject, remove_unsolicited_greeting, is_writing_language_feedback as _is_writing_language_feedback
 from assistant.addressable_content import (
@@ -3231,10 +3231,10 @@ class AssistantEngine:
 
     def _try_resume_activity_reference(self, user_message: str) -> str | None:
         normalized_message = _normalize_text(user_message)
+        response = try_written_email_reference(self, user_message) if not _is_resume_reference_phrase(normalized_message) else None
+        if response is not None:
+            return response
         if is_email_resume_request(user_message) and not _is_resume_reference_phrase(normalized_message):
-            response = try_resume_written_email(self)
-            if response is not None:
-                return response
             user_message = normalized_message = "volta ao email"
         if not _is_resume_reference_phrase(normalized_message):
             return None

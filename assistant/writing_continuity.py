@@ -9,8 +9,43 @@ from assistant.writing_corrections import current_email_object, email_objects
 
 def is_email_resume_request(message):
     text = normalize_for_matching(message)
-    return bool(re.search(r"\b(?:continuar|continua|continuamos|retoma|retomar|volta|voltar|resume|continue|pick up|back to)\b", text)
-                and re.search(r"\b(?:e-?mail|mail)\b", text))
+    return _email_reference(text) and bool(
+        re.search(r"\b(?:continuar|continua|continuamos|retoma|retomar|volta|voltar|pegar|resume|continue|pick up|back to)\b", text)
+        or (re.search(r"\b(?:abre|abrir|abro|open)\b", text)
+            and re.search(r"\b(?:tarefa|task|rascunho|draft)\b", text)))
+
+
+def _email_reference(text):
+    return bool(re.search(r"\b(?:e-?mail|mail)\b", text) and not re.search(
+        r"\b(?:nao|not|don't|do not|gmail|outlook|browser|ficheiro|file)\b|\.(?:txt|pdf|docx)\b", text))
+
+
+def is_email_read_request(message):
+    text = normalize_for_matching(message)
+    return _email_reference(text) and bool(re.search(r"\b(?:le|ler|leia|leias|read)\b", text))
+
+
+def try_written_email_reference(engine, message):
+    read = is_email_read_request(message)
+    if not (read or is_email_resume_request(message)) or not engine.presence.can_use_tools():
+        return None
+    if not read:
+        return try_resume_written_email(engine)
+    session = engine._work_session
+    obj = current_email_object(session)
+    if obj is None:
+        return try_resume_written_email(engine)
+    context = next((task for task in [session.active_task, *session.paused_task_stack]
+                    if getattr(task, "active_artifact_id", "") == obj.id), None)
+    draft = str(obj.payload.get("draft_content") or getattr(context, "parameters", {}).get("generated_draft") or "")
+    if not draft:
+        return try_resume_written_email(engine) or localize("artifact.no_content", engine.response_language)
+    attention = set_attention(session, obj.id, FOCUS, source="voice_command")
+    engine._queue_ui_event("attention_changed", {"object_states": dict(attention.object_states),
+                                               "focus_object_id": attention.focus_object_id, "source": attention.source})
+    engine._queue_semantic_object_sync(obj)
+    session.export_focus = ("writing", obj.id)
+    return draft
 
 
 def writing_workflow_question(task, response_language="pt-PT"):
