@@ -88,8 +88,12 @@ def respond_to_turn(engine, value):
         if turn.source == "voice":
             from assistant.speech_clarity import observe_speech_clarity, repeat_response
             enforce = getattr(engine, "speech_clarity_enforce", False) is True
-            decision = observe_speech_clarity(turn, engine, enforce=enforce)
-            if enforce and decision.would_ask_repeat:
+            try:
+                decision = observe_speech_clarity(turn, engine, enforce=enforce)
+            except Exception as exc:  # noqa: BLE001 - the observer must never change the turn
+                print(f"[SPEECH_CLARITY] status=error type={type(exc).__name__}", flush=True)
+                decision = None
+            if enforce and decision is not None and decision.would_ask_repeat:
                 engine._begin_turn_trace(turn.text)
                 return engine._complete_turn(turn.text, repeat_response(engine.response_language), "SPEECH_CLARITY",
                                              selected_path="SPEECH_CLARITY", technical=True, remember=False)
