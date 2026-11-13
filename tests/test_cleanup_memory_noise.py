@@ -59,3 +59,35 @@ def test_apply_removes_noise_and_keeps_the_rest(tmp_path: Path) -> None:
     assert memories == ["Prefiro respostas curtas."]
     assert preferences == ["proactive_suggestion:2026-11-12:timeline_assistenteia", "response_language"]
     assert tasks == ["escrever o relatorio"]
+
+
+def _seed_request_tasks(tmp_path: Path) -> Path:
+    # Decision of 12/11: task facts that are requests to Echo ("quero que me
+    # digas...") go too, but only with the explicit --include-request-tasks.
+    memory = LongTermMemory(tmp_path / "data", embeddings_enabled=False)
+    memory.remember_structured_fact("task", {"action": "que me digas o que esta escrito", "raw_user_text": "quero que me digas o que esta escrito", "status": "pending"})
+    memory.remember_structured_fact("task", {"action": "entregar o relatorio", "date_reference": "sexta", "status": "pending"})
+    memory.remember_structured_fact("task", {"action": "ligar ao banco", "priority": "alta", "status": "pending"})
+    return memory.db_path
+
+
+def test_request_tasks_stay_without_the_option(tmp_path: Path) -> None:
+    db = _seed_request_tasks(tmp_path)
+
+    assert cleanup.main(["--db", str(db), "--apply"]) == 0
+
+    with sqlite3.connect(db) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM structured_facts").fetchone()[0] == 3
+
+
+def test_include_request_tasks_removes_pending_undated_tasks_only(tmp_path: Path, capsys) -> None:
+    db = _seed_request_tasks(tmp_path)
+
+    assert cleanup.main(["--db", str(db), "--include-request-tasks"]) == 0
+    out = capsys.readouterr().out
+    assert "quero que me digas o que esta escrito" in out  # the dry run shows what each one said
+
+    assert cleanup.main(["--db", str(db), "--include-request-tasks", "--apply"]) == 0
+    with sqlite3.connect(db) as connection:
+        tasks = sorted(row[0] for row in connection.execute("SELECT action FROM structured_facts"))
+    assert tasks == ["entregar o relatorio", "ligar ao banco"]
