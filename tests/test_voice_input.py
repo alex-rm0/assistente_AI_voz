@@ -458,6 +458,7 @@ def _vad_transcriber(monkeypatch, tmp_path: Path, plan: list[tuple[int, int]], *
         preroll_ms=0,
         min_record_seconds=0.0,
         debug_audio_path=tmp_path / "debug.wav",
+        barge_in_speech_gate_factory=lambda **_: SimpleNamespace(is_speech=lambda chunk: True, max_probability=1.0),
         vad_config=VadConfig(
             speech_rms_threshold=0.01,
             speech_start_min_ms=40,

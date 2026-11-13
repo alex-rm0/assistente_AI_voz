@@ -24,6 +24,7 @@ from assistant.audio_device import (
 )
 from assistant.wake_recognizer import WakeRecognizer
 from assistant.turn_input import record_stt_evidence
+from assistant.barge_in_speech import create_speech_gate
 from assistant.voice_wake import assess_fast_wake_transcript, classify_voice_wake_intent
 
 
@@ -172,7 +173,7 @@ class _SpeechActivityTracker:
             alpha = self.config.adaptive_baseline_alpha
             self.baseline_rms = (1 - alpha) * self.baseline_rms + alpha * rms
 
-    def update(self, rms: float) -> None:
+    def update(self, rms: float, *, speech_detected: bool | None = None) -> None:
         if self.done.is_set():
             return
         self.total_ms += self.block_ms
@@ -190,8 +191,8 @@ class _SpeechActivityTracker:
             return
         threshold = self._effective_threshold()
         self.last_effective_threshold = threshold
-        is_loud = rms >= threshold
-        if self.config.adaptive_multiplier is not None and not is_loud:
+        is_loud = rms >= threshold and speech_detected is not False
+        if self.config.adaptive_multiplier is not None and rms < threshold:
             # Only quiet blocks feed the baseline -- the user's own
             # confirmed speech (or a sustained false-candidate streak)
             # must never drag the baseline up to chase itself.
@@ -361,9 +362,11 @@ class VoiceTranscriber:
         wake_recognizer: WakeRecognizer | None = None,
         stt_provider: str | None = None,
         stt_settings: dict | None = None,
+        barge_in_speech_gate_factory: Callable | None = None,
     ) -> None:
         from assistant.stt_config import resolve_stt_config
         self.stt_config = resolve_stt_config(stt_settings, provider=stt_provider, cpu_model=model_name)
+        self.barge_in_speech_gate_factory = barge_in_speech_gate_factory or create_speech_gate
         self.model_name = self.stt_config.model
         self.stt_provider = self.stt_config.provider
         self._stt_backend = None
@@ -615,6 +618,17 @@ class VoiceTranscriber:
             ) from exc
 
         config = vad_config or self.vad_config
+        gate = None
+        gate_failed = False
+        gate_rejected_ms = 0
+        if require_confirmation_before_recording:
+            try:
+                gate = self.barge_in_speech_gate_factory(sample_rate=self.sample_rate, runtime_python=self.stt_config.python)
+                print("[BARGE_IN] event=speech_gate_ready model=silero_v6 device=cpu", flush=True)
+            except Exception as exc:
+                self.last_vad_outcome = {"reason": "speech_gate_unavailable", "confirmed": False}
+                print(f"[BARGE_IN] event=speech_gate_unavailable reason={type(exc).__name__} volume_only_fallback=false", flush=True)
+                raise VoiceNoSpeechDetected("Automatic speech interruption is unavailable; use STOP.") from exc
         frames: list[Any] = []
         lock = threading.Lock()
         recording_active = threading.Event()
@@ -641,6 +655,7 @@ class VoiceTranscriber:
                     pass  # never let a caller's callback crash the audio thread
 
         def callback(indata, frame_count, time_info, status) -> None:
+            nonlocal gate_failed, gate_rejected_ms
             if status:
                 return
             chunk = indata.copy()
@@ -661,7 +676,15 @@ class VoiceTranscriber:
                 # eventual WAV until real speech is confirmed.
                 rms = _rms_int16_audio(chunk)
                 was_waiting = tracker.state == "waiting_for_speech"
-                tracker.update(rms)
+                try:
+                    speech = gate.is_speech(chunk)
+                except Exception:
+                    gate_failed = True
+                    tracker._finish("speech_gate_unavailable")
+                    return
+                tracker.update(rms, speech_detected=speech)
+                if not speech and rms >= tracker.last_effective_threshold:
+                    gate_rejected_ms += tracker.block_ms
                 if was_waiting and tracker.state != "waiting_for_speech":
                     frames.extend(list(preroll_frames))
                     preroll_frames.clear()
@@ -701,6 +724,12 @@ class VoiceTranscriber:
             raise VoiceInputError(f"Nao consegui gravar audio do microfone: {exc}") from exc
 
         reason = tracker.reason if tracker.done.is_set() else "manual_stop"
+        if gate_failed:
+            self.last_vad_outcome = {"reason": "speech_gate_unavailable", "confirmed": False}
+            print("[BARGE_IN] event=speech_gate_unavailable reason=inference_failed volume_only_fallback=false", flush=True)
+            raise VoiceNoSpeechDetected("Automatic speech interruption is unavailable; use STOP.")
+        if gate is not None:
+            print(f"[BARGE_IN] event=speech_gate_summary speech_probability_max={getattr(gate, 'max_probability', 0):.4f} rejected_ms={gate_rejected_ms:.0f}", flush=True)
         capture_ended_at = time.perf_counter()
         with lock:
             captured_frames = list(frames)
@@ -754,6 +783,8 @@ class VoiceTranscriber:
         }
 
         if not captured_frames:
+            if tracker.speech_ms <= 0:
+                raise VoiceNoSpeechDetected("Nao detetei fala.")
             raise VoiceInputError("Nao foi captado audio suficiente.")
 
         audio = np.concatenate(captured_frames, axis=0)
@@ -1082,6 +1113,10 @@ class VoiceTranscriber:
             except Exception as exc:
                 self._degrade_stt(exc)
                 self._cpu_stt()
+            try:
+                self.barge_in_speech_gate_factory(sample_rate=self.sample_rate, runtime_python=self.stt_config.python)
+            except Exception as exc:
+                print(f"[BARGE_IN] event=speech_gate_unavailable reason={type(exc).__name__} volume_only_fallback=false", flush=True)
             return True
 
     def _gpu_stt(self):
