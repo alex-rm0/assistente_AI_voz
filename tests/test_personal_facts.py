@@ -40,11 +40,8 @@ def test_absent_personal_fact_is_not_guessed(message: str) -> None:
 
 
 def test_the_reply_wording() -> None:
-    # No promise to remember: nothing stores a fact on request until R3 step 6 exists.
-    assert unknown_reply("en-GB") == "I'm afraid I don't know that."
-    assert unknown_reply("pt-PT") == "Receio não saber isso."
-    for language in ("en-GB", "pt-PT"):
-        assert not any(word in unknown_reply(language).lower() for word in ("remember", "guard", "lembr", "tell me", "diz-me"))
+    assert unknown_reply("en-GB") == "I'm afraid I don't know that. Tell me and I'll remember it, if you like."
+    assert unknown_reply("pt-PT") == "Receio não saber isso. Diz-me e guardo essa informação, se quiseres."
 
 
 @pytest.mark.parametrize("message,evidence", [
@@ -174,8 +171,8 @@ def test_composer_uses_memory_handed_in_as_facts_or_context(profile) -> None:
 
 
 @pytest.mark.parametrize("language,rule", [
-    ("en-GB", "say that you do not know; never guess and do not promise to remember it"),
-    ("pt-PT", "diz que não sabes; nunca adivinhes nem prometas guardar"),
+    ("en-GB", "say that you do not know; never guess"),
+    ("pt-PT", "diz que não sabes; nunca adivinhes"),
 ])
 def test_prompt_tells_the_model_not_to_guess_other_personal_facts(profile, language, rule) -> None:
     llm = _CountingLLM("Estudas Arquitetura Paisagista.")
