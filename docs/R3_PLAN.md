@@ -16,6 +16,13 @@ Echo passa a saber quem é o Alexandre. Medir antes de mudar: baseline em
   sistema: o Echo fala; o sistema por trás é que está online ("All systems are running smoothly").
   Com moderação, com variação e **só com estado real** (saúde dos componentes), nunca inventado.
 
+- Cérebro (decidido a 12/11, passo 7): **conversa geral → Claude Haiku; llama3.1:8b local como
+  reserva**. Comparação em `evals/results/conversation/r3_brains_*` (60 casos): Haiku responde ao
+  perguntado 90% contra 68%, not_rude 97% contra 89%, ~0,07 USD por 100 turnos, +0,6 s por turno;
+  qwen3.5:9b e qwen3.5:4b não superaram o llama3.1:8b. Documentos do workspace só vão ao Claude
+  com pedido explícito sobre esse documento; emails nunca. Chamadas pagas por definição
+  (`allow_paid_calls`), com o orçamento de 0,25 USD/dia.
+
 ## Baseline (llama3.1:8b, 35 casos, 2 corridas)
 | Propriedade | Taxa |
 |---|---|
@@ -36,7 +43,7 @@ Pior área: frases confusas — nunca pede para repetir; inventa reuniões, hora
 | 4 | **Personalidade**: guia de estilo Jarvis no composer (EN e PT); o toque de sistema usa o estado de saúde real (Ollama, STT, TTS, rede) quando o Alexandre pergunta como está o Echo | Sem repetição da mesma frase; 0 estados de sistema inventados; not_rude ≥ 98% |
 | 5 | **Limpar memória de ruído**: deixar de gravar links abertos como "preferências"; apagar os existentes (com backup) | Só memória útil |
 | 6 | **Memória com confirmação**: detetar factos duradouros, propor, guardar só com "sim"; "o que sabes sobre mim?" e "esquece isso" deterministas | Testes de propor/confirmar/recusar/esquecer |
-| 7 | **Comparação de cérebros**: mesmo eval com llama3.1:8b, 1–2 locais recentes e Claude (orçamento, só dados PERSONAL/PUBLIC) | Tabela qualidade/latência/custo; decisão registada |
+| 7 | **Comparação de cérebros**: mesmo eval com llama3.1:8b, 1–2 locais recentes e Claude (orçamento, só dados PERSONAL/PUBLIC) | Tabela qualidade/latência/custo; decisão registada **Decidido (12/11):** conversa geral no Claude Haiku, llama3.1:8b como reserva; ver North Star §11 |
 | 8 | **Voz e conteúdo longo**: por voz, o Echo resume rascunhos/documentos longos em vez de os ler inteiros; o texto completo fica no ecrã | 1.º som < 2,5 s em respostas com rascunho |
 
 Critério de fecho da R3: passos 1–8 feitos; eval com o cérebro escolhido melhor que a baseline em

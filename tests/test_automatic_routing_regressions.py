@@ -2854,14 +2854,14 @@ def test_document_previous_local_failure_requires_local_provider(tmp_path: Path)
     from assistant.model_router import ModelRoutingInput
 
     local_failure_decision = router.decide(
-        ModelRoutingInput(
+        ModelRoutingInput(privacy_class="PRIVATE", explicit_document_request=True,
             source="RESPONSE_COMPOSER",
             user_message="ainda consegues melhor",
             task_profile={**base_profile, "document_previous_provider": "ollama", "document_previous_local_failure": True},
         )
     )
     claude_failure_decision = router.decide(
-        ModelRoutingInput(
+        ModelRoutingInput(privacy_class="PRIVATE", explicit_document_request=True,
             source="RESPONSE_COMPOSER",
             user_message="ainda consegues melhor",
             task_profile={**base_profile, "document_previous_provider": "anthropic", "document_previous_local_failure": False},

@@ -19,7 +19,7 @@ from evals.harness import EvalRun
 
 CASES_PATH = Path(__file__).resolve().parent / "cases.json"
 LANGUAGES = ("pt-PT", "en-GB")
-PROVIDERS = ("fake", "ollama", "anthropic")
+PROVIDERS = ("fake", "ollama", "anthropic", "auto")
 _TURN_KEYS = {"user", "garbled", "follow_up", "answer_any", "forbid", "review", "soft"}
 FAKE_REPLIES = {"pt-PT": "Claro. Diz-me o que precisas.", "en-GB": "Sure. Tell me what you need."}
 # Every run uses this fictitious core profile, never the private data/profile/core_profile.md.
@@ -80,6 +80,7 @@ def make_llm_factory(
     think: bool | None = None,
     fake_reply: Callable[[list[dict]], str] | None = None,
     fake_cost_usd: float = 0.0,
+    auto_providers: dict[str, object] | None = None,
 ) -> Callable[[dict], object]:
     """Returns case -> LLM. Each provider talks to exactly one backend: no routing, no fallback.
 
@@ -90,14 +91,43 @@ def make_llm_factory(
     from assistant.model_provider import DEFAULT_ANTHROPIC_MODEL, DEFAULT_OLLAMA_MODEL, OllamaProvider, ProviderBackedLLM
     from assistant.prompts import get_base_system_prompt
 
-    if provider == "anthropic" and not allow_cloud:
+    if provider in ("anthropic", "auto") and not allow_cloud:
         raise PermissionError("Claude is a paid cloud provider: pass --allow-cloud to use it.")
-    if provider == "anthropic" and not max_cost_usd:
+    if provider in ("anthropic", "auto") and not max_cost_usd:
         raise ValueError("Claude needs a cost ceiling for the run: pass --max-cost-usd.")
     if provider not in PROVIDERS:
         raise ValueError(f"Unknown provider {provider!r}; expected one of {PROVIDERS}")
 
+    def automatic_llm():
+        """The app's own automatic routing: Claude for conversation, the local model as
+        the reserve. Paid calls are switched on for this process only, the daily budget
+        ledger in data/ is not used, and the run's cost ceiling is the only spend limit."""
+        from assistant.anthropic_provider import AnthropicProvider
+        from assistant.model_router import AutomaticRoutingConfig, ModelRouter, ModelRoutingConfig, RoutedLLM
+        from assistant.secret_storage import WindowsCredentialManagerSecretStorage, resolve_anthropic_api_key
+
+        providers = auto_providers
+        key_available = lambda: True  # noqa: E731
+        if providers is None:
+            storage = WindowsCredentialManagerSecretStorage()
+            get_key = lambda: resolve_anthropic_api_key(os.environ, storage)[0]  # noqa: E731
+            key_available = lambda: bool(get_key())  # noqa: E731
+            providers = {
+                "ollama": OllamaProvider(model=model or DEFAULT_OLLAMA_MODEL, base_url=base_url, think=think),
+                "anthropic": AnthropicProvider(model=DEFAULT_ANTHROPIC_MODEL, api_key_getter=get_key, allow_paid_calls_getter=lambda: True),
+            }
+        router = ModelRouter(
+            ModelRoutingConfig(mode="automatic", mode_source="eval", automatic=AutomaticRoutingConfig(
+                claude_enabled=True, daily_budget_usd=float(max_cost_usd or 0.0), max_single_call_estimated_usd=0.05)),
+            ollama_model=getattr(providers["ollama"], "model", DEFAULT_OLLAMA_MODEL),
+            anthropic_model=getattr(providers["anthropic"], "model", DEFAULT_ANTHROPIC_MODEL),
+            budget=None, env={}, anthropic_key_available=key_available, paid_calls_allowed=lambda: True,
+        )
+        return RoutedLLM(providers=providers, router=router, system_prompt=get_base_system_prompt(), model_source="eval:auto")
+
     def factory(case: dict):
+        if provider == "auto":
+            return automatic_llm()
         if provider == "fake":
             backend = FakeProvider(fake_reply or (lambda _messages: FAKE_REPLIES[case["language"]]), fake_cost_usd)
         elif provider == "ollama":
@@ -198,6 +228,10 @@ def run_case(case: dict, run: EvalRun, llm_factory: Callable[[dict], object], *,
                 "response": response,
                 "error": error,
                 "selected_path": telemetry.get("selected_path") or "",
+                # Who answered and why (automatic routing): the provider is "local" for turns with no model call.
+                "answered_by": str(telemetry.get("execution_provider") or ""),
+                "routing_reason": str(telemetry.get("model_routing_reason_code") or ""),
+                "routing_fallback": str(telemetry.get("model_routing_fallback_reason") or ""),
                 "llm_calls": int(telemetry.get("llm_calls") or 0),
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
                 "outcomes": [{"property": o.property, "status": o.status, "detail": o.detail} for o in outcomes],
@@ -260,6 +294,8 @@ def summarize(case_results: list[dict]) -> dict:
         "output_tokens": sum(int(turn.get("output_tokens") or 0) for turn in all_turns),
         "cost_usd": round(cost, 6),
         "cost_per_100_turns_usd": round(100 * cost / len(all_turns), 4) if all_turns else 0.0,
+        "answered_by": dict(Counter(str(turn.get("answered_by") or "") for turn in all_turns)),
+        "routing_reasons": dict(Counter(str(turn.get("routing_reason") or "") for turn in all_turns if int(turn.get("llm_calls") or 0))),
     }
     return {
         "usage": usage,
