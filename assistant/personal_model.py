@@ -225,6 +225,15 @@ class PersonalModel:
         if not matches:
             return None
         entry = matches[0]
+        return self.delete_entry_by_id(entry.id)
+
+    def list_entries(self, include_deleted: bool = False) -> list[PersonalModelEntry]:
+        return self._all_entries(include_inactive=include_deleted)
+
+    def delete_entry_by_id(self, entry_id: int) -> PersonalModelEntry | None:
+        entry = self._entry_by_id(entry_id)
+        if entry is None or entry.status == "apagado":
+            return None
         now = datetime.now().isoformat(timespec="seconds")
         with sqlite3.connect(self.db_path) as connection:
             connection.execute(

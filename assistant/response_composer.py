@@ -352,7 +352,7 @@ def _personal_evidence(request: ComposerRequest) -> list[str]:
     Nor are the user's earlier questions: asking about a coach names no coach."""
     profile = load_core_profile()
     said = [str(item.get("content", "")) for item in request.history if item.get("role") == "user"]
-    said = [text for text in said if "?" not in text]
+    said = [text for text in said if "?" not in text and not re.match(r"^(?:esquece|forget)\b", text.strip(), re.I)]
     return [profile.text if profile is not None else "", request.context, *map(str, request.facts), *said]
 
 

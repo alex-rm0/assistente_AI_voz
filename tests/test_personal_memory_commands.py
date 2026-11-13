@@ -117,3 +117,48 @@ def test_saved_coach_reaches_composer_across_languages(memory_engine):
     before = len(local.calls)
     engine.response_composer.compose(ComposerRequest(intent="conversation", user_message="What is the capital of France?", response_language="en-GB"))
     assert "Miguel Alfayate" not in str(local.calls[before:])
+
+
+@pytest.mark.parametrize("language,inventory,forget", [
+    ("en-GB", "What do you know about me?", "Forget my coach"),
+    ("pt-PT", "O que sabes sobre mim?", "Esquece o meu treinador"),
+])
+def test_inventory_and_forgetting_are_real_and_deterministic(memory_engine, language, inventory, forget, monkeypatch, tmp_path):
+    from assistant.core_profile import load_core_profile
+    profile = tmp_path / "profile.md"
+    profile.write_text("Alexandre studies software engineering.", encoding="utf-8")
+    monkeypatch.setenv("ECHO_CORE_PROFILE_PATH", str(profile))
+    engine, local = memory_engine(language)
+    monkeypatch.setenv("ECHO_CORE_PROFILE_PATH", str(profile))
+    engine.respond("Remember that my coach is Miguel Alfayate")
+    response = engine.respond(inventory)
+    assert "Miguel Alfayate" in response
+    assert "software engineering" in response
+    assert local.calls == []
+    receipt = engine.respond(forget)
+    assert "Miguel Alfayate" in receipt
+    assert engine.personal_model.entries_about() == []
+    assert "Miguel Alfayate" not in engine.respond(inventory)
+    assert profile.read_text(encoding="utf-8") == "Alexandre studies software engineering."
+    assert local.calls == []
+
+
+def test_forget_that_targets_saved_entry_not_assistant(memory_engine):
+    engine, local = memory_engine()
+    engine.respond("Remember that my coach is Miguel Alfayate")
+    engine.respond("Forget that")
+    assert engine.personal_model.entries_about() == []
+    assert local.calls == []
+
+
+def test_deleted_personal_fact_is_not_resent_as_history(memory_engine):
+    from assistant.response_composer import ComposerRequest
+    engine, local = memory_engine()
+    engine.respond("Remember that my coach is Miguel Alfayate")
+    engine.respond("Forget my coach")
+    reply = engine.response_composer.compose(ComposerRequest(
+        intent="conversation", user_message="Who is my coach?", response_language="en-GB",
+        history=engine.memory.load(),
+    ))
+    assert "don't know" in reply
+    assert local.calls == []

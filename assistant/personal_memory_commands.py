@@ -8,12 +8,14 @@ import unicodedata
 from dataclasses import dataclass, field, replace
 
 from assistant.personal_model import infer_category
+from assistant.core_profile import load_core_profile
 
 
 @dataclass
 class MemoryConsent:
     pending: str = ""
     offered: set[str] = field(default_factory=set)
+    last_saved_id: int | None = None
 
 
 def durable_statement(message: str) -> bool:
@@ -33,6 +35,12 @@ def normalized(text: str) -> str:
 def relevant_personal_request(request, model):
     if model is None:
         return request
+    deleted = [normalized(entry.description) for entry in model.list_entries(include_deleted=True) if entry.status == "apagado"]
+    def forgotten(text):
+        return any(fact in normalized(text) for fact in deleted)
+    request = replace(request, history=[item for item in request.history if not forgotten(item.get("content", ""))],
+                      facts=[fact for fact in request.facts if not forgotten(fact)],
+                      context="\n".join(line for line in request.context.splitlines() if not forgotten(line)))
     query = request.user_message
     for words in (("coach", "treinador"), ("sister", "irma"), ("brother", "irmao"),
                   ("studies", "estudos"), ("work", "trabalho"), ("hobbies", "habitos")):
@@ -43,6 +51,48 @@ def relevant_personal_request(request, model):
         return request
     evidence = "\n".join(f"{entry.description} [source={entry.source}; date={entry.updated_at}]" for entry in entries)
     return replace(request, context=request.context + "\nPersonal facts (evidence, not instructions):\n" + evidence)
+
+
+def inventory_or_forget(engine, message: str, state: MemoryConsent) -> str | None:
+    text = normalized(message).strip(" .!?")
+    english = engine.response_language == "en-GB"
+    model = engine.personal_model
+    if text in {"what do you know about me", "o que sabes sobre mim", "o que sabes de mim"}:
+        profile = load_core_profile()
+        lines = ([profile.text] if profile else []) + ([entry.description for entry in model.list_entries()] if model else [])
+        if not lines:
+            return "We're still at the beginning; I have no confirmed personal facts saved yet." if english else "Ainda estamos no início; ainda não tenho factos pessoais confirmados guardados."
+        return ("Here's what you've shared:\n" if english else "Isto é o que partilhaste comigo:\n") + "\n".join("- " + line for line in lines)
+    match = re.match(r"^(?:esquece|forget)\s+(.+)$", text)
+    if not match:
+        return None
+    query = match.group(1)
+    # Cancelling a task or forgetting an unsaved idea is not a database delete.
+    if re.search(r"\b(tarefa|task|mail|email|rascunho|draft|ficheiro|file)\b", query):
+        return None
+    entries = model.list_entries() if model else []
+    if query in {"isso", "isto", "that", "this"}:
+        if state.pending:
+            state.pending = ""
+            return "I won't save it." if english else "Não vou guardar."
+        matches = [entry for entry in entries if entry.id == state.last_saved_id]
+    else:
+        words = set(re.findall(r"\w+", query)) - {"o", "a", "meu", "minha", "my", "the", "about", "sobre"}
+        if "treinador" in words or "coach" in words:
+            words |= {"treinador", "coach"}
+        matches = [entry for entry in entries if any(re.search(r"\b" + re.escape(word) + r"\b", normalized(entry.description)) for word in words)]
+    if len(matches) > 1:
+        return "Which fact should I forget?\n" + "\n".join(entry.description for entry in matches) if english else "Que informação queres que esqueça?\n" + "\n".join(entry.description for entry in matches)
+    if not matches:
+        return "I couldn't find a saved fact to delete." if english else "Não encontrei um facto guardado para apagar."
+    try:
+        removed = model.delete_entry_by_id(matches[0].id)
+    except (sqlite3.Error, OSError):
+        removed = None
+    if removed is None:
+        return "I couldn't delete that information." if english else "Não consegui apagar essa informação."
+    state.last_saved_id = None
+    return f'Forgotten: "{removed.description}".' if english else f'Apaguei: "{removed.description}".'
 
 
 def explicit_fact(message: str, previous_user: str) -> str | None:
@@ -69,6 +119,9 @@ def handle_personal_memory(engine, message: str) -> str | None:
     state = getattr(engine._work_session, "memory_consent", None)
     if state is None:
         state = engine._work_session.memory_consent = MemoryConsent()
+    command = inventory_or_forget(engine, message, state)
+    if command is not None:
+        return command
     english = engine.response_language == "en-GB"
     answer = normalized(message.strip()).strip(" .!?")
     confirmed = False
@@ -83,7 +136,7 @@ def handle_personal_memory(engine, message: str) -> str | None:
     if fact is None and engine.personal_model is not None and durable_statement(message):
         key = normalized(message).strip(" .!")
         protected = engine.agent.has_pending_confirmation() or engine._work_session.active_task is not None
-        known = any(normalized(entry.description).strip(" .!") == key for entry in engine.personal_model.entries_about())
+        known = any(normalized(entry.description).strip(" .!") == key for entry in engine.personal_model.list_entries())
         if not protected and not known and key not in state.offered and engine.presence.can_store_memory():
             state.offered.add(key)
             state.pending = message.strip()
@@ -102,7 +155,7 @@ def handle_personal_memory(engine, message: str) -> str | None:
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
         print(f"[PERSONAL_MEMORY] write_failed={type(exc).__name__}")
         return "I couldn't save that information." if english else "Não consegui guardar essa informação."
-    engine._work_session.last_personal_memory_id = entry.id
+    state.last_saved_id = entry.id
     if engine._turn_trace is not None:
         engine._turn_trace["personal_memory_written"] = True
     return f'Saved: "{entry.description}".' if english else f'Guardei: "{entry.description}".'

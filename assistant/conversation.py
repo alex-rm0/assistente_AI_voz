@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 from assistant.agent import Agent, AgentContext, system_state_tool_intent
 from assistant.turn_input import TurnInput, respond_to_turn
-from assistant.personal_memory_commands import handle_personal_memory
+from assistant.personal_memory_commands import MemoryConsent, handle_personal_memory
 from assistant.action_claims import detect_ungrounded_workspace_operation_claim as _detect_ungrounded_workspace_operation_claim, unsupported_send_claim, send_not_executed_response, unsupported_draft_edit_claim
 from assistant.artifact_export import export_kind, presentation_to_text
 from assistant.writing_corrections import try_recipient_correction, extract_contextual_writing_recipient as _extract_contextual_writing_recipient
@@ -347,6 +347,7 @@ class WorkSession:
     second structural migration of this class."""
 
     active_task: ActiveTaskContext | None = None
+    memory_consent: MemoryConsent = field(default_factory=MemoryConsent)
     document_context: ActiveDocumentContext | None = None
     writing_context: PendingWritingTask | None = None
     # Real, wired: tasks pushed aside by an explicit pause or by starting a
@@ -1823,6 +1824,7 @@ class AssistantEngine:
         self._queue_ui_event("conversation_cleared", {})
 
     def _reset_transient_context(self) -> None:
+        self._work_session.memory_consent = MemoryConsent()
         self._active_operation_type = ""
         self._active_operation_topic = ""
         self._active_operation_id = ""
