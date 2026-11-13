@@ -48,3 +48,23 @@ Pior área: frases confusas — nunca pede para repetir; inventa reuniões, hora
 
 Critério de fecho da R3: passos 1–8 feitos; eval com o cérebro escolhido melhor que a baseline em
 todas as propriedades; teste de voz real do Alexandre aprovado.
+
+## Passo 6 — memória com consentimento (13/11)
+
+- `assistant/personal_memory_commands.py` trata pedidos explícitos PT/EN antes do LLM e confirma
+  a escrita em PersonalModel citando o facto. "Disso" só usa um turno do utilizador, nunca do Echo.
+- Declarações pessoais reconhecidas propõem guardar uma vez por conversa; apenas uma confirmação
+  imediata guarda. Recusa, mudança de assunto e CLEAR invalidam a proposta. Não interrompe tasks.
+- Fonte, evidência do consentimento e datas ficam na SQLite existente. O perfil-núcleo não é editado.
+  Factos guardados entram por relevância no composer, respeitando PRIVATE/OFFLINE.
+- Consulta do perfil + factos e esquecimento são determinísticos. O inventário identifica as fontes
+  citadas no idioma original; não tenta traduzi-las sem modelo. Alvos ambíguos pedem esclarecimento.
+- Esquecer usa a remoção lógica existente do PersonalModel e exclui esse facto dos novos payloads;
+  não apaga o histórico bruto nem modifica o perfil-núcleo. Não há gravação passiva de factos pessoais.
+  Os comandos de tarefas mantêm a sua gravação autorizada e normalização.
+- Guard partilhado bloqueia confirmações/promessas de gravação sem escrita real; ofertas condicionais
+  continuam permitidas. A deteção de declarações é conservadora, por regras, não um extrator geral.
+- Avaliação: quatro casos PT/EN, 14 turnos, zero chamadas a modelos e zero falhas automáticas;
+  as citações do inventário têm revisão humana de idioma/formato, não um passe automático.
+- Validação: 2741 passed, 1 xfailed; bateria Qt 1–3/11–14 passou com Ollama local, sem Anthropic.
+  Os 54 ficheiros de `data/` foram repostos após a bateria, com SHA256 iguais aos do backup.
