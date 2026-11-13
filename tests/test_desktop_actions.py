@@ -345,5 +345,6 @@ def test_desktop_action_records_timeline_when_executed(tmp_path: Path) -> None:
     result = open_url("https://example.com", long_term_memory=memory, desktop_action_runner=runner)
 
     assert result == "Abri o URL: https://example.com"
-    assert ("O utilizador usa frequentemente https://example.com para abriu URL.", "preferencias") in memory.remembered
+    # R3 passo 5: abrir um link/app nao e uma preferencia duradoura (ruido na memoria).
+    assert memory.remembered == []
     assert memory.timeline == ["Acao no Windows: abriu URL - https://example.com."]

@@ -242,16 +242,7 @@ def known_project_path(project_name: str, known_projects: dict[str, str], projec
 
 
 def remember_desktop_action(long_term_memory, action: str, target: str) -> None:
-    if long_term_memory is None:
-        return
-    remember = getattr(long_term_memory, "remember", None)
-    if remember is None:
-        return
-    try:
-        remember(f"O utilizador usa frequentemente {target} para {action}.", category="preferencias")
-    except Exception:
-        pass
-
+    # Only the timeline: opening a link/app is not a lasting preference (R3 step 5).
     remember_timeline_event = getattr(long_term_memory, "remember_timeline_event", None)
     if remember_timeline_event is None:
         return
