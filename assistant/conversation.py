@@ -1248,13 +1248,6 @@ class AssistantEngine:
             )
             self._perf_log("resposta total", request_started_at, time.perf_counter())
             return writing_workflow_response
-        # An explicit write command ("Regista que...") is re-extracted from
-        # its own stripped content in _try_memory_write_command below, so the
-        # passive path is skipped here to avoid writing the same fact twice
-        # (once from the full raw message, once from the stripped content).
-        if not self._should_skip_passive_memory_extraction(user_message):
-            self._maybe_extract_structured_memory(user_message)
-
         presence_mode_response = self._try_presence_mode_command(user_message)
         if presence_mode_response is not None:
             presence_mode_response = self._complete_turn(
@@ -6704,16 +6697,6 @@ class AssistantEngine:
 
         if _asks_for_informal_address(text):
             self._set_current_language("pt-PT")
-            if self.personal_model is not None:
-                self.personal_model.add_or_update_entry(
-                    category="preferencias",
-                    key="tratamento-por-tu",
-                    description="prefere ser tratado por tu e não por você",
-                    confidence=100,
-                    evidence="Correção explícita do Alexandre.",
-                    source="utilizador",
-                    status="confirmado",
-                )
             return "Claro. Vou tratar-te por tu."
 
         if _asks_to_explain_previous_phrase(text):
@@ -6761,17 +6744,7 @@ class AssistantEngine:
         if known:
             return "Sim, lembro-me."
 
-        if self.personal_model is not None:
-            self.personal_model.add_or_update_entry(
-                category=infer_category(fact),
-                key="confirmacao-" + _normalize_text(fact)[:60].replace(" ", "-"),
-                description=fact,
-                confidence=100,
-                evidence="Confirmação explícita do Alexandre.",
-                source="utilizador",
-                status="confirmado",
-            )
-        return "Não tinha isso guardado de forma segura. Fico com essa informação."
+        return "Ainda não tinha essa informação guardada."
 
     def _presence_silent_response(self) -> str:
         if self.presence.state == PresenceState.OFFLINE:
@@ -9250,19 +9223,6 @@ class AssistantEngine:
 
     def _try_profile_memory(self, user_message: str) -> str | None:
         text = _normalize_text(user_message)
-        name_match = re.search(
-            r"\b(?:chamo me|chamo-me|o meu nome e|meu nome e)\s+([^.,;:!?\n]{2,60})",
-            user_message,
-            re.IGNORECASE,
-        )
-        if name_match:
-            name = name_match.group(1).strip(" .,!?:;")
-            self.long_term_memory.remember(
-                f"O utilizador chama-se {name}.",
-                category=MemoryCategory.USER_PROFILE,
-            )
-            return f"Obrigado, {name}. Vou lembrar-me do teu nome."
-
         if _asks_for_user_name(text):
             name = self._find_known_name()
             if name:

@@ -66,3 +66,40 @@ def test_failed_write_has_no_success_confirmation(memory_engine, monkeypatch):
     assert "couldn't save" in response
     assert engine.personal_model.entries_about() == []
     assert local.calls == []
+
+
+@pytest.mark.parametrize("language,fact,yes,no", [
+    ("en-GB", "My coach is Miguel Alfayate", "yes", "no"),
+    ("pt-PT", "O meu treinador é Miguel Alfayate", "sim", "não"),
+    ("pt-PT", "Tenho regata no sábado", "sim", "não"),
+])
+def test_personal_statement_requires_consent(memory_engine, language, fact, yes, no):
+    engine, local = memory_engine(language)
+    proposal = engine.respond(fact)
+    assert "?" in proposal
+    assert engine.personal_model.entries_about() == []
+    receipt = engine.respond(yes)
+    assert fact in receipt
+    assert len(engine.personal_model.entries_about()) == 1
+    assert local.calls == []
+
+
+def test_declined_or_stale_proposal_is_not_saved(memory_engine):
+    engine, _ = memory_engine()
+    engine.respond("My coach is Miguel Alfayate")
+    engine.respond("no")
+    assert engine.personal_model.entries_about() == []
+    assert "save" not in engine.respond("My coach is Miguel Alfayate").lower()
+    engine.respond("My sister is Maria")
+    engine.respond("Hello")
+    engine.respond("yes")
+    assert engine.personal_model.entries_about() == []
+
+
+@pytest.mark.parametrize("message", ["Estou cansado", "It's raining", "My coach is Miguel?", "I need help with an email"])
+def test_ordinary_messages_do_not_propose_memory(memory_engine, message):
+    engine, _ = memory_engine()
+    response = engine.respond(message)
+    assert "shall I save" not in response.lower()
+    assert "queres que guarde" not in response.lower()
+    assert engine.personal_model.entries_about() == []
