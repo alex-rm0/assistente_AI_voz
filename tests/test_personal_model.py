@@ -163,7 +163,7 @@ def test_conversation_uses_personal_model_for_explicit_memory(tmp_path: Path) ->
     remember_response = engine.respond("lembra-te que prefiro mapas mentais")
     answer = engine.respond("o que sabes sobre mim com detalhes?")
 
-    assert "Fico com isso em mente" in remember_response
+    assert 'Guardei: "prefiro mapas mentais"' in remember_response
     assert "Personal Model" not in remember_response
     assert "mapas mentais" in answer
     assert "confiança: 100%" in answer

@@ -20,24 +20,25 @@ class MemoryConsent:
 
 def durable_statement(message: str) -> bool:
     text = normalized(message.strip())
-    if "?" in text:
+    if "?" in text or re.search(r"\b(?:ajuda-me|podes|consegues|help me|can you|could you|abre|escreve|write|open)\b", text):
         return False
     return bool(re.match(
-        r"^(?:(?:o meu|a minha|my) (?:treinador|coach|irma|irmao|sister|brother|parceira|partner|trabalho|job|hobby|objetivo|goal) "
+        r"^(?:(?:o meu|a minha|my) (?:treinador|coach|irma|irmao|sister|brother|mae|pai|mother|father|parceira|partner|trabalho|job|hobby|objetivo|goal) "
         r"(?:e |chama-se |is |calls )|(?:chamo-me|my name is|trabalho como|i work as|estudo|i study) "
-        r"|tenho (?:uma? )?(?:regata|exame|reuniao) (?:no|na|em|amanha)\b)", text))
+        r"|tenho (?:uma? )?(?:regata|exame|reuniao) (?:no|na|em|amanha)\b"
+        r"|i have (?:a |an )?(?:regatta|exam|meeting) (?:on|tomorrow|next)\b)", text))
 
 
 def guard_memory_claim(reply: str, language: str, *, persisted: bool = False) -> str:
     if persisted:
         return reply
-    text = normalized(reply).replace("’", "'")
+    text = re.sub(r'"[^"\n]*"|`[^`\n]*`', "", normalized(reply).replace("’", "'"))
     # Conditional offers are not receipts or unconditional promises.
     conditional = r"(?:if you (?:like|want)|se quiseres)"
-    claim = r"^(?:noted|duly noted)[.!\s]*$|\b(?:guardei|memorizei|fica guardado|vou lembrar-me|vou guardar|i(?:'ve| have) (?:saved|stored)|i(?:'ll| will) remember|i (?:saved|stored) (?:that|this|it))\b"
+    claim = r"^(?:noted|duly noted)(?:[.!,:]|$)|\b(?:guardei|memorizei|fica guardado|vou lembrar-me|vou guardar|i(?:'ve| have) (?:saved|stored)|i(?:'ll| will) remember|i (?:saved|stored) (?:that|this|it))\b"
     if not re.search(claim, text) or (re.search(conditional, text) and not re.search(r"guardei|memorizei|i(?:'ve| have) (?:saved|stored)", text)):
         return reply
-    return "I haven't saved that. Would you like me to?" if language == "en-GB" else "Não guardei essa informação. Queres que a guarde?"
+    return "I haven't saved that. You can ask me explicitly to remember it." if language == "en-GB" else "Não guardei essa informação. Podes pedir-me explicitamente para a guardar."
 
 
 def normalized(text: str) -> str:
@@ -69,7 +70,8 @@ def inventory_or_forget(engine, message: str, state: MemoryConsent) -> str | Non
     text = normalized(message).strip(" .!?")
     english = engine.response_language == "en-GB"
     model = engine.personal_model
-    if text in {"what do you know about me", "o que sabes sobre mim", "o que sabes de mim"}:
+    if text in {"what do you know about me", "o que sabes sobre mim", "o que sabes de mim", "o que e que sabes sobre mim"}:
+        state.pending = ""
         profile = load_core_profile()
         lines = ([profile.text] if profile else []) + ([entry.description for entry in model.list_entries()] if model else [])
         if not lines:
@@ -77,6 +79,8 @@ def inventory_or_forget(engine, message: str, state: MemoryConsent) -> str | Non
         return ("Here's what you've shared:\n" if english else "Isto é o que partilhaste comigo:\n") + "\n".join("- " + line for line in lines)
     match = re.match(r"^(?:esquece|forget)\s+(.+)$", text)
     if not match:
+        return None
+    if engine.agent.has_pending_confirmation():
         return None
     query = match.group(1)
     # Cancelling a task or forgetting an unsaved idea is not a database delete.
@@ -122,7 +126,7 @@ def explicit_fact(message: str, previous_user: str) -> str | None:
         return None
     if not fact:
         fact = previous_user.strip(" .:!?") if "?" not in previous_user else ""
-        if re.match(r"^(?:quem|qual|como|who|what|how|remember|lembra|guarda)\b", normalized(fact)):
+        if re.match(r"^(?:o que|em que|quem|qual|quais|quando|quantos|como|who|what|when|where|how|remember|lembra|guarda|yes|no|sim|nao)\b", normalized(fact)):
             fact = ""
     return fact
 
@@ -156,6 +160,8 @@ def handle_personal_memory(engine, message: str) -> str | None:
     if fact is None:
         return None
     if not fact:
+        if answer == "guarda isto" and not engine._previous_user_message():
+            return None  # Preserve the existing vague-action clarification route.
         return "What exactly would you like me to remember?" if english else "O que queres que guarde, exatamente?"
     if engine.personal_model is None or not engine.presence.can_store_memory():
         return "I couldn't save that information." if english else "Não consegui guardar essa informação."

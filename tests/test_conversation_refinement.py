@@ -151,12 +151,13 @@ def test_exhaustion_response_is_short_and_connected_to_problem(tmp_path: Path) -
     assert len(answer.split()) <= 35
 
 
-def test_personal_fact_confirmation_is_saved_without_generic_congratulations(tmp_path: Path) -> None:
+def test_personal_fact_confirmation_does_not_save_without_permission(tmp_path: Path) -> None:
     engine = make_engine(tmp_path)
 
     answer = engine.respond("Já sabias que sou presidente da secção de remo da AAC, certo?")
 
     lowered = answer.lower()
-    assert "não tinha isso guardado" in lowered or "sim, lembro-me" in lowered
+    assert "não tinha essa informação guardada" in lowered or "sim, lembro-me" in lowered
     assert "parabéns" not in lowered
     assert "você" not in lowered
+    assert engine.personal_model.entries_about() == []

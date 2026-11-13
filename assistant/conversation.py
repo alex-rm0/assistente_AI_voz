@@ -6950,6 +6950,7 @@ class AssistantEngine:
             guarded = guard_memory_claim(final_response, self.response_language, persisted=bool((self._turn_trace or {}).get("personal_memory_written")))
             if guarded != final_response:
                 final_response, final_response_source = guarded, "MEMORY_CLAIM_BLOCKED"
+                self._last_response_blocked = True
         if final_response_source in {"RESPONSE_COMPOSER", "AGENT_DIRECT", "COMPOSER_REGENERATED"} and not tools_used and not technical:
             activity_claim_reason = _detect_ungrounded_activity_claim(final_response)
             if activity_claim_reason:
@@ -8223,7 +8224,7 @@ class AssistantEngine:
             return ""
         return self.personal_model.get_relevant_context(user_message)
 
-    def _maybe_extract_structured_memory(self, user_message: str) -> tuple[str, dict[str, str]] | None:
+    def _maybe_extract_structured_memory(self, user_message: str, *, task_only: bool = False) -> tuple[str, dict[str, str]] | None:
         """Turns a user statement (passive mention or explicit write command)
         into a validated, attribute-level fact, and returns what was written
         so an explicit MEMORY_WRITE command can confirm it deterministically.
@@ -8244,9 +8245,9 @@ class AssistantEngine:
             # best-effort and must never be able to break the response path.
             return None
 
-        origin = "explicit_command" if is_memory_write_command(user_message) else "passive_extraction"
+        origin = "explicit_command" if task_only or is_memory_write_command(user_message) else "passive_extraction"
 
-        academic_candidate = extract_academic_event_candidate(
+        academic_candidate = {} if task_only else extract_academic_event_candidate(
             user_message,
             " ".join((self._previous_assistant_message(), self._previous_user_message())),
         )
@@ -8898,6 +8899,7 @@ class AssistantEngine:
                     return "Diz-me primeiro a que te referes com 'disto'."
                 task_text = f"{previous} {task_text}"
 
+            self._maybe_extract_structured_memory(user_message, task_only=True)
             return self.long_term_memory.create_task(task_text)
 
         return None

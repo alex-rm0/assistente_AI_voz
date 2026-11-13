@@ -180,3 +180,65 @@ def test_composer_cannot_claim_a_write_or_block_conditional_offer(memory_engine)
     request = ComposerRequest(intent="conversation", user_message="We had a good day.", response_language="en-GB")
     assert "haven't saved" in engine.response_composer.compose(request)
     assert "if you like" in engine.response_composer.compose(request)
+
+
+@pytest.mark.parametrize("previous", ["O que sabes sobre mim", "When is my exam", "yes", "sim"])
+def test_reference_does_not_turn_question_or_confirmation_into_fact(memory_engine, previous):
+    engine, local = memory_engine()
+    engine.memory.append_pair(previous, "My coach is Invented.")
+    assert "?" in engine.respond("remember that")
+    assert engine.personal_model.list_entries() == []
+    assert local.calls == []
+
+
+def test_clear_and_inventory_expire_unanswered_proposals(memory_engine):
+    engine, _ = memory_engine()
+    engine.respond("My coach is Miguel")
+    engine.clear_conversation()
+    engine.respond("yes")
+    assert engine.personal_model.list_entries() == []
+    engine.respond("My sister is Maria")
+    engine.respond("What do you know about me?")
+    engine.respond("yes")
+    assert engine.personal_model.list_entries() == []
+
+
+@pytest.mark.parametrize("message", ["I have a regatta on Saturday", "O meu treinador é Miguel. Ajuda-me a escrever um email."])
+def test_event_and_compound_request_have_appropriate_consent(memory_engine, message):
+    from assistant.personal_memory_commands import durable_statement
+    assert durable_statement(message) == message.startswith("I have")
+
+
+def test_noted_prefix_is_a_claim_but_quoted_example_is_not(memory_engine):
+    from assistant.personal_memory_commands import guard_memory_claim
+    assert "haven't saved" in guard_memory_claim("Noted. Your coach is Miguel.", "en-GB")
+    quoted = 'You could write: "I will remember that."'
+    assert guard_memory_claim(quoted, "en-GB") == quoted
+
+
+def test_ambiguous_forgetting_does_not_guess(memory_engine):
+    engine, local = memory_engine()
+    engine.respond("Remember that my coach is Miguel")
+    engine.respond("Remember that my swimming coach is Maria")
+    assert "Which fact" in engine.respond("Forget my coach")
+    assert len(engine.personal_model.list_entries()) == 2
+    assert local.calls == []
+
+
+def test_memory_survives_reopening_and_source_is_explicit(memory_engine):
+    engine, _ = memory_engine()
+    engine.respond("My coach is Miguel")
+    engine.respond("yes")
+    reopened = PersonalModel(engine.personal_model.data_path)
+    entry, = reopened.list_entries()
+    assert entry.source == "user_confirmed"
+    assert entry.created_at and "Consent: yes" in entry.evidence
+
+
+def test_active_workflow_is_not_interrupted_by_personal_proposal(memory_engine):
+    engine, _ = memory_engine()
+    engine.respond("vamos escrever um mail")
+    assert engine._work_session.active_task is not None
+    reply = engine.respond("My coach is Miguel")
+    assert "Shall I save" not in reply
+    assert engine.personal_model.list_entries() == []
