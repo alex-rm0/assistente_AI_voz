@@ -162,3 +162,21 @@ def test_deleted_personal_fact_is_not_resent_as_history(memory_engine):
     ))
     assert "don't know" in reply
     assert local.calls == []
+
+
+@pytest.mark.parametrize("reply", ["Noted.", "I'll remember that.", "I've saved that in my memory.", "Guardei essa informação.", "Vou lembrar-me disso."])
+def test_unsaved_memory_claim_is_blocked_in_all_llm_paths(memory_engine, reply):
+    engine, _ = memory_engine()
+    engine._begin_turn_trace("My coach is Miguel")
+    response = engine._finalize_response("My coach is Miguel", reply, "AGENT_DIRECT")
+    assert response != reply
+    assert "haven't saved" in response
+    assert engine.personal_model.entries_about() == []
+
+
+def test_composer_cannot_claim_a_write_or_block_conditional_offer(memory_engine):
+    from assistant.response_composer import ComposerRequest
+    engine, _ = memory_engine(replies=["Noted.", "Tell me and I'll remember it, if you like."])
+    request = ComposerRequest(intent="conversation", user_message="We had a good day.", response_language="en-GB")
+    assert "haven't saved" in engine.response_composer.compose(request)
+    assert "if you like" in engine.response_composer.compose(request)

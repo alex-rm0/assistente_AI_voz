@@ -28,6 +28,18 @@ def durable_statement(message: str) -> bool:
         r"|tenho (?:uma? )?(?:regata|exame|reuniao) (?:no|na|em|amanha)\b)", text))
 
 
+def guard_memory_claim(reply: str, language: str, *, persisted: bool = False) -> str:
+    if persisted:
+        return reply
+    text = normalized(reply).replace("’", "'")
+    # Conditional offers are not receipts or unconditional promises.
+    conditional = r"(?:if you (?:like|want)|se quiseres)"
+    claim = r"^(?:noted|duly noted)[.!\s]*$|\b(?:guardei|memorizei|fica guardado|vou lembrar-me|vou guardar|i(?:'ve| have) (?:saved|stored)|i(?:'ll| will) remember|i (?:saved|stored) (?:that|this|it))\b"
+    if not re.search(claim, text) or (re.search(conditional, text) and not re.search(r"guardei|memorizei|i(?:'ve| have) (?:saved|stored)", text)):
+        return reply
+    return "I haven't saved that. Would you like me to?" if language == "en-GB" else "Não guardei essa informação. Queres que a guarde?"
+
+
 def normalized(text: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFKD", text.casefold()) if not unicodedata.combining(c))
 

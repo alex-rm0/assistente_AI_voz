@@ -7,7 +7,7 @@ from typing import Protocol
 
 from assistant.core_profile import about_alexandre_section, load_core_profile
 from assistant.personal_facts import missing_personal_fact_reply
-from assistant.personal_memory_commands import relevant_personal_request
+from assistant.personal_memory_commands import guard_memory_claim, relevant_personal_request
 from assistant.privacy import PERSONAL, PRIVATE
 from assistant.sir_budget import limit_sir  # noqa: F401 - the reply style's last step, applied by the engine when it finalises a reply
 from assistant.model_provider import ProviderConfigurationError, ProviderTimeoutError
@@ -241,7 +241,7 @@ class ResponseComposer:
         if _looks_like_copied_evidence(reply, request.facts):
             return _simple_fallback(request)
 
-        return reply
+        return guard_memory_claim(reply, request.response_language) if request.intent in {"conversation", "general_conversation", "social"} else reply
 
     def regenerate(
         self, user_message: str, history: list[dict[str, str]] | None, reason: str, response_language: str = "pt-PT"

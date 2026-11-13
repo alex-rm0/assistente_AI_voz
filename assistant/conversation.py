@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 from assistant.agent import Agent, AgentContext, system_state_tool_intent
 from assistant.turn_input import TurnInput, respond_to_turn
-from assistant.personal_memory_commands import MemoryConsent, handle_personal_memory
+from assistant.personal_memory_commands import MemoryConsent, guard_memory_claim, handle_personal_memory
 from assistant.action_claims import detect_ungrounded_workspace_operation_claim as _detect_ungrounded_workspace_operation_claim, unsupported_send_claim, send_not_executed_response, unsupported_draft_edit_claim
 from assistant.artifact_export import export_kind, presentation_to_text
 from assistant.writing_corrections import try_recipient_correction, extract_contextual_writing_recipient as _extract_contextual_writing_recipient
@@ -6946,6 +6946,10 @@ class AssistantEngine:
                 self._last_response_blocked = True
                 self._record_memory_grounding(False, [], True, history_claim_reason)
 
+        if not technical and not tools_used and final_response_source in {"RESPONSE_COMPOSER", "AGENT_DIRECT", "COMPOSER_REGENERATED"}:
+            guarded = guard_memory_claim(final_response, self.response_language, persisted=bool((self._turn_trace or {}).get("personal_memory_written")))
+            if guarded != final_response:
+                final_response, final_response_source = guarded, "MEMORY_CLAIM_BLOCKED"
         if final_response_source in {"RESPONSE_COMPOSER", "AGENT_DIRECT", "COMPOSER_REGENERATED"} and not tools_used and not technical:
             activity_claim_reason = _detect_ungrounded_activity_claim(final_response)
             if activity_claim_reason:
