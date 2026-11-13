@@ -1,5 +1,6 @@
 {
   "attention_decision_id": "dec-1",
+  "content_free": false,
   "content_ref": null,
   "contract": "OutgoingNotification",
   "contract_version": "1.0",

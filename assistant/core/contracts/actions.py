@@ -12,6 +12,7 @@ from enum import Enum, IntEnum
 from typing import Any, Mapping
 
 from assistant.core.contracts._base import IDENTIFIER_RE, Contract, require
+from assistant.core.contracts.channels import CONFIRMATION_CHANNELS
 from assistant.core.contracts.privacy import PrivacyClass
 
 
@@ -39,6 +40,13 @@ NEVER_AUTONOMOUS_ACTION_TYPES = frozenset({
     "calendar.cancel_meeting",
     "payment.make",
     "purchase.make",
+    # Alexandre, 12/11:
+    "data.share",
+    "data.publish",
+    "permissions.change",
+    "credentials.change",
+    "calendar.accept_invitation",
+    "commitment.accept",
 })
 
 
@@ -165,9 +173,18 @@ class ActionRecord(Contract):
     executed_at: datetime | None = None
     result: ActionResult | None = None
     undo_reference: str | None = None
+    # Where the confirmation answer came from: may differ from source_channel,
+    # but only an allowlisted channel answers (Alexandre, 12/11).
+    confirmation_channel: str | None = None
     contract_version: str | None = None
 
     def _check(self):
+        if self.confirmation_result in (ConfirmationResult.CONFIRMED, ConfirmationResult.DECLINED):
+            require(self.confirmation_channel in CONFIRMATION_CHANNELS,
+                    f"confirmation_channel: an answer must come from one of {sorted(CONFIRMATION_CHANNELS)}, "
+                    f"got {self.confirmation_channel!r}")
+        else:
+            require(self.confirmation_channel is None, "confirmation_channel: only an answered confirmation has one")
         require(self.autonomy_level >= AutonomyLevel.SUGGEST,
                 "autonomy_level: only level 2 and 3 actions reach the ledger")
         require(self.confirmation_required == (self.autonomy_level is AutonomyLevel.SUGGEST),

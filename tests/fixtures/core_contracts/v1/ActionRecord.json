@@ -1,6 +1,7 @@
 {
   "action_type": "email.archive_newsletter",
   "autonomy_level": 2,
+  "confirmation_channel": "echo_os",
   "confirmation_required": true,
   "confirmation_result": "confirmed",
   "contract": "ActionRecord",

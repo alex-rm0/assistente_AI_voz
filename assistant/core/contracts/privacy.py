@@ -15,6 +15,11 @@ class PrivacyClass(str, Enum):
 
 _RANK = {cls: rank for rank, cls in enumerate(PrivacyClass)}
 
+# Alexandre, 12/11: what he writes or says to the Echo OS (window/voice) is
+# PERSONAL until a classifier says otherwise. The contracts still require a
+# class; this is the value the Echo OS adapter passes.
+ECHO_OS_DEFAULT_PRIVACY_CLASS = PrivacyClass.PERSONAL
+
 
 def derived_privacy_class(*sources):
     """Derived content inherits the most restrictive class of its sources.

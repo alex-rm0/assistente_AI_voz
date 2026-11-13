@@ -104,7 +104,7 @@ def record(**overrides):
     values = dict(id="rec-1", request_id="req-1", requested_by="echo.digest", source_channel="echo_os",
                   action_type="email.archive_newsletter", autonomy_level=AutonomyLevel.SUGGEST,
                   confirmation_required=True, confirmation_result=ConfirmationResult.CONFIRMED,
-                  reversible=True, status=ActionStatus.SUCCEEDED, recorded_at=T0,
+                  confirmation_channel="echo_os", reversible=True, status=ActionStatus.SUCCEEDED, recorded_at=T0,
                   parameters={"message_id": "m-42"}, executed_at=T0, result=result(),
                   undo_reference="undo:m-42")
     values.update(overrides)
@@ -350,19 +350,20 @@ def test_action_result_failure_needs_error_and_success_has_none():
 def test_record_never_executes_without_confirmation_when_required():
     for answer in (ConfirmationResult.PENDING, ConfirmationResult.DECLINED,
                    ConfirmationResult.EXPIRED, ConfirmationResult.NOT_REQUIRED):
-        with pytest.raises(ContractError, match="confirm"):
-            record(confirmation_result=answer)
+        channel = "echo_os" if answer is ConfirmationResult.DECLINED else None
+        with pytest.raises(ContractError, match="confirmation_result"):
+            record(confirmation_result=answer, confirmation_channel=channel)
 
 
 def test_record_confirmation_matches_level():
     with pytest.raises(ContractError, match="confirmation_required"):
         record(confirmation_required=False)
     auto = record(autonomy_level=AutonomyLevel.AUTHORIZED, confirmation_required=False,
-                  confirmation_result=ConfirmationResult.NOT_REQUIRED)
+                  confirmation_result=ConfirmationResult.NOT_REQUIRED, confirmation_channel=None)
     assert auto.status is ActionStatus.SUCCEEDED
     with pytest.raises(ContractError, match="reversible"):
         record(autonomy_level=AutonomyLevel.AUTHORIZED, confirmation_required=False,
-               confirmation_result=ConfirmationResult.NOT_REQUIRED, reversible=False,
+               confirmation_result=ConfirmationResult.NOT_REQUIRED, confirmation_channel=None, reversible=False,
                undo_reference=None, result=result(undo_reference=None))
     with pytest.raises(ContractError, match="autonomy_level"):
         record(autonomy_level=AutonomyLevel.NOTIFY)
@@ -370,11 +371,12 @@ def test_record_confirmation_matches_level():
 
 def test_record_states_are_consistent():
     awaiting = record(status=ActionStatus.AWAITING_CONFIRMATION,
-                      confirmation_result=ConfirmationResult.PENDING,
+                      confirmation_result=ConfirmationResult.PENDING, confirmation_channel=None,
                       executed_at=None, result=None, undo_reference=None)
     assert awaiting.result is None
     with pytest.raises(ContractError, match="executed"):
-        record(status=ActionStatus.AWAITING_CONFIRMATION, confirmation_result=ConfirmationResult.PENDING)
+        record(status=ActionStatus.AWAITING_CONFIRMATION, confirmation_result=ConfirmationResult.PENDING,
+               confirmation_channel=None)
     declined = record(status=ActionStatus.NOT_EXECUTED, confirmation_result=ConfirmationResult.DECLINED,
                       executed_at=None, result=None, undo_reference=None)
     assert declined.executed_at is None
@@ -400,3 +402,45 @@ def test_health_states_and_reason_for_non_healthy():
                   since=T0 - timedelta(minutes=5)).reason
     with pytest.raises(ContractError, match="since"):
         health(state=HealthState.DEGRADED, reason="slow", since=T0 + timedelta(minutes=1))
+
+
+# --- Alexandre's answers of 12/11 (docs/F0_CONTRACTS_DRAFT.md) ------------------------------
+
+def test_echo_os_messages_are_personal_by_default():
+    from assistant.core.contracts.privacy import ECHO_OS_DEFAULT_PRIVACY_CLASS
+
+    assert ECHO_OS_DEFAULT_PRIVACY_CLASS is PrivacyClass.PERSONAL
+
+
+@pytest.mark.parametrize("privacy_class", [PrivacyClass.PRIVATE, PrivacyClass.RESTRICTED])
+def test_private_content_never_goes_to_telegram_only_content_free_notices(privacy_class):
+    with pytest.raises(ContractError, match="content_free"):
+        notification(privacy_class=privacy_class, text="Assunto: proposta de 40 000 EUR ...")
+    with pytest.raises(ContractError, match="content_ref"):
+        notification(privacy_class=privacy_class, content_free=True, text=None, content_ref="email:m-42")
+    notice = notification(privacy_class=privacy_class, content_free=True,
+                          text="Chegou um email importante de Francisca")
+    assert OutgoingNotification.from_json(notice.to_json()).content_free is True
+    # The local window may show the content itself.
+    assert notification(target_channel="echo_os", privacy_class=privacy_class, text="Assunto: ...")
+
+
+def test_confirmation_from_another_channel_only_if_allowlisted():
+    from assistant.core.contracts.channels import CONFIRMATION_CHANNELS
+
+    assert {"echo_os", "telegram"} <= CONFIRMATION_CHANNELS
+    assert record(source_channel="echo_os", confirmation_channel="telegram").confirmation_channel == "telegram"
+    with pytest.raises(ContractError, match="confirmation_channel"):
+        record(confirmation_channel="whatsapp")  # unknown channel: never
+    with pytest.raises(ContractError, match="confirmation_channel"):
+        record(confirmation_channel=None)  # an answer always says where it came from
+    with pytest.raises(ContractError, match="confirmation_channel"):
+        record(status=ActionStatus.AWAITING_CONFIRMATION, confirmation_result=ConfirmationResult.PENDING,
+               executed_at=None, result=None, undo_reference=None)  # no answer yet, no channel
+
+
+@pytest.mark.parametrize("action_type", ["data.share", "data.publish", "permissions.change",
+                                         "credentials.change", "calendar.accept_invitation",
+                                         "commitment.accept"])
+def test_sharing_permissions_and_commitments_are_never_autonomous(action_type):
+    assert action_type in NEVER_AUTONOMOUS_ACTION_TYPES
