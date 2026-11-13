@@ -204,6 +204,14 @@ def test_clear_and_inventory_expire_unanswered_proposals(memory_engine):
     assert engine.personal_model.list_entries() == []
 
 
+def test_forgetting_unsaved_topic_expires_consent(memory_engine):
+    engine, _ = memory_engine()
+    engine.respond("My coach is Miguel")
+    engine.respond("Forget my coach")
+    engine.respond("yes")
+    assert engine.personal_model.list_entries() == []
+
+
 @pytest.mark.parametrize("message", ["I have a regatta on Saturday", "O meu treinador é Miguel. Ajuda-me a escrever um email."])
 def test_event_and_compound_request_have_appropriate_consent(memory_engine, message):
     from assistant.personal_memory_commands import durable_statement

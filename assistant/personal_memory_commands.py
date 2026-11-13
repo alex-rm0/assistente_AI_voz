@@ -100,6 +100,7 @@ def inventory_or_forget(engine, message: str, state: MemoryConsent) -> str | Non
             return "I won't save it." if english else "Não vou guardar."
         matches = [entry for entry in entries if entry.id == state.last_saved_id]
     else:
+        state.pending = ""
         words = set(re.findall(r"\w+", query)) - {"o", "a", "meu", "minha", "my", "the", "about", "sobre"}
         if "treinador" in words or "coach" in words:
             words |= {"treinador", "coach"}
