@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from assistant.agent import Agent, AgentContext, system_state_tool_intent
 from assistant.turn_input import TurnInput, respond_to_turn
+from assistant.personal_memory_commands import handle_personal_memory
 from assistant.action_claims import detect_ungrounded_workspace_operation_claim as _detect_ungrounded_workspace_operation_claim, unsupported_send_claim, send_not_executed_response, unsupported_draft_edit_claim
 from assistant.artifact_export import export_kind, presentation_to_text
 from assistant.writing_corrections import try_recipient_correction, extract_contextual_writing_recipient as _extract_contextual_writing_recipient
@@ -837,6 +838,9 @@ class AssistantEngine:
                 self.session_manager.start_session()
         request_started_at = time.perf_counter()
         self._begin_turn_trace(user_message)
+        personal_response = handle_personal_memory(self, user_message)
+        if personal_response is not None:
+            return self._complete_turn(user_message, personal_response, "PERSONAL_MEMORY", technical=True, selected_path="MEMORY_COMMAND")
         if self._turn_trace is not None:
             # Phase 8.0 (section 5/7): capture the existing session-restart
             # signal for PresenceDecision's continuity logic. Reuses
@@ -8738,26 +8742,6 @@ class AssistantEngine:
 
     def _try_long_term_memory_command(self, user_message: str) -> str | None:
         lowered = _normalize_text(user_message.strip())
-        if lowered.startswith("lembra-te que"):
-            content = user_message.strip()[len("lembra-te que") :].strip(" .:")
-            return self._remember_explicit_personal_model(content)
-
-        if lowered.startswith("lembra que"):
-            content = user_message.strip()[len("lembra que") :].strip(" .:")
-            return self._remember_explicit_personal_model(content)
-
-        if lowered.startswith("nao te esquecas que"):
-            content = user_message.strip()[len("nao te esquecas que") :].strip(" .:")
-            return self._remember_explicit_personal_model(content)
-
-        if lowered.startswith("não te esqueças que"):
-            content = user_message.strip()[len("não te esqueças que") :].strip(" .:")
-            return self._remember_explicit_personal_model(content)
-
-        if lowered.startswith("guarda isto"):
-            content = user_message.strip()[len("guarda isto") :].strip(" .:")
-            return self._remember_explicit_personal_model(content)
-
         if lowered.startswith("esquece"):
             query = user_message.strip()[len("esquece") :].strip(" .:")
             personal_response = self._forget_from_personal_model(query)
