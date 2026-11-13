@@ -135,6 +135,9 @@ def handle_personal_memory(engine, message: str) -> str | None:
     state = getattr(engine._work_session, "memory_consent", None)
     if state is None:
         state = engine._work_session.memory_consent = MemoryConsent()
+    if not engine.presence.can_store_memory():
+        state.pending = ""
+        return None
     command = inventory_or_forget(engine, message, state)
     if command is not None:
         return command

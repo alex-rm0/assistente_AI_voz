@@ -473,6 +473,7 @@ class AssistantEngine:
         self.response_composer = ResponseComposer(
             llm,
             personal_model=personal_model,
+            personal_memory_allowed=lambda: self.presence.can_store_memory(),
             voice_critic=VoiceCritic(voice_critic_llm) if voice_critic_llm is not None else None,
         )
         self.semantic_extractor = semantic_extractor or _local_ollama_semantic_extractor(llm)
@@ -8747,13 +8748,6 @@ class AssistantEngine:
             return self._answer_from_long_term_memory(query, show_details=_asks_memory_details(lowered))
 
         return None
-
-    def _remember_explicit_personal_model(self, content: str) -> str:
-        if self.personal_model is None:
-            return self.long_term_memory.remember(content)
-        personal_response = self.personal_model.remember_explicit(content)
-        self.long_term_memory.remember(content, category=infer_category(content))
-        return personal_response
 
     def _forget_from_personal_model(self, query: str) -> str | None:
         if self.personal_model is None:

@@ -242,3 +242,22 @@ def test_active_workflow_is_not_interrupted_by_personal_proposal(memory_engine):
     reply = engine.respond("My coach is Miguel")
     assert "Shall I save" not in reply
     assert engine.personal_model.list_entries() == []
+
+
+def test_private_mode_does_not_retrieve_saved_personal_facts(memory_engine):
+    from assistant.presence_manager import PresenceState
+    engine, local = memory_engine()
+    engine.respond("Remember that my coach is Miguel Alfayate")
+    engine.clear_conversation()
+    engine.presence.set_state(PresenceState.PRIVATE_MODE)
+    response = engine.respond("Who is my coach?")
+    assert "Miguel Alfayate" not in response
+    assert "Miguel Alfayate" not in str(local.calls)
+
+
+def test_offline_does_not_bypass_presence_with_inventory(memory_engine):
+    from assistant.presence_manager import PresenceState
+    engine, _ = memory_engine()
+    engine.respond("Remember that my coach is Miguel Alfayate")
+    engine.presence.set_state(PresenceState.OFFLINE)
+    assert "Miguel Alfayate" not in engine.respond("What do you know about me?")

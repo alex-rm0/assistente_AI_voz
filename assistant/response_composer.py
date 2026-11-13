@@ -176,9 +176,10 @@ class ComposerRequest:
 class ResponseComposer:
     """Directs the final response instead of repairing text after generation."""
 
-    def __init__(self, llm: ChatModel, voice_critic: VoiceCritic | None = None, personal_model=None) -> None:
+    def __init__(self, llm: ChatModel, voice_critic: VoiceCritic | None = None, personal_model=None, personal_memory_allowed=None) -> None:
         self.llm = llm
         self.personal_model = personal_model
+        self.personal_memory_allowed = personal_memory_allowed
         self.voice_critic = voice_critic or VoiceCritic(llm)
 
     def compose(self, request: ComposerRequest) -> str:
@@ -189,7 +190,8 @@ class ResponseComposer:
         if social_response is not None:
             return social_response
 
-        request = relevant_personal_request(request, self.personal_model)
+        if self.personal_memory_allowed is None or self.personal_memory_allowed():
+            request = relevant_personal_request(request, self.personal_model)
 
         if not request.user_message.strip() and not request.facts and not request.context and not request.history:
             return _simple_fallback(request)
