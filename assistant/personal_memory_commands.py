@@ -76,7 +76,14 @@ def inventory_or_forget(engine, message: str, state: MemoryConsent) -> str | Non
         lines = ([profile.text] if profile else []) + ([entry.description for entry in model.list_entries()] if model else [])
         if not lines:
             return "We're still at the beginning; I have no confirmed personal facts saved yet." if english else "Ainda estamos no início; ainda não tenho factos pessoais confirmados guardados."
-        return ("Here's what you've shared:\n" if english else "Isto é o que partilhaste comigo:\n") + "\n".join("- " + line for line in lines)
+        sections = []
+        if profile:
+            label = "Your core profile (original wording):" if english else "O teu perfil-núcleo (texto original):"
+            sections.append(label + "\n" + "\n".join("> " + line for line in profile.text.splitlines()))
+        if model and model.list_entries():
+            label = "Saved facts (original wording):" if english else "Factos guardados (texto original):"
+            sections.append(label + "\n" + "\n".join(f'- "{entry.description}"' for entry in model.list_entries()))
+        return "\n\n".join(sections)
     match = re.match(r"^(?:esquece|forget)\s+(.+)$", text)
     if not match:
         return None

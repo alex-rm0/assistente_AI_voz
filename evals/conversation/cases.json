@@ -12,7 +12,7 @@
       "description": "Explicit consent must persist before a quoted receipt; forgetting removes the actual fact.",
       "turns": [
         {"user": "O meu treinador chama-se Miguel Alfayate. Podes-te lembrar disso.", "follow_up": "none", "answer_any": [["guardei"], ["miguel alfayate"]]},
-        {"user": "O que sabes sobre mim?", "answer_any": [["miguel alfayate"]]},
+        {"user": "O que sabes sobre mim?", "answer_any": [["miguel alfayate"]], "soft": ["language", "second_person", "profile_discretion"]},
         {"user": "Esquece o meu treinador", "follow_up": "none", "answer_any": [["apaguei"]]}
       ]
     },
@@ -21,7 +21,7 @@
       "description": "Explicit English command and exact anaphoric deletion need no model.",
       "turns": [
         {"user": "Remember that my coach is Miguel Alfayate", "follow_up": "none", "answer_any": [["saved"], ["miguel alfayate"]]},
-        {"user": "What do you know about me?", "answer_any": [["miguel alfayate"]]},
+        {"user": "What do you know about me?", "answer_any": [["miguel alfayate"]], "soft": ["language", "second_person", "profile_discretion"]},
         {"user": "Forget that", "follow_up": "none", "answer_any": [["forgotten"]]}
       ]
     },
@@ -31,7 +31,7 @@
       "turns": [
         {"user": "O meu treinador é Miguel Alfayate", "follow_up": "required", "answer_any": [["queres que guarde"]]},
         {"user": "sim", "follow_up": "none", "answer_any": [["guardei"], ["miguel alfayate"]]},
-        {"user": "O que sabes sobre mim?", "answer_any": [["miguel alfayate"]]},
+        {"user": "O que sabes sobre mim?", "answer_any": [["miguel alfayate"]], "soft": ["language", "second_person", "profile_discretion"]},
         {"user": "Esquece isso", "follow_up": "none", "answer_any": [["apaguei"]]}
       ]
     },
@@ -41,7 +41,7 @@
       "turns": [
         {"user": "My coach is Miguel Alfayate", "follow_up": "required", "answer_any": [["shall i save"]]},
         {"user": "yes", "follow_up": "none", "answer_any": [["saved"], ["miguel alfayate"]]},
-        {"user": "What do you know about me?", "answer_any": [["miguel alfayate"]]},
+        {"user": "What do you know about me?", "answer_any": [["miguel alfayate"]], "soft": ["language", "second_person", "profile_discretion"]},
         {"user": "Forget my coach", "follow_up": "none", "answer_any": [["forgotten"]]}
       ]
     },

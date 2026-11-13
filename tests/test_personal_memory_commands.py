@@ -134,6 +134,7 @@ def test_inventory_and_forgetting_are_real_and_deterministic(memory_engine, lang
     response = engine.respond(inventory)
     assert "Miguel Alfayate" in response
     assert "software engineering" in response
+    assert '> Alexandre studies software engineering.' in response
     assert local.calls == []
     receipt = engine.respond(forget)
     assert "Miguel Alfayate" in receipt
@@ -233,6 +234,15 @@ def test_memory_survives_reopening_and_source_is_explicit(memory_engine):
     entry, = reopened.list_entries()
     assert entry.source == "user_confirmed"
     assert entry.created_at and "Consent: yes" in entry.evidence
+
+
+def test_engine_recalls_saved_fact_after_conversation_is_cleared(memory_engine):
+    engine, local = memory_engine(replies=["Your coach is Miguel Alfayate."])
+    engine.respond("Remember that my coach is Miguel Alfayate")
+    engine.clear_conversation()
+    response = engine.respond("Who is my coach?")
+    assert "Miguel Alfayate" in response
+    assert "Miguel Alfayate" in str(local.calls)
 
 
 def test_active_workflow_is_not_interrupted_by_personal_proposal(memory_engine):
