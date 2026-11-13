@@ -183,6 +183,13 @@ def test_composer_cannot_claim_a_write_or_block_conditional_offer(memory_engine)
     assert "if you like" in engine.response_composer.compose(request)
 
 
+def test_readonly_tool_is_not_a_memory_write_receipt(memory_engine):
+    engine, _ = memory_engine()
+    engine._begin_turn_trace("What window is open?")
+    reply = engine._finalize_response("What window is open?", "I'll remember that.", "AGENT_DIRECT", tools_used=("get_active_window",))
+    assert "haven't saved" in reply
+
+
 @pytest.mark.parametrize("previous", ["O que sabes sobre mim", "When is my exam", "yes", "sim"])
 def test_reference_does_not_turn_question_or_confirmation_into_fact(memory_engine, previous):
     engine, local = memory_engine()

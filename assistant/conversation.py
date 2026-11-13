@@ -6947,7 +6947,7 @@ class AssistantEngine:
                 self._last_response_blocked = True
                 self._record_memory_grounding(False, [], True, history_claim_reason)
 
-        if not technical and not tools_used and final_response_source in {"RESPONSE_COMPOSER", "AGENT_DIRECT", "COMPOSER_REGENERATED"}:
+        if not technical and final_response_source in {"RESPONSE_COMPOSER", "AGENT_DIRECT", "COMPOSER_REGENERATED"}:
             guarded = guard_memory_claim(final_response, self.response_language, persisted=bool((self._turn_trace or {}).get("personal_memory_written")))
             if guarded != final_response:
                 final_response, final_response_source = guarded, "MEMORY_CLAIM_BLOCKED"
