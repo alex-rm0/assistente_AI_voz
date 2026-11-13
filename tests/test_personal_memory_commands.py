@@ -14,6 +14,7 @@ def memory_engine(tmp_path, monkeypatch):
         path = tmp_path / ("engine" + path.name)
         engine, _, local, _ = make_engine(path, mode="local", ollama_replies=replies)
         engine.personal_model = PersonalModel(path / "data")
+        engine.response_composer.personal_model = engine.personal_model
         engine._set_response_language(language)
         return engine, local
     return build
@@ -103,3 +104,16 @@ def test_ordinary_messages_do_not_propose_memory(memory_engine, message):
     assert "shall I save" not in response.lower()
     assert "queres que guarde" not in response.lower()
     assert engine.personal_model.entries_about() == []
+
+
+def test_saved_coach_reaches_composer_across_languages(memory_engine):
+    from assistant.response_composer import ComposerRequest
+    engine, local = memory_engine(replies=["Your coach is Miguel Alfayate."])
+    engine.respond("O meu treinador chama-se Miguel Alfayate. Podes-te lembrar disso.")
+    reply = engine.response_composer.compose(ComposerRequest(intent="conversation", user_message="Who is my coach?", response_language="en-GB"))
+    assert "Miguel Alfayate" in reply
+    assert len(local.calls) == 1
+    assert "Miguel Alfayate" in str(local.calls)
+    before = len(local.calls)
+    engine.response_composer.compose(ComposerRequest(intent="conversation", user_message="What is the capital of France?", response_language="en-GB"))
+    assert "Miguel Alfayate" not in str(local.calls[before:])

@@ -7,6 +7,7 @@ from typing import Protocol
 
 from assistant.core_profile import about_alexandre_section, load_core_profile
 from assistant.personal_facts import missing_personal_fact_reply
+from assistant.personal_memory_commands import relevant_personal_request
 from assistant.privacy import PERSONAL, PRIVATE
 from assistant.sir_budget import limit_sir  # noqa: F401 - the reply style's last step, applied by the engine when it finalises a reply
 from assistant.model_provider import ProviderConfigurationError, ProviderTimeoutError
@@ -175,8 +176,9 @@ class ComposerRequest:
 class ResponseComposer:
     """Directs the final response instead of repairing text after generation."""
 
-    def __init__(self, llm: ChatModel, voice_critic: VoiceCritic | None = None) -> None:
+    def __init__(self, llm: ChatModel, voice_critic: VoiceCritic | None = None, personal_model=None) -> None:
         self.llm = llm
+        self.personal_model = personal_model
         self.voice_critic = voice_critic or VoiceCritic(llm)
 
     def compose(self, request: ComposerRequest) -> str:
@@ -186,6 +188,8 @@ class ResponseComposer:
         social_response = _simple_social_response(request)
         if social_response is not None:
             return social_response
+
+        request = relevant_personal_request(request, self.personal_model)
 
         if not request.user_message.strip() and not request.facts and not request.context and not request.history:
             return _simple_fallback(request)

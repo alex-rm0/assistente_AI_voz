@@ -471,6 +471,7 @@ class AssistantEngine:
         self.personal_model = personal_model
         self.response_composer = ResponseComposer(
             llm,
+            personal_model=personal_model,
             voice_critic=VoiceCritic(voice_critic_llm) if voice_critic_llm is not None else None,
         )
         self.semantic_extractor = semantic_extractor or _local_ollama_semantic_extractor(llm)
