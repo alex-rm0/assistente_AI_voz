@@ -1,0 +1,9 @@
+{
+  "checked_at": "2026-11-12T09:00:00+00:00",
+  "component": "provider.ollama",
+  "contract": "ComponentHealth",
+  "contract_version": "1.0",
+  "reason": null,
+  "since": null,
+  "state": "healthy"
+}
