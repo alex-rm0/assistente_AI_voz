@@ -152,6 +152,7 @@ def build_engine(case_dir: Path, llm, language: str):
     from assistant.conversation import AssistantEngine
     from assistant.long_term_memory import LongTermMemory
     from assistant.memory import ConversationMemory
+    from assistant.personal_model import PersonalModel
     from assistant.presence_manager import PresenceManager
     from assistant.prompts import get_base_system_prompt
     from assistant.tool_registry import tool_registry
@@ -167,6 +168,7 @@ def build_engine(case_dir: Path, llm, language: str):
         llm=llm,
         memory=ConversationMemory(data_path, "history.json", 20),
         long_term_memory=long_term_memory,
+        personal_model=PersonalModel(data_path),
         tools=tool_registry,
         workspace_path=workspace_path,
         base_system_prompt=get_base_system_prompt(),

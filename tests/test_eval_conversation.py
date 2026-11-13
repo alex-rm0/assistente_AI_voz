@@ -50,6 +50,18 @@ def test_case_set_covers_what_r3_asked_for() -> None:
     }
 
 
+def test_personal_memory_evaluation_uses_real_storage_without_models(isolated_eval_env):
+    cases = [case for case in runner.load_cases() if case["category"] == "personal_memory_consent"]
+    assert len(cases) == 4
+    report = runner.run_cases(cases, runner.make_llm_factory("fake"), provider="fake")
+    assert report["summary"]["errors"] == 0
+    assert report["summary"]["usage"]["llm_calls"] == 0
+    for case in report["cases"]:
+        for turn in case["turns"]:
+            assert turn["selected_path"] == "MEMORY_COMMAND"
+            assert next(outcome["status"] for outcome in turn["outcomes"] if outcome["property"] == "answers_question") == PASS
+
+
 def test_load_cases_rejects_an_unknown_property(tmp_path) -> None:
     path = tmp_path / "cases.json"
     case = {"id": "a", "language": "pt-PT", "turns": [{"user": "Olá", "review": ["politeness"]}]}

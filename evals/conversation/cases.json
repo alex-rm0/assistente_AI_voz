@@ -8,6 +8,44 @@
   ],
   "cases": [
     {
+      "id": "memory_explicit_receipt_pt", "language": "pt-PT", "category": "personal_memory_consent", "source": "authored",
+      "description": "Explicit consent must persist before a quoted receipt; forgetting removes the actual fact.",
+      "turns": [
+        {"user": "O meu treinador chama-se Miguel Alfayate. Podes-te lembrar disso.", "follow_up": "none", "answer_any": [["guardei"], ["miguel alfayate"]]},
+        {"user": "O que sabes sobre mim?", "answer_any": [["miguel alfayate"]]},
+        {"user": "Esquece o meu treinador", "follow_up": "none", "answer_any": [["apaguei"]]}
+      ]
+    },
+    {
+      "id": "memory_explicit_receipt_en", "language": "en-GB", "category": "personal_memory_consent", "source": "authored",
+      "description": "Explicit English command and exact anaphoric deletion need no model.",
+      "turns": [
+        {"user": "Remember that my coach is Miguel Alfayate", "follow_up": "none", "answer_any": [["saved"], ["miguel alfayate"]]},
+        {"user": "What do you know about me?", "answer_any": [["miguel alfayate"]]},
+        {"user": "Forget that", "follow_up": "none", "answer_any": [["forgotten"]]}
+      ]
+    },
+    {
+      "id": "memory_proposal_consent_pt", "language": "pt-PT", "category": "personal_memory_consent", "source": "authored",
+      "description": "A durable statement is only saved after a yes, then listed and deleted.",
+      "turns": [
+        {"user": "O meu treinador é Miguel Alfayate", "follow_up": "required", "answer_any": [["queres que guarde"]]},
+        {"user": "sim", "follow_up": "none", "answer_any": [["guardei"], ["miguel alfayate"]]},
+        {"user": "O que sabes sobre mim?", "answer_any": [["miguel alfayate"]]},
+        {"user": "Esquece isso", "follow_up": "none", "answer_any": [["apaguei"]]}
+      ]
+    },
+    {
+      "id": "memory_proposal_consent_en", "language": "en-GB", "category": "personal_memory_consent", "source": "authored",
+      "description": "English statement, consent, inventory and forgetting are all deterministic.",
+      "turns": [
+        {"user": "My coach is Miguel Alfayate", "follow_up": "required", "answer_any": [["shall i save"]]},
+        {"user": "yes", "follow_up": "none", "answer_any": [["saved"], ["miguel alfayate"]]},
+        {"user": "What do you know about me?", "answer_any": [["miguel alfayate"]]},
+        {"user": "Forget my coach", "follow_up": "none", "answer_any": [["forgotten"]]}
+      ]
+    },
+    {
       "id": "log_greeting_how_are_you_en",
       "language": "en-GB",
       "category": "greeting",
